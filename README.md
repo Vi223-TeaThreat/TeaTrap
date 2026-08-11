@@ -132,6 +132,21 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolutio
 `space.png` (общий вид), `space_close.png`, `space_macro.png`,
 `space_cliff.png` (обрыв — по нему видно слоистость и кромку зелени).
 
+## История изменений
+
+Проект — репозиторий git (`E:\vi\pilot`). Служебная папка `.godot` не
+отслеживается. Посмотреть историю:
+
+```bash
+git -C E:/vi/pilot log --oneline
+```
+
+Вернуться к состоянию на любой коммит (не теряя текущего):
+
+```bash
+git -C E:/vi/pilot switch --detach <хеш-коммита>
+```
+
 ## Резервные копии
 
 `E:\vi\backups\pilot_ГГГГ-ММ-ДД_ЧЧММ` — снимки перед каждым существенным
