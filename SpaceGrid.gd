@@ -40,6 +40,7 @@ var _seed_hash: Dictionary = {}
 var _vert_hash: Dictionary = {}
 var _cell_size: float = 1.8
 var _node_index: Dictionary = {}  # узел решётки Vector3i -> номер семени
+var _col_top: Dictionary = {}     # столбец Vector2i -> верхний заполненный уровень
 var _play: PackedByteArray = PackedByteArray()    # семя внутри играбельного объёма
 var _built: PackedByteArray = PackedByteArray()   # ячейку уже вырезали
 const NO_CELL := {"faces": [], "valid": false}
@@ -63,15 +64,22 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	var rng := RandomNumberGenerator.new()
 	rng.seed = grid_seed
 
+	# Рельеф в ДВА масштаба: крупная волна задаёт холмы, мелкая ломает её
+	# горизонтали на неправильные пятна.
 	var shape := FastNoiseLite.new()
 	shape.seed = grid_seed
 	shape.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	shape.frequency = 0.045
+	var detail := FastNoiseLite.new()
+	detail.seed = grid_seed + 7717
+	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	detail.frequency = 0.26
 
 	# Семена берём с запасом за краем: у крайних ячеек нет всех соседей,
 	# их не удаётся замкнуть, и мы их отбрасываем.
 	var margin := spacing * 2.0
-	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin, rng)
+	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin, rng,
+		shape, detail, top)
 	_build_seed_hash()
 	_build_cells()
 	_mark_terrain(radius, top, bottom, shape)
@@ -85,28 +93,58 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 # лепёшками. Поэтому подошедшее вплотную семя ОТОДВИГАЕМ: разброс остаётся,
 # вырожденные пары исчезают.
 const MIN_SEP: float = 0.62       # доля шага, ближе семена не подпускаем
-const JITTER: float = 0.30        # доля шага, на которую семя гуляет от узла
+const JITTER: float = 0.34        # разброс семени в плане
+# По ВЫСОТЕ разброс много меньше, и это главное для гладкости.
+# Верхняя грань ячейки — плоскость посередине между её семенем и пустым
+# семенем над ним. Гуляет семя по высоте — гуляют и верхние грани соседей,
+# и поверхность собирается из фасеток на разной высоте: бугры, щели между
+# ними и шипы там, где фасетка задралась. Совсем убрать нельзя — ячейки
+# станут вертикальными призмами и мир вернётся к плоской версии.
+const JITTER_Y: float = 0.09
+const OFF_MAX: float = 0.44       # дальше этого семя от своего узла не уходит
 
-func _scatter(radius: float, top: float, bottom: float, rng: RandomNumberGenerator) -> void:
+func _scatter(radius: float, top_edge: float, bottom: float, rng: RandomNumberGenerator,
+		shape: FastNoiseLite, detail: FastNoiseLite, top: float) -> void:
 	seeds = PackedVector3Array()
 	lattice = PackedVector3Array()
 	_node_index = {}
+	_col_top = {}
 	var gap := _spacing * MIN_SEP
 	var nx := int(ceil(radius / _spacing)) + 1
 	var ny_lo := int(floor(bottom / _spacing)) - 1
-	var ny_hi := int(ceil(top / _spacing)) + 1
+	var ny_hi := int(ceil(top_edge / _spacing)) + 1
 	for i in range(-nx, nx + 1):
-		for j in range(ny_lo, ny_hi + 1):
-			for k in range(-nx, nx + 1):
+		for k in range(-nx, nx + 1):
+			# ВЕСЬ СТОЛБЕЦ СЕМЯН СДВИГАЕТСЯ ПО ВЫСОТЕ так, чтобы граница породы
+			# легла ровно на расчётную высоту рельефа.
+			#
+			# Верхняя грань ячейки — плоскость посередине между её семенем и
+			# пустым семенем над ним. Пока семена сидели на уровнях решётки,
+			# эта граница могла оказаться только на половинных уровнях: остров
+			# выходил ступенчатым, плоские площадки и уступы между ними. Сдвинув
+			# столбец на нужную долю шага, мы сажаем границу точно на рельеф —
+			# уступы исчезают, поверхность идёт плавно.
+			#
+			# Сдвиг у соседних столбцов разный, но семена от этого не съезжают
+			# друг относительно друга: где сдвиг перескакивает на целый шаг, там
+			# на шаг меняется и номер уровня, а высоты остаются прежними.
+			var cx := float(i) * _spacing
+			var cz := float(k) * _spacing
+			var height: float = shape.get_noise_2d(cx, cz) * (top * 0.8) \
+				+ detail.get_noise_2d(cx, cz) * (_spacing * 0.9)
+			var steps: float = height / _spacing
+			var last := int(round(steps - 0.5))       # верхний заполненный уровень
+			var shift: float = steps - 0.5 - float(last)
+			_col_top[Vector2i(i, k)] = last
+
+			for j in range(ny_lo, ny_hi + 1):
 				var node := Vector3(i, j, k) * _spacing
-				# Разброс умеренный. При большом семя на кромке улетает далеко
-				# от своего узла, его ячейка вылезает наружу и после
-				# сглаживания превращается в колючий шип.
 				var p := node + Vector3(rng.randf_range(-JITTER, JITTER),
-					rng.randf_range(-JITTER, JITTER), rng.randf_range(-JITTER, JITTER)) * _spacing
+					shift + rng.randf_range(-JITTER_Y, JITTER_Y),
+					rng.randf_range(-JITTER, JITTER)) * _spacing
 				if Vector2(p.x, p.z).length() > radius:
 					continue
-				if p.y < bottom or p.y > top:
+				if p.y < bottom or p.y > top_edge:
 					continue
 				# Отодвигаем от уже поставленных соседей по решётке.
 				for dx in range(-1, 2):
@@ -116,16 +154,32 @@ func _scatter(radius: float, top: float, bottom: float, rng: RandomNumberGenerat
 							if not _node_index.has(key):
 								continue
 							var other: Vector3 = seeds[_node_index[key]]
+							# Раздвигаем ТОЛЬКО в плане: подняв семя, мы вернули бы
+							# ту самую пляску высот, из-за которой поверхность
+							# идёт буграми.
+							# Раздвигаем ТОЛЬКО в плане: подняв семя, мы сбили бы
+							# ему высоту, ради которой весь столбец и сдвигался.
 							var away: Vector3 = p - other
+							away.y = 0.0
 							var far: float = away.length()
 							if far > 0.0001 and far < gap:
+								var lift: float = p.y
 								p = other + away / far * gap
+								p.y = lift
+				# Как бы ни толкали соседи, далеко от своего узла семя в плане
+				# не уходит: иначе его ячейка вылезает за общую поверхность
+				# отдельным шипом.
+				var off := Vector2(p.x - node.x, p.z - node.z)
+				var span: float = off.length()
+				if span > _spacing * OFF_MAX:
+					off = off / span * (_spacing * OFF_MAX)
+					p.x = node.x + off.x
+					p.z = node.z + off.y
 				_node_index[Vector3i(i, j, k)] = seeds.size()
 				seeds.append(p)
 				# Узел решётки запоминаем: по нему размечается порода. Если
-				# мерить по разбросанному семени, береговая линия и верх
-				# острова становятся рваными на масштабе ячейки — остров
-				# покрывается бородавками и ямками.
+				# мерить по разбросанному семени, соседи случайно оказываются
+				# по разные стороны поверхности и она идёт бородавками.
 				lattice.append(node)
 
 
@@ -529,20 +583,21 @@ func _mark_terrain(radius: float, top: float, bottom: float, shape: FastNoiseLit
 		# семена случайно оказываются по разные стороны поверхности, и граница
 		# породы получается рваной на масштабе ячейки. Форма ячеек при этом
 		# остаётся неправильной — рваной становилась именно кромка.
-		# По высоте берём МЕЖДУ узлом и семенем: чистый узел даёт ровные
-		# ступени-террасы вдоль горизонталей, чистое семя — рваную кромку.
-		# Малой доли разброса хватает, чтобы разбить ступени, не разлохматив
-		# поверхность.
+		# Меряем по УЗЛУ решётки: соседние семена не должны случайно оказываться
+		# по разные стороны поверхности.
 		var s: Vector3 = lattice[i]
-		s.y = lerpf(s.y, seeds[i].y, 0.6)
 		if s.y < bottom or s.y > top:
 			continue
-		# Береговая линия слегка гуляет, а верх острова — холмистый.
+		# Береговая линия слегка гуляет.
 		var edge := radius * (1.0 + 0.10 * shape.get_noise_2d(s.x * 2.0, s.z * 2.0))
 		if Vector2(s.x, s.z).length() > edge:
 			continue
-		var surface := shape.get_noise_2d(s.x, s.z) * (top * 0.8)
-		if s.y <= surface:
+		# Докуда заполнен столбец, уже посчитано при разбросе семян — там же,
+		# где считался их сдвиг по высоте. Иначе граница и геометрия разошлись бы.
+		var key := Vector2i(int(round(s.x / _spacing)), int(round(s.z / _spacing)))
+		if not _col_top.has(key):
+			continue
+		if int(round(s.y / _spacing)) <= int(_col_top[key]):
 			solid[i] = true
 
 
