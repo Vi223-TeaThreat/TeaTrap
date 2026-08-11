@@ -1,4 +1,4 @@
-extends Node3D
+﻿extends Node3D
 # =============================================================================
 #  ТРЁХМЕРНЫЙ МИР — ячейки-глыбы вместо плоских плиток.
 #
@@ -11,13 +11,12 @@ extends Node3D
 # =============================================================================
 
 const SpaceGridScript = preload("res://SpaceGrid.gd")
-const ShellScript = preload("res://Shell.gd")
 const SpacePlantsScript = preload("res://SpacePlants.gd")
 const SpacePropsScript = preload("res://SpaceProps.gd")
 const SpaceBuildingsScript = preload("res://SpaceBuildings.gd")
 const SpaceRocksScript = preload("res://SpaceRocks.gd")
+const SurfaceScript = preload("res://Surface.gd")
 const PlantsData = preload("res://Plants.gd")
-const SMOOTH_PASSES: int = 1         # сколько раз сглаживать оболочку
 
 # --- Параметры мира ---
 const ISLAND_RADIUS: float = 13.0
@@ -50,18 +49,15 @@ var camera: Camera3D
 var grid
 var solid: Dictionary = {}
 var nodes: Dictionary = {}        # ячейка -> невидимое тело для кликов
-# Кусок держим примерно в три ячейки поперёк: тогда пересборка одного куска
-# стоит столько же, сколько при крупной сетке, и отклик на клик не падает.
-const CHUNK: float = 2.0          # размер куска оболочки
+# Кусок поверхности — блок кубиков решётки. Швов между кусками не бывает по
+# построению: точка на ребре считается по одной пропорции с обеих сторон.
+const CHUNK_NODES: int = 4
 
-var chunk_cells: Dictionary = {}  # кусок -> {ячейка: true}
+var chunk_list: Dictionary = {}   # какие куски вообще есть
 var chunk_nodes: Dictionary = {}  # кусок -> меш этого куска
 var _dirty_chunks: Dictionary = {}
 var face_geo: Dictionary = {}     # Vector2i(ячейка, грань) -> её вид после сглаживания
 var edge_faces: Dictionary = {}   # ребро -> какие грани его делят
-var cell_edges: Dictionary = {}   # ячейка -> её рёбра (чтобы снимать точечно)
-var _dirty_edges: Dictionary = {} # у каких ячеек пересчитать рёбра
-var _dirty_bodies: Dictionary = {}
 var _buried_cache: Dictionary = {}
 var brush: int = 1                # ширина кисти в ячейках: 1, 2 или 3
 const FILL_BUDGET: int = 24       # мс на достройку мира за кадр
@@ -226,7 +222,7 @@ func _process(delta: float) -> void:
 		fill_label.visible = fill_done < 1.0
 		if fill_done < 1.0:
 			fill_label.text = "остров достраивается — %d%%" % int(fill_done * 100.0)
-	if not _dirty_chunks.is_empty() or not _dirty_bodies.is_empty():
+	if not _dirty_chunks.is_empty():
 		_flush_chunks()
 
 
@@ -257,10 +253,34 @@ func _build_world() -> void:
 	var built := Time.get_ticks_msec()
 
 	for i in solid:
-		_track_chunk(i, true)
+		_touch_chunks(i, false)
 	print("Объёмная сетка: семян — ", grid.seeds.size(), ", породы — ", solid.size(),
-		", кусков — ", chunk_cells.size())
-	print("Время: семена и порода ", Time.get_ticks_msec() - started, " мс")
+		", кусков — ", chunk_list.size())
+	print("Время: семена и заполнение ", Time.get_ticks_msec() - started, " мс")
+
+
+# Кусок, которому принадлежит кубик решётки.
+func _chunk_of_cube(c: Vector3i) -> Vector3i:
+	return Vector3i(floori(float(c.x) / CHUNK_NODES), floori(float(c.y) / CHUNK_NODES),
+		floori(float(c.z) / CHUNK_NODES))
+
+
+# Ячейка входит углом в восемь кубиков — их куски и надо пересобрать.
+func _touch_chunks(cell: int, dirty: bool = true) -> void:
+	var n: Vector3i = grid.node_of(cell)
+	for dx in range(-1, 1):
+		for dy in range(-1, 1):
+			for dz in range(-1, 1):
+				var ch := _chunk_of_cube(n + Vector3i(dx, dy, dz))
+				chunk_list[ch] = true
+				if dirty:
+					_dirty_chunks[ch] = true
+
+
+# Доля породы у семени: 0 земля, 1 скала. По ней шейдер решает, где камень.
+func _stone_of(cell: int) -> float:
+	var card: Dictionary = PlantsData.ITEMS.get(material_of(cell), PlantsData.ITEMS["ground"])
+	return float(card.get("stone", 0.0))
 
 
 # Мир достраивается КУСКАМИ, от середины наружу, отпуская кадр между ними.
@@ -270,29 +290,21 @@ func _build_world() -> void:
 # панель отвечает, остров прорастает на глазах от центра к краям.
 func _fill_world() -> void:
 	var started := Time.get_ticks_msec()
-	var order: Array = chunk_cells.keys()
+	var order: Array = chunk_list.keys()
 	order.sort_custom(func(a, b):
 		return Vector3(a).length_squared() < Vector3(b).length_squared())
 
 	var budget := Time.get_ticks_msec() + FILL_BUDGET
 	for n in range(order.size()):
-		var ch = order[n]
-		for c in chunk_cells[ch]:
-			if not _buried(c):
-				_rebuild_body(c)
-		_rebuild_chunk(ch)
+		_rebuild_chunk(order[n])
 		if Time.get_ticks_msec() > budget:
 			fill_done = float(n + 1) / float(order.size())
 			await get_tree().process_frame
 			budget = Time.get_ticks_msec() + FILL_BUDGET
 
-	_rebuild_edge_map()
 	fill_done = 1.0
-	print("Достройка: ", Time.get_ticks_msec() - started, " мс, вырезано ячеек — ",
-		grid.built_count(), ", из них вырезание ", grid.carve_usec / 1000, " мс")
-	print("Граней у ячейки — ", grid.face_histogram())
-	if "--reach" in OS.get_cmdline_user_args():
-		_measure_reach()
+	print("Достройка: ", Time.get_ticks_msec() - started, " мс, кусков — ",
+		chunk_nodes.size(), ", вырезано ячеек — ", grid.built_count())
 
 
 func _occupied(cell: int) -> bool:
@@ -322,23 +334,35 @@ func _buried(cell: int) -> bool:
 		return false
 	if _buried_cache.has(cell):
 		return _buried_cache[cell]
-	# Условие обязано ТОЧНО повторять то, по которому кусок рисует грань:
-	# грань появляется всюду, где сосед не ландшафт. Стоит смягчить проверку —
-	# и в оболочке возникает дыра. Так и вышло: пустой сосед за границей мира
-	# и сосед-здание считались «не в счёт», и грани к ним пропадали.
+	# Считаем по 26 соседям ПО РЕШЁТКЕ: это дёшево и не требует вырезания
+	# многогранников, которых у поверхности больше нет.
+	var node: Vector3i = grid.node_of(cell)
 	var deep := true
-	for j in grid.seeds_near(grid.seeds[cell], grid.neighbour_reach()):
-		if not _is_terrain(j):
-			deep = false
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				if dx == 0 and dy == 0 and dz == 0:
+					continue
+				var j: int = grid.node_seed(node + Vector3i(dx, dy, dz))
+				if j >= 0 and not solid.has(j):
+					deep = false
+					break
+			if not deep:
+				break
+		if not deep:
 			break
 	_buried_cache[cell] = deep
 	return deep
 
 
 func _forget_buried(cell: int) -> void:
-	for j in grid.seeds_near(grid.seeds[cell], grid.neighbour_reach()):
-		_buried_cache.erase(j)
-	_buried_cache.erase(cell)
+	var node: Vector3i = grid.node_of(cell)
+	for dx in range(-2, 3):
+		for dy in range(-2, 3):
+			for dz in range(-2, 3):
+				var j: int = grid.node_seed(node + Vector3i(dx, dy, dz))
+				if j >= 0:
+					_buried_cache.erase(j)
 
 
 # Связные группы ячеек одного материала. И дом, и скальный выход строятся по
@@ -373,86 +397,20 @@ func material_of(cell: int) -> String:
 	return m if m is String else "ground"
 
 
-# Невидимое тело: по нему работают клики. Нужно только у ячеек, у которых
-# есть выход наружу — до внутренних всё равно не дотянуться.
-func _rebuild_body(cell: int) -> void:
-	if nodes.has(cell):
-		nodes[cell].queue_free()
-		nodes.erase(cell)
-	if not solid.has(cell) or _buried(cell):
-		return
-
-	var faces: Array = grid.faces_of(cell)
-	var open := false
-	for f in faces:
-		if not _occupied(int(f["nb"])):
-			open = true
-			break
-	if not open:
-		return
-
-	var hull := PackedVector3Array()
-	var seen: Dictionary = {}
-	for f in faces:
-		for idx in f["loop"]:
-			if not seen.has(idx):
-				seen[idx] = true
-				hull.append(grid.verts[idx])
-	var shape := ConvexPolygonShape3D.new()
-	shape.points = hull
-
-	var body := StaticBody3D.new()
-	body.set_meta("cell", cell)
-	var col := CollisionShape3D.new()
-	col.shape = shape
-	body.add_child(col)
-	add_child(body)
-	nodes[cell] = body
-
-
-func _chunk_of(cell: int) -> Vector3i:
-	var p: Vector3 = grid.seeds[cell]
-	return Vector3i(int(floor(p.x / CHUNK)), int(floor(p.y / CHUNK)),
-		int(floor(p.z / CHUNK)))
-
-
-func _track_chunk(cell: int, add: bool) -> void:
-	var ch := _chunk_of(cell)
-	if add:
-		if not chunk_cells.has(ch):
-			chunk_cells[ch] = {}
-		chunk_cells[ch][cell] = true
-	elif chunk_cells.has(ch):
-		chunk_cells[ch].erase(cell)
-
-
-# Изменилась одна ячейка — перестроить надо куски, которых это коснулось.
-# Берём два кольца соседей: сглаживание тянется дальше самой ячейки.
+# Изменилась одна ячейка — пересобрать надо куски, которых это коснулось.
+# Заполнение соседей тоже участвует в её поверхности, поэтому берём кольцо
+# соседей по решётке, а не одну ячейку.
 func _mark_dirty_around(cell: int) -> void:
-	var near: Dictionary = {cell: true}
-	for nb in grid.neighbors_of(cell):
-		if nb >= 0:
-			near[nb] = true
-	var reach: Dictionary = {}
-	for c in near:
-		reach[c] = true
-		for nb in grid.neighbors_of(c):
-			if nb >= 0:
-				reach[nb] = true
-	for c in reach:
-		_dirty_chunks[_chunk_of(c)] = true
-		_dirty_edges[c] = true
+	var node: Vector3i = grid.node_of(cell)
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var j: int = grid.node_seed(node + Vector3i(dx, dy, dz))
+				if j >= 0:
+					_touch_chunks(j)
 
 
 func _flush_chunks() -> void:
-	for c in _dirty_bodies:
-		_rebuild_body(c)
-	_dirty_bodies.clear()
-	for c in _dirty_edges:
-		_drop_cell_edges(c)
-	for c in _dirty_edges:
-		_add_cell_edges(c)
-	_dirty_edges.clear()
 	for ch in _dirty_chunks:
 		_rebuild_chunk(ch)
 	_dirty_chunks.clear()
@@ -468,212 +426,51 @@ func _flush_chunks() -> void:
 		props.surface_changed()
 
 
-# Кто с кем граничит по ребру — по этому растения переползают с грани на грань.
+# Кусок поверхности: блок кубиков решётки, по каждому — свои тетраэдры.
+# Ни ореола, ни сглаживания больше не нужно: точка на ребре считается по одной
+# и той же пропорции с обеих сторон границы куска, а нормаль берётся от наклона
+# поля, поэтому и геометрия, и освещение сходятся сами.
 #
-# Пересобираем ТОЧЕЧНО, только вокруг правки. Полный обход всех ячеек породы
-# при мелкой сетке стоил бы десятки миллисекунд на каждый клик — а рывок на
-# действие игрока для этой игры недопустим.
-func _rebuild_edge_map() -> void:
-	edge_faces = {}
-	cell_edges = {}
-	for cell in solid:
-		_add_cell_edges(cell)
-
-
-func _drop_cell_edges(cell: int) -> void:
-	if not cell_edges.has(cell):
-		return
-	for ek in cell_edges[cell]:
-		if not edge_faces.has(ek):
-			continue
-		var list: Array = edge_faces[ek]
-		for i in range(list.size() - 1, -1, -1):
-			if list[i].x == cell:
-				list.remove_at(i)
-		if list.is_empty():
-			edge_faces.erase(ek)
-	cell_edges.erase(cell)
-
-
-func _add_cell_edges(cell: int) -> void:
-	if not _is_terrain(cell) or _buried(cell):
-		return
-	var cell_faces: Array = grid.faces_of(cell)
-	var mine: Array = []
-	for fi in range(cell_faces.size()):
-		if _is_terrain(int(cell_faces[fi]["nb"])):
-			continue
-		var loop: PackedInt32Array = cell_faces[fi]["loop"]
-		var n := loop.size()
-		var key := Vector2i(cell, fi)
-		for k in range(n):
-			var ek := Vector2i(mini(loop[k], loop[(k + 1) % n]),
-				maxi(loop[k], loop[(k + 1) % n]))
-			if not edge_faces.has(ek):
-				edge_faces[ek] = []
-			edge_faces[ek].append(key)
-			mine.append(ek)
-	cell_edges[cell] = mine
-
-
-# Оболочка режется на куски. Считаем кусок вместе с ОРЕОЛОМ соседних граней —
-# сглаживание тянется через границу куска, и без ореола на стыках был бы шов.
-# А рисуем только свои грани.
+# Коллизия — тот же меш. Это заодно чинит давнюю занозу: раньше по клику
+# ловилась нескруглённая ячейка, лежавшая снаружи видимой поверхности.
 func _rebuild_chunk(chunk: Vector3i) -> void:
 	if chunk_nodes.has(chunk):
 		chunk_nodes[chunk].queue_free()
 		chunk_nodes.erase(chunk)
-	if not chunk_cells.has(chunk) or chunk_cells[chunk].is_empty():
-		return
-	var own: Dictionary = chunk_cells[chunk]
-
-	# Погребённые ячейки пропускаем: у них нет ни одной грани наружу, так что
-	# ни в картинку, ни в ореол сглаживания они всё равно не попадают.
-	var halo: Dictionary = {}
-	for c in own:
-		if not _is_terrain(c) or _buried(c):
-			continue
-		halo[c] = true
-		for nb in grid.neighbors_of(c):
-			if _is_terrain(nb) and not _buried(nb):
-				halo[nb] = true
-
-	# Прежние записи о гранях этого куска снимаем целиком: грань могла
-	# перестать быть границей — например, к ней пристроили соседа. Ниже
-	# заново запомнятся только те, что и правда смотрят наружу.
-	for c in own:
-		_forget_faces(c)
-
-	var used: Dictionary = {}
-	var faces: Array = []
-	var keys: Array = []          # чья это грань: Vector2i(ячейка, номер грани)
-	var colors := PackedColorArray()
-	var mine := PackedByteArray()
-
-	var holds := PackedFloat32Array()
-	var stones := PackedFloat32Array()
-	for cell in halo:
-		var card: Dictionary = PlantsData.ITEMS.get(material_of(cell), PlantsData.ITEMS["ground"])
-		var stiff: float = card["hold"]
-		var stone: float = float(card.get("stone", 0.0))
-		# Цвет здесь только запасной: облик поверхности целиком решает шейдер
-		# (`Terrain.gdshader`) — по наклону и высоте, попиксельно. Раскрашивать
-		# гранями нельзя, иначе сквозь картинку проступают сами ячейки.
-		var base := Color(card["color"]).srgb_to_linear()
-		var cell_faces: Array = grid.faces_of(cell)
-		for fi in range(cell_faces.size()):
-			var f: Dictionary = cell_faces[fi]
-			if _is_terrain(int(f["nb"])):
-				continue
-			var loop: PackedInt32Array = f["loop"]
-			for idx in loop:
-				used[idx] = true
-			faces.append(loop)
-			keys.append(Vector2i(cell, fi))
-			colors.append(base)
-			mine.append(1 if own.has(cell) else 0)
-			holds.append(stiff)
-			stones.append(stone)
-
-	if faces.is_empty():
-		return
-
-	# Берём только те вершины, что участвуют в границе, и перенумеровываем.
-	var remap: Dictionary = {}
-	var verts := PackedVector3Array()
-	for idx in used:
-		remap[idx] = verts.size()
-		verts.append(grid.verts[idx])
-	var packed: Array = []
-	for loop in faces:
-		var out := PackedInt32Array()
-		for idx in loop:
-			out.append(remap[idx])
-		packed.append(out)
-
-	var emit := mine
-	for pass_i in range(SMOOTH_PASSES):
-		var step := ShellScript.subdivide(verts, packed, colors, holds)
-		if pass_i == 0:
-			_store_face_geometry(step, keys, packed, own)
-		# Метка «своё / ореол» и порода передаются потомкам каждой грани.
-		var owners: PackedInt32Array = step["owners"]
-		var next_emit := PackedByteArray()
-		var next_stone := PackedFloat32Array()
-		next_emit.resize(owners.size())
-		next_stone.resize(owners.size())
-		for i in range(owners.size()):
-			next_emit[i] = emit[owners[i]]
-			next_stone[i] = stones[owners[i]]
-		emit = next_emit
-		stones = next_stone
-		verts = step["verts"]
-		packed = step["faces"]
-		colors = step["colors"]
-		holds = step["hold"]
-
-	var mesh := ShellScript.build_mesh(verts, packed, colors, emit, stones)
+	var lo: Vector3i = chunk * CHUNK_NODES
+	var hi: Vector3i = lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES)
+	var mesh: ArrayMesh = SurfaceScript.build(grid, lo, hi, _stone_of)
 	if mesh == null:
 		return
+
 	var mi := MeshInstance3D.new()
 	mi.mesh = mesh
 	mi.material_override = rock_mat
+	var body := StaticBody3D.new()
+	var col := CollisionShape3D.new()
+	col.shape = mesh.create_trimesh_shape()
+	body.add_child(col)
+	mi.add_child(body)
 	add_child(mi)
 	chunk_nodes[chunk] = mi
 
 
-# Забыть, во что превращались грани этой ячейки. Обязательно звать, когда
-# грань перестала быть границей: растения живут ИМЕННО по этим записям, и
-# оставшаяся запись про исчезнувшую грань — это мох, висящий в воздухе.
-func _forget_faces(cell: int) -> void:
-	if not grid.is_built(cell):
-		return                        # не вырезана — записей о ней и нет
-	for fi in range(grid.faces_of(cell).size()):
-		face_geo.erase(Vector2i(cell, fi))
-
-
-# Запоминаем, во что превратилась каждая грань после сглаживания: углы,
-# точки рёбер и середину. На этих кусочках и живут растения.
-func _store_face_geometry(step: Dictionary, keys: Array, source: Array,
-		own: Dictionary) -> void:
-	var moved: PackedVector3Array = step["moved"]
-	var face_pt: PackedVector3Array = step["face_pt"]
-	var edge_pt: PackedVector3Array = step["edge_pt"]
-	var edge_id: Dictionary = step["edge_id"]
-	for i in range(source.size()):
-		var key: Vector2i = keys[i]
-		if not own.has(key.x):
-			continue                  # ореол чужой — его геометрию не запоминаем
-		var loop: PackedInt32Array = source[i]
-		var n := loop.size()
-		var corners := PackedVector3Array()
-		var mids := PackedVector3Array()
-		for k in range(n):
-			corners.append(moved[loop[k]])
-			var a: int = loop[k]
-			var b: int = loop[(k + 1) % n]
-			mids.append(edge_pt[int(edge_id[Vector2i(mini(a, b), maxi(a, b))])])
-		face_geo[key] = {"corners": corners, "mids": mids, "mid": face_pt[i]}
-
-
-# Ни тела для кликов, ни куски оболочки не трогаем прямо сейчас — только
-# помечаем. Всё делается один раз за кадр: мазок кистью в три ячейки шириной
-# меняет три десятка глыб, и пересобирать каждую по отдельности значило бы
-# сделать то же самое двадцать раз подряд.
+# Куски не трогаем прямо сейчас — только помечаем. Всё делается один раз за
+# кадр: мазок кистью в три ячейки шириной меняет три десятка ячеек, и
+# пересобирать каждую по отдельности значило бы сделать то же самое подряд.
 func _refresh(cell: int) -> void:
-	_dirty_bodies[cell] = true
-	for nb in grid.neighbors_of(cell):
-		if nb >= 0:
-			_dirty_bodies[nb] = true
 	_mark_dirty_around(cell)
 
 
+# Поставить — значит НАПОЛНИТЬ ячейку. Поверхность после этого проходит не по
+# её границе, а по уровню половинного заполнения, и вздутие выходит плавным.
 func _place(cell: int, material: String = "ground", record: bool = true) -> void:
-	if cell < 0 or solid.has(cell) or not grid.is_valid(cell):
+	if cell < 0 or solid.has(cell) or not grid.in_play(cell):
 		return
 	solid[cell] = material
+	grid.set_fill(cell, 1.0)
 	_forget_buried(cell)
-	_track_chunk(cell, true)
+	_touch_chunks(cell)
 	if record:
 		history.append({"cell": cell, "added": true})
 	_refresh(cell)
@@ -684,11 +481,9 @@ func _remove(cell: int, record: bool = true) -> void:
 		return
 	var was := material_of(cell)
 	solid.erase(cell)
+	grid.set_fill(cell, 0.0)
 	_forget_buried(cell)
-	# Ячейка выбывает из куска, и пересборка про неё уже не вспомнит —
-	# значит, прибираем её грани прямо сейчас, иначе мох останется висеть.
-	_forget_faces(cell)
-	_track_chunk(cell, false)
+	_touch_chunks(cell)
 	if record:
 		history.append({"cell": cell, "added": false, "was": was})
 	_refresh(cell)
@@ -713,7 +508,7 @@ func _brush_cells(centre: int) -> Array:
 func _paint(target: int, material: String) -> void:
 	var group: Array = []
 	for c in _brush_cells(target):
-		if c < 0 or solid.has(c) or not grid.is_valid(c):
+		if c < 0 or solid.has(c) or not grid.in_play(c):
 			continue
 		_place(c, material, false)
 		group.append({"cell": c, "added": true})
@@ -760,8 +555,7 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 	var dir := camera.project_ray_normal(screen_pos)
 	var query := PhysicsRayQueryParameters3D.create(from, from + dir * 2000.0)
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
-	var body = null if result.is_empty() else result.collider
-	if body == null or not body.has_meta("cell"):
+	if result.is_empty():
 		# Опереться не на что — целимся в плоскость земли. Так можно начать
 		# заново, если на карте не осталось ни одной глыбы.
 		if absf(dir.y) < 0.001:
@@ -770,24 +564,17 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 		if t <= 0.0:
 			return {}
 		var ground: int = grid.cell_at(from + dir * t)
-		if ground < 0 or not grid.is_valid(ground):
+		if ground < 0 or not grid.in_play(ground):
 			return {}
 		return {"hit": -1, "target": ground}
 
-	var hit: int = body.get_meta("cell")
-	# Ставим в соседа за той гранью, в которую попали.
-	var best := -1
-	var best_dot := -2.0
-	for f in grid.faces_of(hit):
-		var pts: Array = []
-		for idx in f["loop"]:
-			pts.append(grid.verts[idx])
-		var nrm := _face_normal(pts, grid.seeds[hit])
-		var d := nrm.dot(result.normal)
-		if d > best_dot:
-			best_dot = d
-			best = int(f["nb"])
-	return {"hit": hit, "target": best}
+	# Луч попал в саму видимую поверхность, а не в подложенное тело ячейки.
+	# Отступив от точки попадания по нормали в обе стороны, находим ближайшие
+	# семена: снаружи — куда ставить, внутри — что убирать.
+	var pos: Vector3 = result.position
+	var nrm: Vector3 = result.normal
+	var step: float = CELL_SPACING * 0.55
+	return {"hit": grid.cell_at(pos - nrm * step), "target": grid.cell_at(pos + nrm * step)}
 
 
 # --- Подсветка грани ---------------------------------------------------------
@@ -810,7 +597,7 @@ func _update_frame() -> void:
 		return
 	var pick := _pick(get_viewport().get_mouse_position())
 	var target: int = -1 if pick.is_empty() else int(pick["target"])
-	if target < 0 or not grid.is_valid(target) or solid.has(target):
+	if target < 0 or not grid.in_play(target) or solid.has(target):
 		frame_node.visible = false
 		frame_id = ""
 		return
@@ -821,33 +608,23 @@ func _update_frame() -> void:
 		return
 	frame_id = id
 
-	# Обводим весь мазок целиком: рисуем только те грани, что смотрят наружу
-	# кисти. Иначе внутренние перегородки превратили бы контур в кашу.
-	var inside: Dictionary = {}
-	for c in _brush_cells(target):
-		if c >= 0 and grid.is_valid(c) and not solid.has(c):
-			inside[c] = true
-
+	# Границ ячеек у поверхности больше нет, обводить нечего. Показываем сами
+	# места, которые наполнит клик: у каждого — маленький значок-октаэдр.
 	var mesh := ImmediateMesh.new()
 	mesh.surface_begin(Mesh.PRIMITIVE_LINES, frame_node.material_override)
-	var drawn: Dictionary = {}
-	for c in inside:
-		var centre: Vector3 = grid.seeds[c]
-		for f in grid.faces_of(c):
-			if inside.has(int(f["nb"])):
-				continue
-			var loop: PackedInt32Array = f["loop"]
-			var n := loop.size()
-			for k in range(n):
-				var a: int = loop[k]
-				var b: int = loop[(k + 1) % n]
-				var key := Vector2i(mini(a, b), maxi(a, b))
-				if drawn.has(key):
+	var mark: float = CELL_SPACING * 0.28
+	for c in _brush_cells(target):
+		if c < 0 or not grid.in_play(c) or solid.has(c):
+			continue
+		var at: Vector3 = grid.seeds[c]
+		var arm: Array = [Vector3.RIGHT * mark, Vector3.UP * mark, Vector3.BACK * mark]
+		for a in range(3):
+			for b in range(3):
+				if a == b:
 					continue
-				drawn[key] = true
-				# Чуть подтягиваем к центру, чтобы линия не тонула в соседях.
-				mesh.surface_add_vertex(centre + (grid.verts[a] - centre) * 0.97)
-				mesh.surface_add_vertex(centre + (grid.verts[b] - centre) * 0.97)
+				for sa in [1.0, -1.0]:
+					mesh.surface_add_vertex(at + arm[a] * sa)
+					mesh.surface_add_vertex(at + arm[b])
 	mesh.surface_end()
 	frame_node.mesh = mesh
 
@@ -1231,7 +1008,7 @@ func _measure_reach() -> void:
 	var worst := 0.0
 	var bins: Dictionary = {}
 	for cell in solid:
-		if not grid.is_valid(cell):
+		if not grid.in_play(cell):
 			continue
 		var here: Vector3 = grid.seeds[cell]
 		for nb in grid.neighbors_of(cell):
@@ -1298,30 +1075,18 @@ func _selftest() -> void:
 			" мс, после отмены осталось ", solid.size() - was)
 	brush = 1
 
-	# Удаление настоящей ячейки породы, у которой есть видимый меш.
+	# Снос настоящей ячейки породы: поверхность обязана перестроиться.
 	var victim := -1
-	for c in nodes:
-		victim = c
-		break
-	var before := nodes.size()
+	for c in solid:
+		if not _buried(c):
+			victim = c
+			break
+	var before := chunk_nodes.size()
 	_remove(victim)
 	_flush_chunks()
-	print("Удаление породы: ячейка ", victim, ", была в породе — ", not solid.has(victim),
-		", узлов было ", before, " стало ", nodes.size())
-	# Дыра в оболочке: у погребённой ячейки не должно быть ни одной грани
-	# наружу — такую грань никто не нарисует.
-	var buried_n := 0
-	var leaky := 0
-	for cell in solid:
-		if not _buried(cell):
-			continue
-		buried_n += 1
-		for f in grid.faces_of(cell):
-			if not _is_terrain(int(f["nb"])):
-				leaky += 1
-				break
-	print("Погребённых ячеек ", buried_n, ", из них с гранью наружу — ", leaky)
-
+	print("Снос породы: ячейка ", victim, ", убрана — ", not solid.has(victim),
+		", заполнение ", grid.fill_of(victim), ", кусков было ", before,
+		" стало ", chunk_nodes.size())
 	_seed_moss(6)
 	_flush_chunks()
 	# Мох не должен пережить снос глыбы, на которой рос.
@@ -1383,7 +1148,7 @@ func _seed_structures() -> void:
 		for level in range(storeys):
 			head += Vector3(0, CELL_SPACING, 0)
 			var up_cell: int = grid.cell_at(head)
-			if up_cell < 0 or not grid.is_valid(up_cell):
+			if up_cell < 0 or not grid.in_play(up_cell):
 				break
 			head = grid.seeds[up_cell]
 			for c in _brush_cells(up_cell):
