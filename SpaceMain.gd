@@ -468,7 +468,7 @@ func _place(cell: int, material: String = "ground", record: bool = true) -> void
 	if cell < 0 or solid.has(cell) or not grid.in_play(cell):
 		return
 	solid[cell] = material
-	grid.set_fill(cell, 1.0)
+	grid.set_edit(cell, 1)
 	_forget_buried(cell)
 	_touch_chunks(cell)
 	if record:
@@ -481,7 +481,7 @@ func _remove(cell: int, record: bool = true) -> void:
 		return
 	var was := material_of(cell)
 	solid.erase(cell)
-	grid.set_fill(cell, 0.0)
+	grid.set_edit(cell, -1)
 	_forget_buried(cell)
 	_touch_chunks(cell)
 	if record:
@@ -574,7 +574,8 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 	var pos: Vector3 = result.position
 	var nrm: Vector3 = result.normal
 	var step: float = CELL_SPACING * 0.55
-	return {"hit": grid.cell_at(pos - nrm * step), "target": grid.cell_at(pos + nrm * step)}
+	return {"hit": grid.cell_at(pos - nrm * step), "target": grid.cell_at(pos + nrm * step),
+		"pos": pos, "normal": nrm}
 
 
 # --- Подсветка грани ---------------------------------------------------------
@@ -602,29 +603,35 @@ func _update_frame() -> void:
 		frame_id = ""
 		return
 
-	frame_node.visible = true
-	var id := "%d:%d" % [target, brush]
-	if id == frame_id:
+	if not pick.has("pos"):
+		frame_node.visible = false
 		return
-	frame_id = id
+	frame_node.visible = true
 
-	# Границ ячеек у поверхности больше нет, обводить нечего. Показываем сами
-	# места, которые наполнит клик: у каждого — маленький значок-октаэдр.
+	# Границ ячеек у поверхности больше нет, обводить нечего. Показываем КОЛЬЦО
+	# кисти прямо на земле: сразу видно и куда придётся клик, и какой ширины.
+	# Россыпь значков вместо этого читалась как непонятные многогранники.
+	var at: Vector3 = pick["pos"]
+	var nrm: Vector3 = pick["normal"]
+	var ax: Vector3 = nrm.cross(Vector3.UP)
+	if ax.length() < 0.1:
+		ax = nrm.cross(Vector3.RIGHT)
+	ax = ax.normalized()
+	var az: Vector3 = nrm.cross(ax).normalized()
+	var lift: Vector3 = nrm * (CELL_SPACING * 0.05)
+	var rad: float = CELL_SPACING * (0.5 + 0.5 * float(brush))
+
 	var mesh := ImmediateMesh.new()
 	mesh.surface_begin(Mesh.PRIMITIVE_LINES, frame_node.material_override)
-	var mark: float = CELL_SPACING * 0.28
-	for c in _brush_cells(target):
-		if c < 0 or not grid.in_play(c) or solid.has(c):
-			continue
-		var at: Vector3 = grid.seeds[c]
-		var arm: Array = [Vector3.RIGHT * mark, Vector3.UP * mark, Vector3.BACK * mark]
-		for a in range(3):
-			for b in range(3):
-				if a == b:
-					continue
-				for sa in [1.0, -1.0]:
-					mesh.surface_add_vertex(at + arm[a] * sa)
-					mesh.surface_add_vertex(at + arm[b])
+	var steps := 40
+	for i in range(steps):
+		var a0: float = TAU * float(i) / float(steps)
+		var a1: float = TAU * float(i + 1) / float(steps)
+		mesh.surface_add_vertex(at + lift + (ax * cos(a0) + az * sin(a0)) * rad)
+		mesh.surface_add_vertex(at + lift + (ax * cos(a1) + az * sin(a1)) * rad)
+	# Короткий штырь по нормали — видно, с какой стороны ляжет порода.
+	mesh.surface_add_vertex(at + lift)
+	mesh.surface_add_vertex(at + nrm * (CELL_SPACING * 0.6))
 	mesh.surface_end()
 	frame_node.mesh = mesh
 

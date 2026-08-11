@@ -40,7 +40,9 @@ var _seed_hash: Dictionary = {}
 var _vert_hash: Dictionary = {}
 var _cell_size: float = 1.8
 var _node_index: Dictionary = {}  # узел решётки Vector3i -> номер семени
-var fill: PackedFloat32Array = PackedFloat32Array()   # насколько ячейка полна
+var fill: PackedFloat32Array = PackedFloat32Array()       # насколько ячейка полна
+var base_fill: PackedFloat32Array = PackedFloat32Array()  # природный рельеф
+var edits: Dictionary = {}        # ячейка -> +1 поставлено, -1 снято
 var _play: PackedByteArray = PackedByteArray()    # семя внутри играбельного объёма
 var _built: PackedByteArray = PackedByteArray()   # ячейку уже вырезали
 const NO_CELL := {"faces": [], "valid": false}
@@ -565,6 +567,8 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 		fill[i] = clampf(0.5 + minf(minf(under, inside), over), 0.0, 1.0)
 		if fill[i] > SOLID_AT:
 			solid[i] = true
+	base_fill = fill.duplicate()
+	edits = {}
 
 
 func fill_of(index: int) -> float:
@@ -573,9 +577,50 @@ func fill_of(index: int) -> float:
 	return fill[index]
 
 
-func set_fill(index: int, value: float) -> void:
-	if index >= 0 and index < fill.size():
-		fill[index] = clampf(value, 0.0, 1.0)
+# Правка игрока кладётся в поле НЕ единицей в одну ячейку, а плавным отпечатком:
+# сама ячейка наполняется до края, соседи подтягиваются почти до половины.
+#
+# Без этого поставленный блок выходит восьмигранником с острыми углами (поле
+# резко падает с единицы до нуля, и поверхность режется ровно посередине), а
+# два блока по диагонали касаются лишь точкой — между ними остаётся просвет.
+# С отпечатком поле меняется плавно, блоки сливаются, углы скругляются.
+const STAMP := [1.0, 0.45, 0.31, 0.24]   # по числу шагов: 0, ребро, грань, угол
+
+func set_edit(index: int, sign_of: int) -> void:
+	if index < 0 or index >= fill.size():
+		return
+	if sign_of == 0:
+		edits.erase(index)
+	else:
+		edits[index] = sign_of
+	var node: Vector3i = node_of(index)
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var j: int = node_seed(node + Vector3i(dx, dy, dz))
+				if j >= 0:
+					_refresh_fill(j)
+
+
+# Заполнение ячейки = природный рельеф, дополненный отпечатками правок вокруг.
+# Считается заново от исходных данных, поэтому отмена возвращает всё точно.
+func _refresh_fill(index: int) -> void:
+	var node: Vector3i = node_of(index)
+	var add := 0.0
+	var cut := 0.0
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var j: int = node_seed(node + Vector3i(dx, dy, dz))
+				if j < 0 or not edits.has(j):
+					continue
+				var steps: int = absi(dx) + absi(dy) + absi(dz)
+				var weight: float = STAMP[steps]
+				if int(edits[j]) > 0:
+					add = maxf(add, weight)
+				else:
+					cut = maxf(cut, weight)
+	fill[index] = clampf(minf(maxf(base_fill[index], add), 1.0 - cut), 0.0, 1.0)
 
 
 # Семя по узлу решётки — по этому строится разбиение на тетраэдры.
