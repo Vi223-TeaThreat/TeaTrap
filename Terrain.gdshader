@@ -1,0 +1,141 @@
+shader_type spatial;
+render_mode cull_back, diffuse_burley;
+
+// =============================================================================
+//  ОБЛИК ПОРОДЫ.
+//
+//  Цвет поверхности НЕ задан заранее — он вычисляется на месте, по наклону
+//  и высоте. Отсюда сразу три вещи, которые видно на живых скалах:
+//
+//    1) ЗЕЛЁНЫЙ ПОКРОВ ЛОЖИТСЯ ПО НАКЛОНУ. Пологое зарастает, отвесное
+//       остаётся голым. Граница рваная — её ведёт шумом, поэтому зелень
+//       переваливает через кромку языками, а не ровной линией.
+//    2) ПОРОДА ПЯТНИСТАЯ, без рисунка слоёв: облик скал ещё не выбран,
+//       и до нового образца камень остаётся просто тёмным и неровным.
+//    3) ЩЕЛИ ТЕМНЕЮТ. Насколько точка сидит во впадине, посчитано заранее
+//       и передано в UV — по нему затеняем стыки между глыбами.
+//
+//  Считается по пикселям, а не по вершинам: границы ячеек не проступают,
+//  и перестройка куска не становится дороже ни на миллисекунду.
+//
+//  Через UV приходит: x — порода (0 земля, 1 скала), y — впадина (0.5 ровно).
+// =============================================================================
+
+// Порода НАМНОГО темнее дёрна — на снимках это главный контраст кадра.
+// И держим её нейтральной: у тёплого серого небо поднимает синий канал
+// сильнее зелёного, и камень уходит в пыльно-розовый.
+uniform vec3 rock_dark : source_color = vec3(0.085, 0.085, 0.082);
+uniform vec3 rock_light : source_color = vec3(0.30, 0.30, 0.28);
+uniform vec3 soil_dark : source_color = vec3(0.19, 0.15, 0.11);
+uniform vec3 soil_light : source_color = vec3(0.40, 0.33, 0.24);
+// Зелень намеренно оливковая, а не salad: на снимках трава северная,
+// приглушённая. Ядовитый зелёный сразу выдаёт компьютерную картинку.
+uniform vec3 turf_deep : source_color = vec3(0.10, 0.17, 0.10);
+uniform vec3 turf_lit : source_color = vec3(0.35, 0.44, 0.18);
+uniform vec3 turf_dry : source_color = vec3(0.50, 0.47, 0.24);
+
+uniform float mantle_soil = 0.42;                    // с какого наклона зарастает земля
+uniform float mantle_stone = 0.62;                   // ... и скала
+uniform float mantle_rough = 0.45;                   // рваность края зелени
+uniform float bald = 0.32;                           // проплешины голой земли
+uniform float cavity_dark : hint_range(0.0, 1.0) = 1.0;
+uniform float posterize = 20.0;                      // ступеней тона; 0 — выключить
+uniform float stone_override = -1.0;                 // >=0 — вместо UV.x
+
+varying vec3 w_pos;
+varying vec3 w_nrm;
+
+
+float hash11(float n) {
+	return fract(sin(n) * 43758.5453123);
+}
+
+
+float hash13(vec3 p) {
+	p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+	p += dot(p, p.yxz + 33.33);
+	return fract((p.x + p.y) * p.z);
+}
+
+
+float vnoise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float n000 = hash13(i);
+	float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+	float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+	float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+	float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+	float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+	float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+	float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+	return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+			   mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+
+
+float fbm(vec3 p) {
+	return vnoise(p) * 0.57 + vnoise(p * 2.07) * 0.29 + vnoise(p * 4.13) * 0.14;
+}
+
+
+void vertex() {
+	w_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	w_nrm = normalize((MODEL_MATRIX * vec4(NORMAL, 0.0)).xyz);
+}
+
+
+void fragment() {
+	vec3 n = normalize(w_nrm);
+	// Долю породы подтягиваем к краям: усреднение по вершинам растягивало
+	// переход земля/скала на целую ячейку, и граница выходила размытой.
+	float raw_stone = stone_override >= 0.0 ? stone_override : clamp(UV.x, 0.0, 1.0);
+	float stone = smoothstep(0.30, 0.70, raw_stone);
+	float cav = clamp(UV.y, 0.0, 1.0) * 2.0 - 1.0;   // больше нуля — впадина
+
+	float big = fbm(w_pos * 0.42);
+	float fine = fbm(w_pos * 2.60);
+	float grit = fbm(w_pos * 8.70);
+
+	// --- голая порода --------------------------------------------------------
+	vec3 rock = mix(rock_dark, rock_light, fine * 0.6 + grit * 0.4);
+	vec3 soil = mix(soil_dark, soil_light, fine * 0.7 + grit * 0.3);
+	vec3 bare = mix(soil, rock, stone);
+
+	// --- зелёный покров ------------------------------------------------------
+	float lean = n.y + (big - 0.5) * mantle_rough + (fine - 0.5) * mantle_rough * 0.45;
+	lean -= smoothstep(0.76, 1.0, fine) * bald;      // вытоптанные проплешины
+	float edge = mix(mantle_soil, mantle_stone, stone);
+	float m = smoothstep(edge - 0.20, edge + 0.26, lean);
+
+	// Пестроту набираем из трёх масштабов сразу, иначе выходят пятна камуфляжа.
+	float v = big * 0.46 + fine * 0.38 + grit * 0.16;
+	vec3 turf = mix(turf_deep, turf_lit, smoothstep(0.26, 0.74, v));
+	turf = mix(turf, turf_dry, smoothstep(0.62, 0.95, grit) * 0.28);
+
+	vec3 col = mix(bare, turf, m);
+	// По самому краю дёрна просвечивает земля — тонкая тёмная каёмка.
+	col = mix(col, soil_dark, m * (1.0 - m) * 4.0 * 0.30);
+
+	// --- щели ----------------------------------------------------------------
+	// Затемнение сдержанное: при мелкой ячейке складок стало вдесятеро больше,
+	// и прежняя сила превращала каждую из них в чёрную дыру.
+	col *= mix(1.0, 0.68, smoothstep(0.10, 0.60, cav) * cavity_dark);
+
+	// --- стилизация ----------------------------------------------------------
+	// Ступеньки тона: картинка становится ближе к рисованной, а пласты
+	// читаются слоями, а не размазанным градиентом.
+	// СТУПЕНИ СЧИТАЕМ В ГАММЕ, не в линейном цвете. В линейном тёмные тона
+	// сжаты к нулю, и каждый канал округляется по-своему — тёмно-серый
+	// вылетает то в розовый, то в чёрный. Именно так и было.
+	if (posterize > 0.5) {
+		vec3 g = pow(max(col, vec3(0.0)), vec3(1.0 / 2.2));
+		g = floor(g * posterize + 0.5) / posterize;
+		col = pow(g, vec3(2.2));
+	}
+
+	ALBEDO = col;
+	ROUGHNESS = mix(0.97, 0.84, m);
+	SPECULAR = 0.16;
+}
