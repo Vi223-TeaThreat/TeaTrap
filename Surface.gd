@@ -122,7 +122,8 @@ static func _emit_tet(st: SurfaceTool, grid, idx: PackedInt32Array,
 # треугольникам; ребро с одним — это край дыры. Точку среза узнаём по паре
 # семян, на ребре между которыми она лежит: такой ключ одинаков у всех
 # тетраэдров и кубиков, которые её породили.
-static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary) -> void:
+static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary,
+		stats: Dictionary) -> void:
 	var idx := PackedInt32Array()
 	idx.resize(8)
 	var val := PackedFloat32Array()
@@ -148,6 +149,15 @@ static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary) -> void:
 					var poly: Array = tet_polygon(grid, idx, val, t)
 					if poly.is_empty():
 						continue
+					# Не вывернулся ли сам тетраэдр. Семя уходит от своего узла
+					# почти на половину ячейки, и при неудачном совпадении
+					# четвёрка семян меняет ориентацию: тетраэдры начинают
+					# перекрываться, и срез в них смотрит не туда.
+					if _volume(grid.seeds[idx[t[0]]], grid.seeds[idx[t[1]]],
+							grid.seeds[idx[t[2]]], grid.seeds[idx[t[3]]]) \
+							* _volume(Vector3(CORNER[t[0]]), Vector3(CORNER[t[1]]),
+							Vector3(CORNER[t[2]]), Vector3(CORNER[t[3]])) < 0.0:
+						stats["inverted"] = int(stats.get("inverted", 0)) + 1
 					var want: Vector3 = _outward(grid, idx, val, t)
 					for f in range(1, poly.size() - 1):
 						var tri: Array = wound([poly[0], poly[f], poly[f + 1]], grid, want)
@@ -164,6 +174,10 @@ static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary) -> void:
 								continue
 							var s2 := "%s>%s" % [u, v]
 							edges[s2] = int(edges.get(s2, 0)) + 1
+
+
+static func _volume(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> float:
+	return (b - a).cross(c - a).dot(d - a)
 
 
 static func _vkey(c: Dictionary) -> String:

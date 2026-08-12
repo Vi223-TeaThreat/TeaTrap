@@ -1041,9 +1041,11 @@ func _measure_reach() -> void:
 # Считаем незамкнутые рёбра по всему миру: сколько их и где.
 func _audit_surface() -> void:
 	var edges: Dictionary = {}
+	var stats: Dictionary = {}
 	for ch in chunk_list:
 		var lo: Vector3i = ch * CHUNK_NODES
-		SurfaceScript.audit(grid, lo, lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES), edges)
+		SurfaceScript.audit(grid, lo,
+			lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES), edges, stats)
 	# Рёбра НАПРАВЛЕННЫЕ. У согласованной замкнутой поверхности каждое
 	# направленное ребро встречается ровно один раз, и у каждого есть обратное.
 	# Встретилось дважды — рядом вывернутый треугольник. Нет обратного — дыра.
@@ -1061,7 +1063,8 @@ func _audit_surface() -> void:
 		if not edges.has("%s>%s" % [parts[1], parts[0]]):
 			holes += 1
 	print("Рёбер поверхности ", edges.size(), ", вывернутых — ", flipped,
-		", незамкнутых — ", holes)
+		", незамкнутых — ", holes,
+		"; вывернутых тетраэдров на поверхности — ", int(stats.get("inverted", 0)))
 
 
 func _selftest() -> void:
