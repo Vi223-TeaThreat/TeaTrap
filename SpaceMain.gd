@@ -507,7 +507,10 @@ func _remove(cell: int, record: bool = true) -> void:
 
 # Один мазок в точке: и постановка, и снятие, и отмена ходят через него.
 func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> void:
-	var rad := _brush_radius()
+	# Камень кладём ТЕСНЕЕ земли: глыба должна быть плотным телом, а не
+	# расплывшейся насыпью того же охвата.
+	var tight: float = 0.78 if material == "cliff" else 1.0
+	var rad := _brush_radius() * tight
 	_stroke(at, rad, amount, material)
 	if record:
 		history.append({"at": at, "rad": rad, "amount": amount, "mat": material})
