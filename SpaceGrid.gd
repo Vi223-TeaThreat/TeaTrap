@@ -621,7 +621,11 @@ const EDIT_SPAN: int = 2          # столько узлов решётки о�
 # оно срезает резкие перепады и почти не трогает уже гладкую форму, поэтому
 # лепить можно сколько угодно, а угловатости не набирается.
 const EDIT_CAP: float = 6.0
-const RELAX: float = 0.34         # насколько ячейка подтягивается к соседям
+# Подтягивание к соседям — это диффузия: она разглаживает не только сам мазок,
+# но и всё, что уже вылеплено рядом. При большой силе мазок возле холма
+# подъедал холм. Держим её слабой: острия она снимает и такой, а форму,
+# сделанную руками, почти не трогает.
+const RELAX: float = 0.12
 
 func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 	var touched: Dictionary = {}
@@ -656,7 +660,7 @@ func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 					if n >= 0:
 						zone[n] = true
 
-	for _pass in range(2):
+	for _pass in range(1):
 		var mixed: Dictionary = {}
 		for j in zone:
 			var node2: Vector3i = node_of(j)
