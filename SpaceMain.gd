@@ -304,6 +304,8 @@ func _fill_world() -> void:
 	fill_done = 1.0
 	print("Достройка: ", Time.get_ticks_msec() - started, " мс, кусков — ",
 		chunk_nodes.size(), ", вырезано ячеек — ", grid.built_count())
+	if "--audit" in OS.get_cmdline_user_args():
+		_audit_surface()
 
 
 func _occupied(cell: int) -> bool:
@@ -1034,6 +1036,30 @@ func _measure_reach() -> void:
 			p999 = float(k) / 10.0
 	print("Соседи: самый дальний ", snappedf(worst, 0.01), " шага, 99.9% ближе ",
 		p999, " шага, всего связей ", total)
+
+
+# Считаем незамкнутые рёбра по всему миру: сколько их и где.
+func _audit_surface() -> void:
+	var edges: Dictionary = {}
+	for ch in chunk_list:
+		var lo: Vector3i = ch * CHUNK_NODES
+		SurfaceScript.audit(grid, lo, lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES), edges)
+	var open := 0
+	var over := 0
+	var shown := 0
+	for k in edges:
+		var n: int = edges[k]
+		if n == 2:
+			continue
+		if n == 1:
+			open += 1
+			if shown < 6:
+				shown += 1
+				print("   край дыры: ", k)
+		else:
+			over += 1
+	print("Рёбер поверхности ", edges.size(), ", с одним треугольником — ", open,
+		", более чем с двумя — ", over)
 
 
 func _selftest() -> void:
