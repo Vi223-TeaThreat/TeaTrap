@@ -42,7 +42,9 @@ var _cell_size: float = 1.8
 var _node_index: Dictionary = {}  # узел решётки Vector3i -> номер семени
 var fill: PackedFloat32Array = PackedFloat32Array()       # насколько ячейка полна
 var base_fill: PackedFloat32Array = PackedFloat32Array()  # природный рельеф
-var edits: Dictionary = {}        # ячейка -> +1 поставлено, -1 снято
+var edits: Dictionary = {}        # ячейка -> насколько её подняли мазками
+var stone: Dictionary = {}        # ячейка -> насколько она каменистая, 0..1
+var _rock_noise: FastNoiseLite
 var _play: PackedByteArray = PackedByteArray()    # семя внутри играбельного объёма
 var _built: PackedByteArray = PackedByteArray()   # ячейку уже вырезали
 const NO_CELL := {"faces": [], "valid": false}
@@ -72,6 +74,11 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	shape.seed = grid_seed
 	shape.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	shape.frequency = 0.045
+	_rock_noise = FastNoiseLite.new()
+	_rock_noise.seed = grid_seed + 4243
+	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_rock_noise.frequency = 0.55
+
 	var detail := FastNoiseLite.new()
 	detail.seed = grid_seed + 7717
 	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -632,7 +639,8 @@ const EDIT_CAP: float = 6.0
 # сделанную руками, почти не трогает.
 const RELAX: float = 0.09
 
-func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
+func stroke_at(point: Vector3, radius: float, amount: float,
+		stone_amount: float = 0.0) -> Array:
 	var touched: Dictionary = {}
 	var span := int(ceil(radius / _cell_size)) + 1
 	var base := _key_of(point)
@@ -649,6 +657,11 @@ func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 					var w: float = 1.0 - d * d
 					edits[j] = clampf(float(edits.get(j, 0.0)) + amount * w * w,
 						-EDIT_CAP, EDIT_CAP)
+					# Каменистость кладётся тем же мазком, поэтому меняется
+					# плавно: у камня нет резкой границы, он сходит на нет.
+					if amount > 0.0:
+						stone[j] = clampf(float(stone.get(j, 0.0))
+							+ (stone_amount * 2.0 - 1.0) * amount * w * w, 0.0, 1.0)
 					touched[j] = true
 
 	# Сглаживаем не только сам мазок, но и КОЛЬЦО вокруг него. Пока сглаживание
@@ -680,7 +693,11 @@ func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 				sum += float(edits.get(n2, 0.0))
 				count += 1
 			if count > 0:
-				mixed[j] = lerpf(float(edits.get(j, 0.0)), sum / float(count), RELAX)
+				# Камень ДЕРЖИТ ФОРМУ: к соседям он подтягивается впятеро
+				# слабее земли, поэтому граница глыбы с травой остаётся чёткой,
+				# а не расплывается, как насыпь.
+				var soft: float = lerpf(RELAX, RELAX * 0.2, float(stone.get(j, 0.0)))
+				mixed[j] = lerpf(float(edits.get(j, 0.0)), sum / float(count), soft)
 		for j in mixed:
 			edits[j] = mixed[j]
 
@@ -736,7 +753,29 @@ func _refresh_fill(index: int) -> void:
 				sum += float(edits[j]) * t * t
 	# Тоже без обрезки: мазок сдвигает поверхность ровно на свою величину, и
 	# насыпь растёт от земли, а не всплывает отдельной коркой рядом с ней.
-	fill[index] = base_fill[index] + sum
+	fill[index] = base_fill[index] + sum + _facet(index)
+
+
+# ОГРАНЁННОСТЬ КАМНЯ. К полю возле камня добавляется крупный шум: поверхность
+# набирает широкие плосковатые грани и складки, как у окатанных глыб на
+# снимках. Шипов от этого быть не может — это плавная величина, а не отдельные
+# тела; резкость даёт только частота, и она нарочно низкая.
+#
+# Облик зависит от МЕСТА, как и просили:
+#   больше камня в кучке — сильнее гранёность (одинокий валун окатан, массив
+#     набирает уступы);
+#   выше над морем — крупнее и жёстче грани (внизу мягкие спины, наверху плиты);
+#   круче склон — сильнее выступает (на пологом глыба тонет в дёрне).
+func _facet(index: int) -> float:
+	var s: float = float(stone.get(index, 0.0))
+	if s < 0.02 or _rock_noise == null:
+		return 0.0
+	var p: Vector3 = seeds[index]
+	var high: float = clampf((p.y + 3.0) / 6.0, 0.0, 1.0)
+	var coarse: float = 0.55 + 0.45 * high
+	var n1: float = _rock_noise.get_noise_3d(p.x / coarse, p.y / coarse, p.z / coarse)
+	var n2: float = _rock_noise.get_noise_3d(p.x * 2.3, p.y * 2.3, p.z * 2.3)
+	return (n1 * 0.72 + n2 * 0.28) * s * s * (0.30 + 0.45 * high)
 
 
 # Семя по узлу решётки — по этому строится разбиение на тетраэдры.

@@ -14,7 +14,6 @@ const SpaceGridScript = preload("res://SpaceGrid.gd")
 const SpacePlantsScript = preload("res://SpacePlants.gd")
 const SpacePropsScript = preload("res://SpaceProps.gd")
 const SpaceBuildingsScript = preload("res://SpaceBuildings.gd")
-const SpaceRocksScript = preload("res://SpaceRocks.gd")
 const SurfaceScript = preload("res://Surface.gd")
 const PlantsData = preload("res://Plants.gd")
 
@@ -276,10 +275,10 @@ func _touch_chunks(cell: int, dirty: bool = true) -> void:
 					_dirty_chunks[ch] = true
 
 
-# Доля породы у семени: 0 земля, 1 скала. По ней шейдер решает, где камень.
+# Доля породы у семени: 0 земля, 1 камень. Берём её из поля, а не из материала
+# ячейки: там она меняется плавно, и камень сходит в траву без резкой границы.
 func _stone_of(cell: int) -> float:
-	var card: Dictionary = PlantsData.ITEMS.get(material_of(cell), PlantsData.ITEMS["ground"])
-	return float(card.get("stone", 0.0))
+	return float(grid.stone.get(cell, 0.0))
 
 
 # Мир достраивается КУСКАМИ, от середины наружу, отпуская кадр между ними.
@@ -473,7 +472,9 @@ func _brush_radius() -> float:
 
 
 func _stroke(at: Vector3, radius: float, amount: float, material: String) -> void:
-	var touched: Array = grid.stroke_at(at, radius, amount)
+	var card: Dictionary = PlantsData.ITEMS.get(material, PlantsData.ITEMS["ground"])
+	var touched: Array = grid.stroke_at(at, radius, amount,
+		float(card.get("stone", 0.0)))
 	if amount > 0.0:
 		for c in touched:
 			paint[c] = material
@@ -1179,15 +1180,18 @@ func _seed_structures() -> void:
 		# Лепим холм так, как это делал бы игрок: несколько мазков подряд по
 		# одному месту, каждый следующий чуть выше. Именно здесь раньше
 		# вылезали летающие лоскуты, поэтому проверять надо этим.
+		# Первая куча — земляной холм, вторая — каменная глыба: в кадре сразу
+		# видно, чем камень отличается по форме от насыпи.
+		var kind := "ground" if placed == 0 else "cliff"
 		var head: Vector3 = s
-		for level in range(5):
+		for level in range(4):
 			var up_cell: int = grid.cell_at(head + Vector3(0, CELL_SPACING * 0.6, 0))
 			if up_cell < 0 or not grid.in_play(up_cell):
 				break
 			head = grid.seeds[up_cell]
 			for _again in range(3):
-				_stroke(head, _brush_radius(), STROKE, "ground")
-		if placed == 0:
+				_stroke(head, _brush_radius(), STROKE, kind)
+		if kind == "cliff":
 			_cliff_focus = s + Vector3(0, CELL_SPACING, 0)
 		placed += 1
 		# Второй объект ставим подальше, чтобы группы не слились в одну.
