@@ -24,8 +24,10 @@ render_mode cull_back, diffuse_burley;
 // Порода НАМНОГО темнее дёрна — на снимках это главный контраст кадра.
 // И держим её нейтральной: у тёплого серого небо поднимает синий канал
 // сильнее зелёного, и камень уходит в пыльно-розовый.
-uniform vec3 rock_dark : source_color = vec3(0.085, 0.085, 0.082);
-uniform vec3 rock_light : source_color = vec3(0.30, 0.30, 0.28);
+// Светлый гранит: бело-серый, местами почти белый, с лишайниковой рябью.
+// Он нарочно спорит с зеленью — камень должно быть видно издалека.
+uniform vec3 rock_dark : source_color = vec3(0.24, 0.24, 0.235);
+uniform vec3 rock_light : source_color = vec3(0.53, 0.53, 0.51);
 uniform vec3 soil_dark : source_color = vec3(0.19, 0.15, 0.11);
 uniform vec3 soil_light : source_color = vec3(0.40, 0.33, 0.24);
 // Зелень намеренно оливковая, а не salad: на снимках трава северная,
@@ -35,7 +37,9 @@ uniform vec3 turf_lit : source_color = vec3(0.35, 0.44, 0.18);
 uniform vec3 turf_dry : source_color = vec3(0.50, 0.47, 0.24);
 
 uniform float mantle_soil = 0.42;                    // с какого наклона зарастает земля
-uniform float mantle_stone = 0.62;                   // ... и скала
+uniform float mantle_stone = 1.05;                   // ... и камень (почти никогда)
+uniform float moss_crack = 0.40;                     // зелень копится в трещинах
+uniform float moss_damp = 0.55;                      // местами глыба зарастает
 uniform float mantle_rough = 0.45;                   // рваность края зелени
 uniform float bald = 0.32;                           // проплешины голой земли
 uniform float cavity_dark : hint_range(0.0, 1.0) = 1.0;
@@ -91,7 +95,9 @@ void fragment() {
 	// Долю породы подтягиваем к краям: усреднение по вершинам растягивало
 	// переход земля/скала на целую ячейку, и граница выходила размытой.
 	float raw_stone = stone_override >= 0.0 ? stone_override : clamp(UV.x, 0.0, 1.0);
-	float stone = smoothstep(0.30, 0.70, raw_stone);
+	// Переход камень/трава широкий: при узком глыба читается наклейкой с
+	// вырезанным краем, а на снимках трава пальцами заходит на камень.
+	float stone = smoothstep(0.12, 0.88, raw_stone);
 	float cav = clamp(UV.y, 0.0, 1.0) * 2.0 - 1.0;   // больше нуля — впадина
 
 	float big = fbm(w_pos * 0.42);
@@ -106,7 +112,19 @@ void fragment() {
 	// --- зелёный покров ------------------------------------------------------
 	float lean = n.y + (big - 0.5) * mantle_rough + (fine - 0.5) * mantle_rough * 0.45;
 	lean -= smoothstep(0.76, 1.0, fine) * bald;      // вытоптанные проплешины
-	float edge = mix(mantle_soil, mantle_stone, stone);
+
+	// КАМЕНЬ ПО УМОЛЧАНИЮ ГОЛЫЙ. Зелень пускаем на него только тремя путями:
+	//   в трещины и щели — там копится занесённая земля;
+	//   местами у подножия глыба слегка тонет в дёрне;
+	//   целиком зарастают нижние и затенённые глыбы.
+	// Сырость сюда позже добавится четвёртым слагаемым.
+	float crack = smoothstep(0.05, 0.45, cav);
+	float low = 1.0 - smoothstep(-1.5, 2.2, w_pos.y);
+	float shade = smoothstep(0.0, 0.40, cav);
+	float overgrown = clamp(low * 0.75 + shade * 0.55, 0.0, 1.0);
+	float sink = smoothstep(0.48, 0.82, big) * 0.30;
+	float bare_edge = mantle_stone - crack * moss_crack - overgrown * moss_damp - sink;
+	float edge = mix(mantle_soil, bare_edge, stone);
 	float m = smoothstep(edge - 0.20, edge + 0.26, lean);
 
 	// Пестроту набираем из трёх масштабов сразу, иначе выходят пятна камуфляжа.
