@@ -616,7 +616,11 @@ const EDIT_SPAN: int = 2          # столько узлов решётки о�
 # мазка, и поверхность переставала зависеть от величин — она прилипала к самим
 # семенам, превращаясь в угловатое тело с остриями. Предел держит форму
 # гладкой, а расти вверх заставляет двигать курсор, а не долбить в одну точку.
-const EDIT_CAP: float = 1.35
+# Предел большой: он страхует от совсем уж дикого перепада, но не мешает
+# копать и насыпать. От остриёв спасает не он, а подтягивание к соседям —
+# оно срезает резкие перепады и почти не трогает уже гладкую форму, поэтому
+# лепить можно сколько угодно, а угловатости не набирается.
+const EDIT_CAP: float = 6.0
 const RELAX: float = 0.34         # насколько ячейка подтягивается к соседям
 
 func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
@@ -638,33 +642,45 @@ func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 						-EDIT_CAP, EDIT_CAP)
 					touched[j] = true
 
-	# Подтягиваем к соседям: ячейка перестаёт жить сама по себе, и насыпь
-	# садится в окружающий рельеф, а не торчит из него отдельным телом.
+	# Сглаживаем не только сам мазок, но и КОЛЬЦО вокруг него. Пока сглаживание
+	# шло лишь по задетым ячейкам, соседи за краем мазка не менялись никогда:
+	# на границе копился уступ, и от повторных наращиваний холм набирал
+	# угловатость. С кольцом мазок растушёвывается в окружающий рельеф.
+	var zone: Dictionary = touched.duplicate()
+	for j in touched:
+		var node: Vector3i = node_of(j)
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				for dz in range(-1, 2):
+					var n: int = node_seed(node + Vector3i(dx, dy, dz))
+					if n >= 0:
+						zone[n] = true
+
 	for _pass in range(2):
 		var mixed: Dictionary = {}
-		for j in touched:
-			var node: Vector3i = node_of(j)
+		for j in zone:
+			var node2: Vector3i = node_of(j)
 			var sum := 0.0
 			var count := 0
 			for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
 					Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
-				var n: int = node_seed(node + step)
-				if n < 0:
+				var n2: int = node_seed(node2 + step)
+				if n2 < 0:
 					continue
-				sum += float(edits.get(n, 0.0))
+				sum += float(edits.get(n2, 0.0))
 				count += 1
 			if count > 0:
 				mixed[j] = lerpf(float(edits.get(j, 0.0)), sum / float(count), RELAX)
 		for j in mixed:
 			edits[j] = mixed[j]
 
-	for j in touched:
-		if absf(float(edits[j])) < 0.002:
+	for j in zone:
+		if absf(float(edits.get(j, 0.0))) < 0.002:
 			edits.erase(j)
 			fill[j] = base_fill[j]
 		else:
 			fill[j] = base_fill[j] + float(edits[j])
-	return touched.keys()
+	return zone.keys()
 
 
 func stroke_many(cells: Array, amount: float) -> Array:
