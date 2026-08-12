@@ -608,6 +608,65 @@ const EDIT_SPAN: int = 2          # столько узлов решётки о�
 # плавную галтель, как у капель ртути. И вес считается по НАСТОЯЩЕМУ
 # расстоянию, а не по числу шагов по решётке: иначе по диагонали куба отпечаток
 # дотягивается дальше, чем по оси, и ком выпирает углами.
+# Мазок кладётся В ТОЧКУ ПРИЦЕЛА, а не в ближайшее семя. Семена разбросаны,
+# и ближайшее к курсору бывает заметно в стороне: мазок уходил не туда, куда
+# наведено, и попасть в углубление было почти нельзя.
+#
+# Величина прибавки ОГРАНИЧЕНА. Без предела она росла от каждого повторного
+# мазка, и поверхность переставала зависеть от величин — она прилипала к самим
+# семенам, превращаясь в угловатое тело с остриями. Предел держит форму
+# гладкой, а расти вверх заставляет двигать курсор, а не долбить в одну точку.
+const EDIT_CAP: float = 1.35
+const RELAX: float = 0.34         # насколько ячейка подтягивается к соседям
+
+func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
+	var touched: Dictionary = {}
+	var span := int(ceil(radius / _cell_size)) + 1
+	var base := _key_of(point)
+	for dx in range(-span, span + 1):
+		for dy in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var key := base + Vector3i(dx, dy, dz)
+				if not _seed_hash.has(key):
+					continue
+				for j in _seed_hash[key]:
+					var d: float = seeds[j].distance_to(point) / radius
+					if d >= 1.0:
+						continue
+					var w: float = 1.0 - d * d
+					edits[j] = clampf(float(edits.get(j, 0.0)) + amount * w * w,
+						-EDIT_CAP, EDIT_CAP)
+					touched[j] = true
+
+	# Подтягиваем к соседям: ячейка перестаёт жить сама по себе, и насыпь
+	# садится в окружающий рельеф, а не торчит из него отдельным телом.
+	for _pass in range(2):
+		var mixed: Dictionary = {}
+		for j in touched:
+			var node: Vector3i = node_of(j)
+			var sum := 0.0
+			var count := 0
+			for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+					Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+				var n: int = node_seed(node + step)
+				if n < 0:
+					continue
+				sum += float(edits.get(n, 0.0))
+				count += 1
+			if count > 0:
+				mixed[j] = lerpf(float(edits.get(j, 0.0)), sum / float(count), RELAX)
+		for j in mixed:
+			edits[j] = mixed[j]
+
+	for j in touched:
+		if absf(float(edits[j])) < 0.002:
+			edits.erase(j)
+			fill[j] = base_fill[j]
+		else:
+			fill[j] = base_fill[j] + float(edits[j])
+	return touched.keys()
+
+
 func stroke_many(cells: Array, amount: float) -> Array:
 	for c in cells:
 		if c >= 0 and c < fill.size():

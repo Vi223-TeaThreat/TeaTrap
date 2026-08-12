@@ -466,17 +466,17 @@ func _refresh(cell: int) -> void:
 # поэтому прибавка выходит плавным наплывом, а не глыбой с углами.
 const STROKE: float = 0.42        # сколько добавляет один мазок
 
-func _stroke(cells: Array, amount: float, material: String) -> void:
-	var real: Array = []
-	for c in cells:
-		if c >= 0 and grid.in_play(c):
-			real.append(c)
-			if amount > 0.0:
-				paint[c] = material
-	if real.is_empty():
-		return
+func _brush_radius() -> float:
+	return CELL_SPACING * (0.8 + 0.55 * float(brush))
+
+
+func _stroke(at: Vector3, radius: float, amount: float, material: String) -> void:
+	var touched: Array = grid.stroke_at(at, radius, amount)
+	if amount > 0.0:
+		for c in touched:
+			paint[c] = material
 	# Порода у ячейки появляется и исчезает сама, по уровню заполнения.
-	for c in grid.stroke_many(real, amount):
+	for c in touched:
 		var full: bool = grid.fill_of(c) > 0.5
 		if full and not solid.has(c):
 			solid[c] = paint.get(c, "ground")
@@ -493,17 +493,21 @@ func _stroke(cells: Array, amount: float, material: String) -> void:
 func _place(cell: int, material: String = "ground", record: bool = true) -> void:
 	if cell < 0 or not grid.in_play(cell):
 		return
-	_stroke([cell], STROKE, material)
-	if record:
-		history.append({"group": [{"cell": cell, "amount": STROKE, "mat": material}]})
+	_dab(grid.seeds[cell], STROKE, material, record)
 
 
 func _remove(cell: int, record: bool = true) -> void:
 	if cell < 0 or not grid.in_play(cell):
 		return
-	_stroke([cell], -STROKE, "")
+	_dab(grid.seeds[cell], -STROKE, "", record)
+
+
+# Один мазок в точке: и постановка, и снятие, и отмена ходят через него.
+func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> void:
+	var rad := _brush_radius()
+	_stroke(at, rad, amount, material)
 	if record:
-		history.append({"group": [{"cell": cell, "amount": -STROKE, "mat": ""}]})
+		history.append({"at": at, "rad": rad, "amount": amount, "mat": material})
 
 
 # --- Кисть -------------------------------------------------------------------
@@ -521,41 +525,24 @@ func _brush_cells(centre: int) -> Array:
 	return out
 
 
-# Весь мазок — одно действие: отмена снимает его целиком.
-func _paint(target: int, material: String) -> void:
-	var cells: Array = []
-	for c in _brush_cells(target):
-		if c >= 0 and grid.in_play(c):
-			cells.append(c)
-	if cells.is_empty():
-		return
-	_stroke(cells, STROKE, material)
-	history.append({"stroke": cells, "amount": STROKE})
+# Мазок ложится ровно туда, куда наведён курсор.
+func _paint(pick: Dictionary, material: String) -> void:
+	if pick.has("pos"):
+		_dab(pick["pos"], STROKE, material)
 
 
-func _erase(hit: int) -> void:
-	var cells: Array = []
-	for c in _brush_cells(hit):
-		if c >= 0 and grid.in_play(c):
-			cells.append(c)
-	if cells.is_empty():
-		return
-	_stroke(cells, -STROKE, "")
-	history.append({"stroke": cells, "amount": -STROKE})
+func _erase(pick: Dictionary) -> void:
+	if pick.has("pos"):
+		_dab(pick["pos"], -STROKE, "")
 
 
 func _undo() -> void:
 	if history.is_empty():
 		return
 	var a = history.pop_back()
-	# Мазок снимается вычитанием ровно того, что прибавил.
-	if a.has("stroke"):
-		_stroke(a["stroke"], -float(a["amount"]), "")
-	elif a.has("group"):
-		var g: Array = a["group"]
-		for i in range(g.size() - 1, -1, -1):
-			var e: Dictionary = g[i]
-			_stroke([e["cell"]], -float(e["amount"]), "")
+	# Мазок снимается вычитанием ровно того, что прибавил, в том же месте.
+	if a.has("at"):
+		_stroke(a["at"], float(a["rad"]), -float(a["amount"]), "")
 	elif a.has("prop"):
 		props.remove_at(a["prop"])
 	elif a.has("spot"):
@@ -933,15 +920,15 @@ func _unhandled_input(event: InputEvent) -> void:
 				var pick := _pick(event.position)
 				if not pick.is_empty():
 					if event.shift_pressed:
-						_erase(int(pick["hit"]))
+						_erase(pick)
 					else:
-						_paint(int(pick["target"]), current_tool)
+						_paint(pick, current_tool)
 		elif event.button_index == MOUSE_BUTTON_XBUTTON1 and event.pressed:
 			_undo()                                    # 1-я боковая — отмена
 		elif event.button_index == MOUSE_BUTTON_XBUTTON2 and event.pressed:
 			var kill := _pick(event.position)          # 2-я боковая — удалить
 			if not kill.is_empty():
-				_erase(int(kill["hit"]))
+				_erase(kill)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
 			target_zoom = clampf(target_zoom * 0.9, 0.8, 140.0)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
@@ -1076,7 +1063,7 @@ func _selftest() -> void:
 		var warm := 0.0
 		for pass_i in range(2):
 			var t_brush := Time.get_ticks_usec()
-			_paint(grid.cell_at(Vector3(0, 6, 0)), "ground")
+			_dab(grid.seeds[grid.cell_at(Vector3(0, 6, 0))], STROKE, "ground")
 			_flush_chunks()
 			var ms := (Time.get_ticks_usec() - t_brush) / 1000.0
 			if pass_i == 0:
@@ -1168,7 +1155,7 @@ func _seed_structures() -> void:
 				break
 			head = grid.seeds[up_cell]
 			for _again in range(3):
-				_stroke(_brush_cells(up_cell), STROKE, "ground")
+				_stroke(head, _brush_radius(), STROKE, "ground")
 		if placed == 0:
 			_cliff_focus = s + Vector3(0, CELL_SPACING, 0)
 		placed += 1
