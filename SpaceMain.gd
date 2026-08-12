@@ -59,6 +59,7 @@ var _dirty_chunks: Dictionary = {}
 var face_geo: Dictionary = {}     # Vector2i(ячейка, грань) -> её вид после сглаживания
 var edge_faces: Dictionary = {}   # ребро -> какие грани его делят
 var _buried_cache: Dictionary = {}
+var paint: Dictionary = {}        # ячейка -> каким материалом её мазали
 var brush: int = 1                # ширина кисти в ячейках: 1, 2 или 3
 const FILL_BUDGET: int = 24       # мс на достройку мира за кадр
 var fill_done: float = 0.0        # насколько мир достроен
@@ -462,31 +463,49 @@ func _refresh(cell: int) -> void:
 	_mark_dirty_around(cell)
 
 
-# Поставить — значит НАПОЛНИТЬ ячейку. Поверхность после этого проходит не по
-# её границе, а по уровню половинного заполнения, и вздутие выходит плавным.
-func _place(cell: int, material: String = "ground", record: bool = true) -> void:
-	if cell < 0 or solid.has(cell) or not grid.in_play(cell):
+# Постановка — это ЛЕПКА. Один мазок прибавляет земли понемногу, форма
+# набирается несколькими; поверхность идёт по уровню половинного заполнения,
+# поэтому прибавка выходит плавным наплывом, а не глыбой с углами.
+const STROKE: float = 0.42        # сколько добавляет один мазок
+
+func _stroke(cells: Array, amount: float, material: String) -> void:
+	var real: Array = []
+	for c in cells:
+		if c >= 0 and grid.in_play(c):
+			real.append(c)
+			if amount > 0.0:
+				paint[c] = material
+	if real.is_empty():
 		return
-	solid[cell] = material
-	grid.set_edit(cell, 1)
-	_forget_buried(cell)
-	_touch_chunks(cell)
+	# Порода у ячейки появляется и исчезает сама, по уровню заполнения.
+	for c in grid.stroke_many(real, amount):
+		var full: bool = grid.fill_of(c) > 0.5
+		if full and not solid.has(c):
+			solid[c] = paint.get(c, "ground")
+			_forget_buried(c)
+			_touch_chunks(c)
+		elif not full and solid.has(c):
+			solid.erase(c)
+			_forget_buried(c)
+			_touch_chunks(c)
+		else:
+			_touch_chunks(c)
+
+
+func _place(cell: int, material: String = "ground", record: bool = true) -> void:
+	if cell < 0 or not grid.in_play(cell):
+		return
+	_stroke([cell], STROKE, material)
 	if record:
-		history.append({"cell": cell, "added": true})
-	_refresh(cell)
+		history.append({"group": [{"cell": cell, "amount": STROKE, "mat": material}]})
 
 
 func _remove(cell: int, record: bool = true) -> void:
-	if not solid.has(cell):
+	if cell < 0 or not grid.in_play(cell):
 		return
-	var was := material_of(cell)
-	solid.erase(cell)
-	grid.set_edit(cell, -1)
-	_forget_buried(cell)
-	_touch_chunks(cell)
+	_stroke([cell], -STROKE, "")
 	if record:
-		history.append({"cell": cell, "added": false, "was": was})
-	_refresh(cell)
+		history.append({"group": [{"cell": cell, "amount": -STROKE, "mat": ""}]})
 
 
 # --- Кисть -------------------------------------------------------------------
@@ -506,39 +525,39 @@ func _brush_cells(centre: int) -> Array:
 
 # Весь мазок — одно действие: отмена снимает его целиком.
 func _paint(target: int, material: String) -> void:
-	var group: Array = []
+	var cells: Array = []
 	for c in _brush_cells(target):
-		if c < 0 or solid.has(c) or not grid.in_play(c):
-			continue
-		_place(c, material, false)
-		group.append({"cell": c, "added": true})
-	if not group.is_empty():
-		history.append({"group": group})
+		if c >= 0 and grid.in_play(c):
+			cells.append(c)
+	if cells.is_empty():
+		return
+	_stroke(cells, STROKE, material)
+	history.append({"stroke": cells, "amount": STROKE})
 
 
 func _erase(hit: int) -> void:
-	var group: Array = []
+	var cells: Array = []
 	for c in _brush_cells(hit):
-		if not solid.has(c):
-			continue
-		group.append({"cell": c, "added": false, "was": material_of(c)})
-		_remove(c, false)
-	if not group.is_empty():
-		history.append({"group": group})
+		if c >= 0 and grid.in_play(c):
+			cells.append(c)
+	if cells.is_empty():
+		return
+	_stroke(cells, -STROKE, "")
+	history.append({"stroke": cells, "amount": -STROKE})
 
 
 func _undo() -> void:
 	if history.is_empty():
 		return
 	var a = history.pop_back()
-	if a.has("group"):
+	# Мазок снимается вычитанием ровно того, что прибавил.
+	if a.has("stroke"):
+		_stroke(a["stroke"], -float(a["amount"]), "")
+	elif a.has("group"):
 		var g: Array = a["group"]
 		for i in range(g.size() - 1, -1, -1):
 			var e: Dictionary = g[i]
-			if bool(e["added"]):
-				_remove(e["cell"], false)
-			else:
-				_place(e["cell"], e.get("was", "ground"), false)
+			_stroke([e["cell"]], -float(e["amount"]), "")
 	elif a.has("prop"):
 		props.remove_at(a["prop"])
 	elif a.has("spot"):
@@ -579,12 +598,22 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 
 
 # --- Подсветка грани ---------------------------------------------------------
+# Курсор — мягкое светящееся пятно там, куда придётся мазок. Линии контура
+# на крутых местах видны с ребра и читались криво; пятно понятно с любой
+# стороны и не спорит с самой формой земли.
 func _setup_frame() -> void:
 	var mat := StandardMaterial3D.new()
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.albedo_color = Color(1, 1, 1)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
 	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mat.disable_receive_shadows = true
+	mat.albedo_color = Color(0.55, 0.85, 0.45, 0.16)
+	var ball := SphereMesh.new()
+	ball.radial_segments = 20
+	ball.rings = 10
 	frame_node = MeshInstance3D.new()
+	frame_node.mesh = ball
 	frame_node.material_override = mat
 	frame_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	frame_node.visible = false
@@ -607,33 +636,10 @@ func _update_frame() -> void:
 		frame_node.visible = false
 		return
 	frame_node.visible = true
-
-	# Границ ячеек у поверхности больше нет, обводить нечего. Показываем КОЛЬЦО
-	# кисти прямо на земле: сразу видно и куда придётся клик, и какой ширины.
-	# Россыпь значков вместо этого читалась как непонятные многогранники.
-	var at: Vector3 = pick["pos"]
-	var nrm: Vector3 = pick["normal"]
-	var ax: Vector3 = nrm.cross(Vector3.UP)
-	if ax.length() < 0.1:
-		ax = nrm.cross(Vector3.RIGHT)
-	ax = ax.normalized()
-	var az: Vector3 = nrm.cross(ax).normalized()
-	var lift: Vector3 = nrm * (CELL_SPACING * 0.05)
-	var rad: float = CELL_SPACING * (0.5 + 0.5 * float(brush))
-
-	var mesh := ImmediateMesh.new()
-	mesh.surface_begin(Mesh.PRIMITIVE_LINES, frame_node.material_override)
-	var steps := 40
-	for i in range(steps):
-		var a0: float = TAU * float(i) / float(steps)
-		var a1: float = TAU * float(i + 1) / float(steps)
-		mesh.surface_add_vertex(at + lift + (ax * cos(a0) + az * sin(a0)) * rad)
-		mesh.surface_add_vertex(at + lift + (ax * cos(a1) + az * sin(a1)) * rad)
-	# Короткий штырь по нормали — видно, с какой стороны ляжет порода.
-	mesh.surface_add_vertex(at + lift)
-	mesh.surface_add_vertex(at + nrm * (CELL_SPACING * 0.6))
-	mesh.surface_end()
-	frame_node.mesh = mesh
+	# Пятно садится на саму поверхность, чуть утопая в неё, и растёт с кистью.
+	var rad: float = CELL_SPACING * (0.6 + 0.42 * float(brush))
+	frame_node.position = pick["pos"] + pick["normal"] * (rad * 0.25)
+	frame_node.scale = Vector3.ONE * rad
 
 
 # Куда указывает курсор на поверхности: ячейка, грань и её угол.

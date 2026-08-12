@@ -584,43 +584,56 @@ func fill_of(index: int) -> float:
 # резко падает с единицы до нуля, и поверхность режется ровно посередине), а
 # два блока по диагонали касаются лишь точкой — между ними остаётся просвет.
 # С отпечатком поле меняется плавно, блоки сливаются, углы скругляются.
-const STAMP := [1.0, 0.45, 0.31, 0.24]   # по числу шагов: 0, ребро, грань, угол
+const EDIT_R: float = 1.25        # радиус мазка в шагах решётки
+const EDIT_SPAN: int = 2          # столько узлов решётки он захватывает
 
-func set_edit(index: int, sign_of: int) -> void:
-	if index < 0 or index >= fill.size():
-		return
-	if sign_of == 0:
-		edits.erase(index)
-	else:
-		edits[index] = sign_of
-	var node: Vector3i = node_of(index)
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			for dz in range(-1, 2):
-				var j: int = node_seed(node + Vector3i(dx, dy, dz))
-				if j >= 0:
-					_refresh_fill(j)
+# Мазки СКЛАДЫВАЮТСЯ, а не объединяются. Это ключ к слиянию без шва: жёсткое
+# объединение двух отпечатков всегда даёт складку на стыке, а сложение —
+# плавную галтель, как у капель ртути. И вес считается по НАСТОЯЩЕМУ
+# расстоянию, а не по числу шагов по решётке: иначе по диагонали куба отпечаток
+# дотягивается дальше, чем по оси, и ком выпирает углами.
+func stroke_many(cells: Array, amount: float) -> Array:
+	for c in cells:
+		if c >= 0 and c < fill.size():
+			edits[c] = float(edits.get(c, 0.0)) + amount
+			if absf(float(edits[c])) < 0.001:
+				edits.erase(c)
+	# Пересчитываем разом всю задетую округу: у мазка кистью области соседей
+	# перекрываются, и по отдельности это была бы та же работа десять раз.
+	var touched: Dictionary = {}
+	for c in cells:
+		if c < 0:
+			continue
+		var node: Vector3i = node_of(c)
+		for dx in range(-EDIT_SPAN, EDIT_SPAN + 1):
+			for dy in range(-EDIT_SPAN, EDIT_SPAN + 1):
+				for dz in range(-EDIT_SPAN, EDIT_SPAN + 1):
+					var j: int = node_seed(node + Vector3i(dx, dy, dz))
+					if j >= 0:
+						touched[j] = true
+	for j in touched:
+		_refresh_fill(j)
+	return touched.keys()
 
 
-# Заполнение ячейки = природный рельеф, дополненный отпечатками правок вокруг.
-# Считается заново от исходных данных, поэтому отмена возвращает всё точно.
+# Заполнение ячейки = природный рельеф плюс сумма мазков вокруг. Считается
+# заново от исходных данных, поэтому отмена возвращает поверхность точно.
 func _refresh_fill(index: int) -> void:
+	var here: Vector3 = seeds[index]
 	var node: Vector3i = node_of(index)
-	var add := 0.0
-	var cut := 0.0
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			for dz in range(-1, 2):
+	var sum := 0.0
+	for dx in range(-EDIT_SPAN, EDIT_SPAN + 1):
+		for dy in range(-EDIT_SPAN, EDIT_SPAN + 1):
+			for dz in range(-EDIT_SPAN, EDIT_SPAN + 1):
 				var j: int = node_seed(node + Vector3i(dx, dy, dz))
 				if j < 0 or not edits.has(j):
 					continue
-				var steps: int = absi(dx) + absi(dy) + absi(dz)
-				var weight: float = STAMP[steps]
-				if int(edits[j]) > 0:
-					add = maxf(add, weight)
-				else:
-					cut = maxf(cut, weight)
-	fill[index] = clampf(minf(maxf(base_fill[index], add), 1.0 - cut), 0.0, 1.0)
+				var d: float = here.distance_to(seeds[j]) / _spacing
+				if d >= EDIT_R:
+					continue
+				var t: float = 1.0 - (d / EDIT_R) * (d / EDIT_R)
+				sum += float(edits[j]) * t * t
+	fill[index] = clampf(base_fill[index] + sum, 0.0, 1.0)
 
 
 # Семя по узлу решётки — по этому строится разбиение на тетраэдры.
