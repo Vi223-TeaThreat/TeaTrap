@@ -94,6 +94,7 @@ const SPEEDS := [
 var history: Array = []
 
 var frame_node: MeshInstance3D
+var frame_mat: ShaderMaterial
 var frame_id: String = ""
 var fill_label: Label
 
@@ -599,19 +600,10 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 # на крутых местах видны с ребра и читались криво; пятно понятно с любой
 # стороны и не спорит с самой формой земли.
 func _setup_frame() -> void:
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.disable_receive_shadows = true
-	mat.albedo_color = Color(0.55, 0.85, 0.45, 0.16)
-	var ball := SphereMesh.new()
-	ball.radial_segments = 20
-	ball.rings = 10
+	frame_mat = ShaderMaterial.new()
+	frame_mat.shader = load("res://Cursor.gdshader")
 	frame_node = MeshInstance3D.new()
-	frame_node.mesh = ball
-	frame_node.material_override = mat
+	frame_node.material_override = frame_mat
 	frame_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	frame_node.visible = false
 	add_child(frame_node)
@@ -633,10 +625,24 @@ func _update_frame() -> void:
 		frame_node.visible = false
 		return
 	frame_node.visible = true
-	# Пятно садится на саму поверхность, чуть утопая в неё, и растёт с кистью.
-	var rad: float = CELL_SPACING * (0.6 + 0.42 * float(brush))
-	frame_node.position = pick["pos"] + pick["normal"] * (rad * 0.25)
-	frame_node.scale = Vector3.ONE * rad
+
+	# Точка прицела ходит непрерывно, поэтому её передаём каждый кадр, а вот
+	# накладку по форме земли пересобираем только при смене ячейки — иначе
+	# считали бы её по шестьдесят раз в секунду впустую.
+	var rad: float = CELL_SPACING * (0.75 + 0.55 * float(brush))
+	frame_mat.set_shader_parameter("spot", pick["pos"])
+	frame_mat.set_shader_parameter("reach", rad)
+
+	var id := "%d:%d" % [target, brush]
+	if id == frame_id:
+		return
+	frame_id = id
+	var node: Vector3i = grid.node_of(target)
+	var span := 1 + brush
+	var edge := Vector3i(span, span, span)
+	frame_node.mesh = SurfaceScript.build(grid, node - edge, node + edge, _stone_of)
+	if frame_node.mesh == null:
+		frame_node.visible = false
 
 
 # Куда указывает курсор на поверхности: ячейка, грань и её угол.
@@ -1245,7 +1251,7 @@ func _shot_mode() -> void:
 	cur_pitch = -22.0
 	_apply_camera()
 	# Показываем подсветку места посадки: выбираем мох и целимся в центр.
-	_select_tool("moss")
+	_select_tool("ground")
 	frame_node.visible = true
 	Input.warp_mouse(get_viewport().get_visible_rect().size * 0.5)
 	for _i in range(6):
