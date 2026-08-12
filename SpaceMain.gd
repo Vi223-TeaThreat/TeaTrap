@@ -1158,18 +1158,18 @@ func _seed_structures() -> void:
 			continue
 		if _structure_gap != Vector3.ZERO and s.distance_to(_structure_gap) < 5.0:
 			continue
-		var kind := "cliff" if placed == 0 else "building"
-		var storeys := 4 if placed == 0 else 3
+		# Лепим холм так, как это делал бы игрок: несколько мазков подряд по
+		# одному месту, каждый следующий чуть выше. Именно здесь раньше
+		# вылезали летающие лоскуты, поэтому проверять надо этим.
 		var head: Vector3 = s
-		for level in range(storeys):
-			head += Vector3(0, CELL_SPACING, 0)
-			var up_cell: int = grid.cell_at(head)
+		for level in range(5):
+			var up_cell: int = grid.cell_at(head + Vector3(0, CELL_SPACING * 0.6, 0))
 			if up_cell < 0 or not grid.in_play(up_cell):
 				break
 			head = grid.seeds[up_cell]
-			for c in _brush_cells(up_cell):
-				_place(c, kind, false)
-		if kind == "cliff":
+			for _again in range(3):
+				_stroke(_brush_cells(up_cell), STROKE, "ground")
+		if placed == 0:
 			_cliff_focus = s + Vector3(0, CELL_SPACING, 0)
 		placed += 1
 		# Второй объект ставим подальше, чтобы группы не слились в одну.
