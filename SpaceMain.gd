@@ -1044,22 +1044,24 @@ func _audit_surface() -> void:
 	for ch in chunk_list:
 		var lo: Vector3i = ch * CHUNK_NODES
 		SurfaceScript.audit(grid, lo, lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES), edges)
-	var open := 0
-	var over := 0
+	# Рёбра НАПРАВЛЕННЫЕ. У согласованной замкнутой поверхности каждое
+	# направленное ребро встречается ровно один раз, и у каждого есть обратное.
+	# Встретилось дважды — рядом вывернутый треугольник. Нет обратного — дыра.
+	var flipped := 0
+	var holes := 0
 	var shown := 0
 	for k in edges:
-		var n: int = edges[k]
-		if n == 2:
-			continue
-		if n == 1:
-			open += 1
-			if shown < 6:
+		if int(edges[k]) > 1:
+			flipped += 1
+			if shown < 4:
 				shown += 1
-				print("   край дыры: ", k)
-		else:
-			over += 1
-	print("Рёбер поверхности ", edges.size(), ", с одним треугольником — ", open,
-		", более чем с двумя — ", over)
+				print("   вывернуто у ребра ", k)
+			continue
+		var parts: Array = String(k).split(">")
+		if not edges.has("%s>%s" % [parts[1], parts[0]]):
+			holes += 1
+	print("Рёбер поверхности ", edges.size(), ", вывернутых — ", flipped,
+		", незамкнутых — ", holes)
 
 
 func _selftest() -> void:

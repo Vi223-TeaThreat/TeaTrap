@@ -114,20 +114,7 @@ static func _emit_tet(st: SurfaceTool, grid, idx: PackedInt32Array,
 	if poly.is_empty():
 		return false
 
-	# Куда смотреть лицом: от заполненного к пустому.
-	var solid_mid := Vector3.ZERO
-	var empty_mid := Vector3.ZERO
-	var n_in := 0
-	var n_out := 0
-	for c in t:
-		if val[c] > ISO:
-			solid_mid += grid.seeds[idx[c]]
-			n_in += 1
-		else:
-			empty_mid += grid.seeds[idx[c]]
-			n_out += 1
-	var want: Vector3 = (empty_mid / float(n_out) - solid_mid / float(n_in)).normalized()
-	_face(st, poly, want, grid, stone_of)
+	_face(st, poly, _outward(grid, idx, val, t), grid, stone_of)
 	return true
 
 
@@ -161,23 +148,44 @@ static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary) -> void:
 					var poly: Array = tet_polygon(grid, idx, val, t)
 					if poly.is_empty():
 						continue
-					var keys: Array = []
-					for c in poly:
-						keys.append(Vector2i(mini(int(c["a"]), int(c["b"])),
-							maxi(int(c["a"]), int(c["b"]))))
-					for f in range(1, keys.size() - 1):
-						for pair in [[0, f], [f, f + 1], [f + 1, 0]]:
-							var u: Vector2i = keys[pair[0]]
-							var v: Vector2i = keys[pair[1]]
+					var want: Vector3 = _outward(grid, idx, val, t)
+					for f in range(1, poly.size() - 1):
+						var tri: Array = wound([poly[0], poly[f], poly[f + 1]], grid, want)
+						if tri.is_empty():
+							continue
+						# Пишем НАПРАВЛЕННЫЕ рёбра. У согласованной поверхности
+						# каждое направленное ребро встречается ровно один раз:
+						# соседние треугольники проходят общее ребро навстречу
+						# друг другу. Встретилось дважды — треугольник вывернут.
+						for pair in [[0, 1], [1, 2], [2, 0]]:
+							var u := _vkey(tri[pair[0]])
+							var v := _vkey(tri[pair[1]])
 							if u == v:
-								continue          # вырожденное ребро
-							var key := [u, v] if _before(u, v) else [v, u]
-							var s2 := "%d,%d|%d,%d" % [key[0].x, key[0].y, key[1].x, key[1].y]
+								continue
+							var s2 := "%s>%s" % [u, v]
 							edges[s2] = int(edges.get(s2, 0)) + 1
 
 
-static func _before(a: Vector2i, b: Vector2i) -> bool:
-	return a.x < b.x or (a.x == b.x and a.y < b.y)
+static func _vkey(c: Dictionary) -> String:
+	return "%d.%d" % [mini(int(c["a"]), int(c["b"])), maxi(int(c["a"]), int(c["b"]))]
+
+
+static func _outward(grid, idx: PackedInt32Array, val: PackedFloat32Array,
+		t: Array) -> Vector3:
+	var solid_mid := Vector3.ZERO
+	var empty_mid := Vector3.ZERO
+	var n_in := 0
+	var n_out := 0
+	for c in t:
+		if val[c] > ISO:
+			solid_mid += grid.seeds[idx[c]]
+			n_in += 1
+		else:
+			empty_mid += grid.seeds[idx[c]]
+			n_out += 1
+	if n_in == 0 or n_out == 0:
+		return Vector3.UP
+	return (empty_mid / float(n_out) - solid_mid / float(n_in)).normalized()
 
 
 # Точка на ребре и всё, что к ней прилагается: наклон поля и доля породы.
@@ -204,38 +212,39 @@ static func _cut(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid,
 		stone_of: Callable) -> void:
 	for i in range(1, cut.size() - 1):
-		var tri: Array = [cut[0], cut[i], cut[i + 1]]
-		var slopes: Array = []
-		var out := Vector3.ZERO
-		for c in tri:
-			var s: Vector3 = _slope(grid, c)
-			slopes.append(s)
-			out += s
-		# Наружу — по наклону поля в вершинах; он всегда осмыслен у поверхности.
-		# Если вдруг выродился, берём запасное направление от породы к пустоте.
-		if out.length() < 0.0001:
-			out = want
-		else:
-			out = out.normalized()
-
-		var a: Vector3 = tri[0]["p"]
-		var b: Vector3 = tri[1]["p"]
-		var c2: Vector3 = tri[2]["p"]
-		var face_n: Vector3 = (b - a).cross(c2 - a)
-		if face_n.length() < 0.0000000001:
-			continue                      # выродившийся треугольник
-		# В Godot лицевая сторона — обход ПО ЧАСОВОЙ снаружи.
-		if face_n.dot(out) > 0.0:
-			tri.reverse()
-			slopes.reverse()
-
-		for k in range(3):
-			var cc: Dictionary = tri[k]
+		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
+		if tri.is_empty():
+			continue
+		for cc in tri:
 			var stone: float = lerpf(float(stone_of.call(int(cc["a"]))),
 				float(stone_of.call(int(cc["b"]))), float(cc["t"]))
 			st.set_uv(Vector2(stone, 0.5))
-			st.set_normal(slopes[k])
+			st.set_normal(_slope(grid, cc))
 			st.add_vertex(cc["p"])
+
+
+# Разворачиваем треугольник лицом наружу. ЕДИНСТВЕННОЕ место, где решается
+# сторона, — и отрисовка, и проверка целостности ходят через него.
+#
+# Наружу смотрим по направлению от заполненных углов тетраэдра к пустым.
+# Наклон поля для этого не годится: там, где поле упирается в предел и
+# становится плоским, наклон вырождается и может указать не туда — тогда
+# треугольник выворачивается, перестаёт рисоваться со своей стороны, и сквозь
+# него видно небо. Это неотличимо от дыры, хотя сетка остаётся замкнутой.
+static func wound(tri: Array, grid, want: Vector3) -> Array:
+	var a: Vector3 = tri[0]["p"]
+	var b: Vector3 = tri[1]["p"]
+	var c: Vector3 = tri[2]["p"]
+	var face_n: Vector3 = (b - a).cross(c - a)
+	# Порог только против полного вырождения. Отбрасывать «волоски» по
+	# относительному порогу пробовали — вместо ста вывернутых треугольников
+	# получилось семьсот незамкнутых рёбер: щели оказались настоящими дырами.
+	if face_n.length() < 0.000000001:
+		return []
+	# В Godot лицевая сторона — обход ПО ЧАСОВОЙ снаружи.
+	if face_n.dot(want) > 0.0:
+		return [tri[2], tri[1], tri[0]]
+	return tri
 
 
 # Нормаль берём от НАКЛОНА ПОЛЯ, а не от треугольника: она непрерывна и

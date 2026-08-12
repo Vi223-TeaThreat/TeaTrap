@@ -625,7 +625,7 @@ const EDIT_CAP: float = 6.0
 # но и всё, что уже вылеплено рядом. При большой силе мазок возле холма
 # подъедал холм. Держим её слабой: острия она снимает и такой, а форму,
 # сделанную руками, почти не трогает.
-const RELAX: float = 0.12
+const RELAX: float = 0.09
 
 func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 	var touched: Dictionary = {}
@@ -650,15 +650,16 @@ func stroke_at(point: Vector3, radius: float, amount: float) -> Array:
 	# шло лишь по задетым ячейкам, соседи за краем мазка не менялись никогда:
 	# на границе копился уступ, и от повторных наращиваний холм набирал
 	# угловатость. С кольцом мазок растушёвывается в окружающий рельеф.
+	# Кольцо берём узкое — только шесть прямых соседей. По всем двадцати шести
+	# диффузия расползалась заметно дальше мазка и подъедала соседние формы.
 	var zone: Dictionary = touched.duplicate()
 	for j in touched:
 		var node: Vector3i = node_of(j)
-		for dx in range(-1, 2):
-			for dy in range(-1, 2):
-				for dz in range(-1, 2):
-					var n: int = node_seed(node + Vector3i(dx, dy, dz))
-					if n >= 0:
-						zone[n] = true
+		for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+				Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+			var n: int = node_seed(node + step)
+			if n >= 0:
+				zone[n] = true
 
 	for _pass in range(1):
 		var mixed: Dictionary = {}
