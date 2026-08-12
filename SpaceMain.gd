@@ -119,13 +119,10 @@ func _ready() -> void:
 	add_child(props)
 	props.setup(self)
 
-	buildings = SpaceBuildingsScript.new()
-	add_child(buildings)
-	buildings.setup(self)
-
-	rocks = SpaceRocksScript.new()
-	add_child(rocks)
-	rocks.setup(self)
+	# Здания и скальные плиты пока НЕ показываем. Их подошвы считаются по
+	# многогранникам ячеек, а земля теперь идёт по уровню заполнения — плиты
+	# ложились поперёк склона серыми осколками и читались как дыры в земле.
+	# Переезжают на новую поверхность вместе с растениями.
 
 	var args := OS.get_cmdline_user_args()
 	if "--selftest" in args:

@@ -564,11 +564,21 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 		var under: float = (height - s.y) / _spacing
 		var inside: float = (edge - Vector2(s.x, s.z).length()) / _spacing
 		var over: float = (s.y - bottom) / _spacing
-		fill[i] = clampf(0.5 + minf(minf(under, inside), over), 0.0, 1.0)
+		# Соединяем ограничения МЯГКИМ минимумом. Обычный минимум даёт острое
+		# ребро всюду, где два ограничения пересекаются: по кромке острова и
+		# по низу склонов вырастали тонкие гребни-плавники. Мягкий скругляет
+		# стык так же, как сложение мазков скругляет стык лепки.
+		fill[i] = clampf(0.5 + _smin(_smin(under, inside, 0.9), over, 0.9), 0.0, 1.0)
 		if fill[i] > SOLID_AT:
 			solid[i] = true
 	base_fill = fill.duplicate()
 	edits = {}
+
+
+# Мягкий минимум: там, где два ограничения близки, стык скругляется на `k`.
+static func _smin(a: float, b: float, k: float) -> float:
+	var h: float = clampf(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
+	return lerpf(b, a, h) - k * h * (1.0 - h)
 
 
 func fill_of(index: int) -> float:
