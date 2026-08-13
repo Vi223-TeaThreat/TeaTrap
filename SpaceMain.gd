@@ -1311,7 +1311,9 @@ func _seed_moss(count: int) -> void:
 	var tops: Array = []
 	for cell in solid:
 		var s: Vector3 = grid.seeds[cell]
-		if Vector2(s.x, s.z).length() > 5.0 or _buried(cell):
+		# Не на камне: там уже сидят лианы, и в макро-кадре мха за ними не видно.
+		if Vector2(s.x, s.z).length() > 5.0 or _buried(cell) \
+				or grid.stone_of(cell) > 0.15:
 			continue
 		tops.append([s.y, cell])
 	tops.sort_custom(func(a, b): return a[0] > b[0])
@@ -1368,9 +1370,9 @@ func _shot_mode() -> void:
 	if _macro_focus != Vector3.ZERO:
 		cur_pivot = _macro_focus
 		target_pivot = cur_pivot
-		cur_zoom = 3.2
-		target_zoom = 3.2
-		cur_pitch = -32.0
+		cur_zoom = 1.9
+		target_zoom = 1.9
+		cur_pitch = -22.0
 		_apply_camera()
 		for _i in range(4):
 			await get_tree().process_frame

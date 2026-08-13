@@ -39,6 +39,7 @@ var _accum: float = 0.0
 var _next: int = 1
 var _rng := RandomNumberGenerator.new()
 var _material: StandardMaterial3D
+var _blade_mat: StandardMaterial3D
 
 
 func setup(main_ref: Node3D) -> void:
@@ -47,6 +48,69 @@ func setup(main_ref: Node3D) -> void:
 	_material = StandardMaterial3D.new()
 	_material.vertex_color_use_as_albedo = true
 	_material.roughness = 0.95
+
+	# Материал пучков. Прозрачность — ОТСЕЧЕНИЕМ, а не смешиванием: у смешивания
+	# порядок отрисовки решается по расстоянию до всего меша целиком, и сотни
+	# перекрывающихся пучков начинают мигать друг сквозь друга. Отсечение
+	# работает по глубине, как обычная поверхность, и стоит дешевле.
+	#
+	# Стороны не отсекаем: лист один и тот же с обеих сторон.
+	# Фильтр — ближайший: картинка нарочно пиксельная, сглаживание съело бы её.
+	_blade_mat = StandardMaterial3D.new()
+	_blade_mat.albedo_texture = _make_blade_texture()
+	_blade_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+	_blade_mat.alpha_scissor_threshold = 0.5
+	_blade_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_blade_mat.vertex_color_use_as_albedo = true
+	_blade_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	_blade_mat.roughness = 0.95
+	_blade_mat.metallic_specular = 0.05
+
+
+# ПУЧОК ТРАВЫ — рисуем прямо в коде, без файла с картинкой. Четыре разных
+# пучка в одном листе: по два в ряд. Разные пучки на соседних дощечках дают
+# кочке неповторяющийся вид — один и тот же рисунок, повёрнутый вокруг, сразу
+# читается как повторение.
+const TILE: int = 32               # сторона одного пучка в точках
+const ATLAS: int = 2               # столько пучков в ряду
+
+func _make_blade_texture() -> ImageTexture:
+	var size := TILE * ATLAS
+	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 913377
+	# Палитра снизу вверх: у земли бурое, в середине зелёное, на концах жёлтое.
+	var root := Color(0.20, 0.20, 0.09)
+	var mid := Color(0.33, 0.46, 0.15)
+	var tip := Color(0.62, 0.66, 0.26)
+
+	for cy in range(ATLAS):
+		for cx in range(ATLAS):
+			var ox := cx * TILE
+			var oy := cy * TILE
+			for _b in range(rng.randi_range(7, 11)):
+				var x0: float = rng.randf_range(5.0, float(TILE) - 5.0)
+				var high: int = rng.randi_range(13, TILE - 5)
+				var lean: float = rng.randf_range(-7.0, 7.0)
+				var shift: float = rng.randf_range(-0.10, 0.10)
+				for t in range(high):
+					var f: float = float(t) / float(high)
+					# Наклон растёт к концу по квадрату — стебель гнётся, а не
+					# стоит под углом от самого корня.
+					var x: int = int(round(x0 + lean * f * f))
+					var y: int = TILE - 1 - t
+					# Толщина: у корня две точки, к концу одна.
+					var wide: int = 2 if f < 0.55 else 1
+					var col: Color = root.lerp(mid, minf(f * 2.2, 1.0))
+					if f > 0.45:
+						col = col.lerp(tip, (f - 0.45) / 0.55)
+					col = col.lightened(shift) if shift > 0.0 else col.darkened(-shift)
+					for w in range(wide):
+						var px: int = ox + x + w
+						if px >= ox and px < ox + TILE and y >= 0:
+							img.set_pixel(px, oy + y, Color(col.r, col.g, col.b, 1.0))
+	return ImageTexture.create_from_image(img)
 
 
 func _process(delta: float) -> void:
@@ -68,6 +132,8 @@ func plant_at(pos: Vector3, id: String) -> int:
 		return -1
 	var spot: Dictionary = main.grid.surface_near(pos)
 	if spot.is_empty():
+		return -1
+	if not _fits_surface(spot["nrm"], PlantsData.ITEMS[id]):
 		return -1
 	if _crowded(spot["pos"], CROWD * main.CELL_SPACING):
 		return -1
@@ -160,6 +226,22 @@ func _tick(dt: float) -> void:
 	_flush()
 
 
+# На какой земле растение вообще держится. Список сторон берём из каталога:
+# у мха это «низ, верх, бок» — потолка среди них нет, и правильно: мох не
+# растёт вниз головой. Без этой проверки поросль переваливала через кромку
+# острова и свисала с его исподу — в кадре это выглядело как зелёная борода.
+func _fits_surface(nrm: Vector3, def: Dictionary) -> bool:
+	var kinds: Array = def.get("surfaces", [])
+	var where := "under"
+	if nrm.y > 0.45:
+		where = "top"
+	elif nrm.y > -0.25:
+		where = "side"
+	if where == "top":
+		return kinds.has("top") or kinds.has("ground")
+	return kinds.has(where)
+
+
 # Отросток уходит в сторону ПО ЗЕМЛЕ: направление берём в плоскости склона,
 # иначе на крутом месте побег улетал бы в воздух или в породу.
 func _sprout_from(p: Dictionary, def: Dictionary) -> Dictionary:
@@ -178,7 +260,19 @@ func _sprout_from(p: Dictionary, def: Dictionary) -> Dictionary:
 		if up.length_squared() > 0.001:
 			dir = (dir + up.normalized() * climb).normalized()
 	var step: float = main.CELL_SPACING * _rng.randf_range(SPREAD_NEAR, SPREAD_FAR)
-	return main.grid.surface_near(p["pos"] + dir * step)
+	var spot: Dictionary = main.grid.surface_near(p["pos"] + dir * step)
+	if spot.is_empty():
+		return {}
+	# Отросток обязан сесть РЯДОМ и на СВОЙ ЛАД повёрнутую землю. Проверка не
+	# придирка: от точки в воздухе у края острова ближайшая земля — это его
+	# исподняя сторона, и поросль уходила туда одним прыжком, огибая кромку.
+	if spot["pos"].distance_to(p["pos"]) > step * 1.7:
+		return {}
+	if spot["nrm"].dot(p["nrm"]) < 0.35:      # круче ~70° за шаг — это перескок
+		return {}
+	if not _fits_surface(spot["nrm"], def):
+		return {}
+	return spot
 
 
 # Насколько место затенено. Пока у нас нет ни полога, ни солнца, тенью служит
@@ -226,7 +320,8 @@ func surface_changed(cells: Array = []) -> void:
 		# Ушла дальше половины ячейки — значит, землю из-под растения вынули
 		# или засыпали его с головой.
 		if spot.is_empty() \
-				or spot["pos"].distance_to(p["pos"]) > main.CELL_SPACING * 0.5:
+				or spot["pos"].distance_to(p["pos"]) > main.CELL_SPACING * 0.5 \
+				or not _fits_surface(spot["nrm"], PlantsData.ITEMS[p["id"]]):
 			doomed.append(pid)
 			continue
 		var was: int = int(p["cell"])
@@ -262,6 +357,9 @@ func _flush() -> void:
 	_dirty.clear()
 
 
+# У ячейки может выйти ДВА набора граней: пучки на своём материале с картинкой
+# и подушки на простом. Материал вешаем на каждый набор отдельно, а не на весь
+# меш: `material_override` накрыл бы оба одним.
 func _rebuild_cell(cell: int) -> void:
 	if cell_nodes.has(cell):
 		cell_nodes[cell].queue_free()
@@ -270,21 +368,109 @@ func _rebuild_cell(cell: int) -> void:
 	var here: Dictionary = by_cell.get(cell, {})
 	if here.is_empty():
 		return
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var any := false
+
+	var tufts := SurfaceTool.new()
+	tufts.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var cushions := SurfaceTool.new()
+	cushions.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var any_tuft := false
+	var any_cushion := false
 	for pid in here:
-		if patches.has(pid) and _emit_patch(st, patches[pid]):
-			any = true
-	if not any:
+		if not patches.has(pid):
+			continue
+		var p: Dictionary = patches[pid]
+		if str(PlantsData.ITEMS[p["id"]].get("shape", "")) == "vine":
+			if _emit_patch(cushions, p):
+				any_cushion = true
+		elif _emit_tuft(tufts, p):
+			any_tuft = true
+	if not any_tuft and not any_cushion:
 		return
 
+	var mesh: ArrayMesh = null
+	if any_tuft:
+		tufts.set_material(_blade_mat)
+		mesh = tufts.commit()
+	if any_cushion:
+		cushions.set_material(_material)
+		mesh = cushions.commit(mesh)
+
 	var mi := MeshInstance3D.new()
-	mi.mesh = st.commit()
-	mi.material_override = _material
+	mi.mesh = mesh
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
 	cell_nodes[cell] = mi
+
+
+# КОЧКА — не подушка, а ПУЧОК ПЛОСКИХ КАРТИНОК, поставленных под разными
+# углами вокруг своей точки. С любой стороны часть дощечек видна плашмя, часть
+# с ребра — и пучок читается объёмным, ничего объёмного не строя. Так рисуют
+# траву во всех играх, и на пиксельных образцах видно ровно это.
+#
+# Освещаем пучок НОРМАЛЬЮ ЗЕМЛИ, а не своей: у стоячей дощечки нормаль смотрит
+# вбок, и трава на солнечном склоне вышла бы тёмной, будто в тени.
+const BLADES_MIN: int = 3
+const BLADES_MAX: int = 12
+
+func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
+	var def: Dictionary = PlantsData.ITEMS[p["id"]]
+	var m: float = p["m"]
+	var salt: int = int(p["salt"])
+	var centre: Vector3 = p["pos"]
+	var nrm: Vector3 = p["nrm"]
+
+	var side: Vector3 = nrm.cross(Vector3.UP)
+	if side.length_squared() < 0.001:
+		side = nrm.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var along: Vector3 = nrm.cross(side).normalized()
+
+	# Молодая кочка — три былинки, взрослая — дюжина: пучок густеет числом.
+	var count: int = BLADES_MIN + int(float(BLADES_MAX - BLADES_MIN) * m)
+	var reach: float = main.CELL_SPACING * lerpf(0.04, 0.13, m)
+	var tall: float = main.CELL_SPACING * lerpf(0.05, 0.16, m)
+
+	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
+	# и умножение на тёмно-зелёный сделало бы пучок чёрным.
+	var c: Color = def["color"]
+	var lum: float = maxf(0.001, (c.r + c.g + c.b) / 3.0)
+	var hue := Color(c.r / lum, c.g / lum, c.b / lum)
+
+	for i in range(count):
+		# Отходим от середины по кругу, но не по краю: корень квадратный из
+		# случайного даёт равномерное пятно, а не кольцо.
+		var ra: float = TAU * _hash01(salt + i * 13)
+		var rr: float = reach * sqrt(_hash01(salt + i * 71))
+		var at: Vector3 = centre + (side * cos(ra) + along * sin(ra)) * rr
+		# Своя сторона у каждой дощечки — она и даёт «под разными углами».
+		var turn: float = TAU * _hash01(salt + i * 29)
+		var face: Vector3 = side * cos(turn) + along * sin(turn)
+		var w: float = tall * (0.50 + 0.45 * _hash01(salt + i * 97))
+		var h: float = tall * (0.65 + 0.70 * _hash01(salt + i * 53))
+		# Заваливаем дощечку набок — иначе пучок стоит звездой из ровных стенок.
+		var up: Vector3 = (nrm + face * (_hash01(salt + i * 37) - 0.5) * 0.55).normalized()
+		var half: Vector3 = face * (w * 0.5)
+		var foot: Vector3 = at - nrm * (h * 0.12)   # корень чуть утоплен в землю
+
+		var cx: int = (salt + i * 7) % ATLAS
+		var cy: int = (salt / 3 + i * 5) % ATLAS
+		var u0: float = float(cx) / float(ATLAS)
+		var u1: float = float(cx + 1) / float(ATLAS)
+		var v0: float = float(cy) / float(ATLAS)          # верх листа — концы
+		var v1: float = float(cy + 1) / float(ATLAS)      # низ — корни
+
+		var shade: float = 0.80 + 0.34 * _hash01(salt + i * 11)
+		st.set_color((hue * shade).srgb_to_linear())
+		var quad := [foot - half, foot + half,
+			foot + half + up * h, foot - half + up * h]
+		var uvs := [Vector2(u0, v1), Vector2(u1, v1), Vector2(u1, v0), Vector2(u0, v0)]
+		# Стороны у материала не отсекаются, поэтому порядок обхода не важен.
+		for tri in [[0, 1, 2], [0, 2, 3]]:
+			for k in tri:
+				st.set_normal(nrm)
+				st.set_uv(uvs[k])
+				st.add_vertex(quad[k])
+	return count > 0
 
 
 # Кочка: несколько сужающихся кверху колец, каждое со своей неровностью.
