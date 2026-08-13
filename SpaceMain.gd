@@ -278,7 +278,7 @@ func _touch_chunks(cell: int, dirty: bool = true) -> void:
 # Доля породы у семени: 0 земля, 1 камень. Берём её из поля, а не из материала
 # ячейки: там она меняется плавно, и камень сходит в траву без резкой границы.
 func _stone_of(cell: int) -> float:
-	return float(grid.stone.get(cell, 0.0))
+	return grid.stone_of(cell)
 
 
 # Мир достраивается КУСКАМИ, от середины наружу, отпуская кадр между ними.
@@ -471,10 +471,9 @@ func _brush_radius() -> float:
 	return CELL_SPACING * (0.8 + 0.55 * float(brush))
 
 
-func _stroke(at: Vector3, radius: float, amount: float, material: String) -> void:
-	var card: Dictionary = PlantsData.ITEMS.get(material, PlantsData.ITEMS["ground"])
-	var touched: Array = grid.stroke_at(at, radius, amount,
-		float(card.get("stone", 0.0)))
+func _stroke(at: Vector3, radius: float, amount: float, material: String,
+		stone_push: float = 0.0) -> void:
+	var touched: Array = grid.stroke_at(at, radius, amount, stone_push)
 	if amount > 0.0:
 		for c in touched:
 			paint[c] = material
@@ -511,9 +510,18 @@ func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> 
 	# расплывшейся насыпью того же охвата.
 	var tight: float = 0.78 if material == "cliff" else 1.0
 	var rad := _brush_radius() * tight
-	_stroke(at, rad, amount, material)
+	_stroke(at, rad, amount, material, _stone_push(amount, material))
 	if record:
 		history.append({"at": at, "rad": rad, "amount": amount, "mat": material})
+
+
+# Куда мазок ведёт каменистость: кладём камень — к камню, кладём землю — от
+# камня, снимаем — тоже от камня, потому что камень уходит вместе с массой.
+func _stone_push(amount: float, material: String) -> float:
+	if amount < 0.0:
+		return -1.0
+	var card: Dictionary = PlantsData.ITEMS.get(material, PlantsData.ITEMS["ground"])
+	return float(card.get("stone", 0.0)) * 2.0 - 1.0
 
 
 # --- Кисть -------------------------------------------------------------------
@@ -546,9 +554,13 @@ func _undo() -> void:
 	if history.is_empty():
 		return
 	var a = history.pop_back()
-	# Мазок снимается вычитанием ровно того, что прибавил, в том же месте.
+	# Мазок снимается вычитанием ровно того, что прибавил, в том же месте —
+	# и по массе, и по каменистости. Поэтому отмена повторяет мазок с обратным
+	# знаком по обеим величинам, а не «снимает землю»: снятие увело бы камень
+	# прочь и там, где мазок его прибавил.
 	if a.has("at"):
-		_stroke(a["at"], float(a["rad"]), -float(a["amount"]), "")
+		_stroke(a["at"], float(a["rad"]), -float(a["amount"]), "",
+			-_stone_push(float(a["amount"]), String(a["mat"])))
 	elif a.has("prop"):
 		props.remove_at(a["prop"])
 	elif a.has("spot"):
@@ -1116,6 +1128,8 @@ func _selftest() -> void:
 			" мс, после отмены осталось ", solid.size() - was)
 	brush = 1
 
+	_stone_report()
+
 	# Снос настоящей ячейки породы: поверхность обязана перестроиться.
 	var victim := -1
 	for c in solid:
@@ -1160,6 +1174,61 @@ func _selftest() -> void:
 	print("Самопроверка: прицел — ", "мимо" if pick.is_empty() else str(pick["hit"]))
 
 
+# КАМЕНЬ ГЛАЗАМИ ЧИСЕЛ. На картинке не видно, отчего глыба вышла плоской:
+# мало ли положено массы, слаба ли огранка, съела ли её пологость. Меряем всё
+# по отдельности — и заодно проверяем, что отмена уносит и камень тоже.
+func _stone_report() -> void:
+	var at: Vector3 = grid.seeds[grid.cell_at(Vector3(0, 6, 0))]
+	var was_brush := brush
+	brush = 3
+	# Что было ДО мазков: место уже потоптано прежними проверками, и сравнивать
+	# отмену с нулём нельзя — чужой след легко принять за свой непорядок.
+	var near: Array = grid.seeds_near(at, CELL_SPACING * 3.0)
+	var before_fill: Dictionary = {}
+	var before_stone: Dictionary = {}
+	for c in near:
+		before_fill[c] = grid.fill_of(c)
+		before_stone[c] = float(grid.stone.get(c, 0.0))
+
+	for _i in range(3):
+		_dab(at, STROKE, "cliff")
+	_flush_chunks()
+
+	var stone_max := 0.0
+	var lift_max := 0.0
+	var facet_lo := 0.0
+	var facet_hi := 0.0
+	var steep_max := 0.0
+	var stony := 0
+	for c in near:
+		var raw: float = float(grid.stone.get(c, 0.0))
+		stone_max = maxf(stone_max, raw)
+		if grid.stone_of(c) > 0.02:
+			stony += 1
+			var f: float = grid.facet_of(c)
+			facet_lo = minf(facet_lo, f)
+			facet_hi = maxf(facet_hi, f)
+			steep_max = maxf(steep_max, grid.steepness_of(c))
+		lift_max = maxf(lift_max, absf(grid.fill_of(c) - float(before_fill[c])))
+	print("Камень: ячеек с породой — ", stony, ", каменистость до ",
+		snappedf(stone_max, 0.01), ", подъём поля до ", snappedf(lift_max, 0.01),
+		", огранка ", snappedf(facet_lo, 0.01), "…", snappedf(facet_hi, 0.01),
+		", крутизна до ", snappedf(steep_max, 0.01))
+
+	for _i in range(3):
+		_undo()
+	_flush_chunks()
+	var left_fill := 0.0
+	var left_stone := 0.0
+	for c in near:
+		left_fill = maxf(left_fill, absf(grid.fill_of(c) - float(before_fill[c])))
+		left_stone = maxf(left_stone,
+			absf(float(grid.stone.get(c, 0.0)) - float(before_stone[c])))
+	print("Отмена камня: осталось поля ", snappedf(left_fill, 0.001),
+		", каменистости ", snappedf(left_stone, 0.001))
+	brush = was_brush
+
+
 # Засеваем поверхность мхом — для проверки и для наглядного кадра.
 var _macro_focus: Vector3 = Vector3.ZERO
 var _cliff_focus: Vector3 = Vector3.ZERO
@@ -1191,15 +1260,26 @@ func _seed_structures() -> void:
 		# видно, чем камень отличается по форме от насыпи.
 		var kind := "ground" if placed == 0 else "cliff"
 		var head: Vector3 = s
-		for level in range(4):
-			var up_cell: int = grid.cell_at(head + Vector3(0, CELL_SPACING * 0.6, 0))
-			if up_cell < 0 or not grid.in_play(up_cell):
-				break
-			head = grid.seeds[up_cell]
-			for _again in range(3):
-				_stroke(head, _brush_radius(), STROKE, kind)
+		# Камень лепим ШИРЕ земляного холма: столбик в один мазок — это валун
+		# метров шести, а на нём при шаге решётки в 1.8 м умещается одна грань.
+		# Судить облик камня по такому невозможно; массив из нескольких колонн
+		# — то, что игрок и построит, если захочет скалу.
+		var feet: Array = [Vector3.ZERO] if kind == "ground" else [
+			Vector3.ZERO, Vector3(CELL_SPACING * 1.3, 0, 0),
+			Vector3(-CELL_SPACING * 0.9, 0, CELL_SPACING * 1.1),
+			Vector3(CELL_SPACING * 0.4, 0, -CELL_SPACING * 1.4)]
+		for foot in feet:
+			head = s + foot
+			for level in range(4):
+				var up_cell: int = grid.cell_at(head + Vector3(0, CELL_SPACING * 0.6, 0))
+				if up_cell < 0 or not grid.in_play(up_cell):
+					break
+				head = grid.seeds[up_cell]
+				for _again in range(3):
+					_stroke(head, _brush_radius(), STROKE, kind,
+						_stone_push(STROKE, kind))
 		if kind == "cliff":
-			_cliff_focus = head
+			_cliff_focus = s + Vector3(0, CELL_SPACING * 1.2, 0)
 		placed += 1
 		# Второй объект ставим подальше, чтобы группы не слились в одну.
 		if placed == 1:

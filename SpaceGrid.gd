@@ -612,9 +612,7 @@ func fill_of(index: int) -> float:
 # резко падает с единицы до нуля, и поверхность режется ровно посередине), а
 # два блока по диагонали касаются лишь точкой — между ними остаётся просвет.
 # С отпечатком поле меняется плавно, блоки сливаются, углы скругляются.
-const EDIT_R: float = 1.25        # радиус мазка в шагах решётки
-const EDIT_SPAN: int = 2          # столько узлов решётки он захватывает
-
+#
 # Мазки СКЛАДЫВАЮТСЯ, а не объединяются. Это ключ к слиянию без шва: жёсткое
 # объединение двух отпечатков всегда даёт складку на стыке, а сложение —
 # плавную галтель, как у капель ртути. И вес считается по НАСТОЯЩЕМУ
@@ -638,9 +636,32 @@ const EDIT_CAP: float = 6.0
 # подъедал холм. Держим её слабой: острия она снимает и такой, а форму,
 # сделанную руками, почти не трогает.
 const RELAX: float = 0.09
+# Насколько каменистость может уйти за свои границы. Запас нужен, чтобы отмена
+# была точной; наружу всё равно отдаётся доля от нуля до единицы.
+const STONE_ROOM: float = 4.0
 
+
+# Доля породы у ячейки: ноль — земля, единица — скала. Читать каменистость
+# ТОЛЬКО отсюда: в самом словаре лежит необрезанный счёт мазков.
+func stone_of(index: int) -> float:
+	return clampf(float(stone.get(index, 0.0)), 0.0, 1.0)
+
+
+# Для проверок: во что обходится ячейке огранка и насколько круто она стоит.
+func facet_of(index: int) -> float:
+	return _facet(index)
+
+
+func steepness_of(index: int) -> float:
+	return _steepness(index)
+
+
+# `stone_push` — куда мазок ведёт каменистость: +1 прибавляет камня, −1 уводит
+# в землю. Знак задаёт вызывающий, а не выводится из знака мазка: снятие всегда
+# уводит камень прочь, а отмена обязана вернуть ровно то, что было, — для этого
+# она повторяет мазок с обратным знаком по ОБЕИМ величинам.
 func stroke_at(point: Vector3, radius: float, amount: float,
-		stone_amount: float = 0.0) -> Array:
+		stone_push: float = 0.0) -> Array:
 	var touched: Dictionary = {}
 	var span := int(ceil(radius / _cell_size)) + 1
 	var base := _key_of(point)
@@ -659,15 +680,21 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 						-EDIT_CAP, EDIT_CAP)
 					# Каменистость кладётся тем же мазком, поэтому меняется
 					# плавно: у камня нет резкой границы, он сходит на нет.
-					if amount > 0.0:
-						# Каменистость идёт ПО ТОМУ ЖЕ ПРОФИЛЮ, что и прибавка
-						# высоты. Пока она расходилась шире массы, серое
-						# ложилось на ровное место вокруг глыбы: выходило
-						# «покрашено камнем», а не «лежит камень». Множитель
-						# лишь ускоряет насыщение у сердцевины.
+					#
+					# Каменистость идёт ПО ТОМУ ЖЕ ПРОФИЛЮ, что и прибавка
+					# высоты. Пока она расходилась шире массы, серое ложилось
+					# на ровное место вокруг глыбы: выходило «покрашено камнем»,
+					# а не «лежит камень». Множитель лишь ускоряет насыщение
+					# у сердцевины.
+					#
+					# Величину держим НЕОБРЕЗАННОЙ, обрезаем только при чтении.
+					# Обрезка на месте необратима: два мазка камня подряд упёрлись
+					# бы в единицу, и отмена одного из них стёрла бы оба. Теперь
+					# каменистость — счёт положенного, а не сама доля.
+					if stone_push != 0.0:
 						stone[j] = clampf(float(stone.get(j, 0.0))
-							+ (stone_amount * 2.0 - 1.0) * amount * w * w * 1.9,
-							0.0, 1.0)
+							+ stone_push * absf(amount) * w * w * 1.9,
+							-STONE_ROOM, STONE_ROOM)
 					touched[j] = true
 
 	# Сглаживаем не только сам мазок, но и КОЛЬЦО вокруг него. Пока сглаживание
@@ -702,7 +729,7 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 				# Камень ДЕРЖИТ ФОРМУ: к соседям он подтягивается впятеро
 				# слабее земли, поэтому граница глыбы с травой остаётся чёткой,
 				# а не расплывается, как насыпь.
-				var soft: float = lerpf(RELAX, RELAX * 0.2, float(stone.get(j, 0.0)))
+				var soft: float = lerpf(RELAX, RELAX * 0.2, stone_of(j))
 				mixed[j] = lerpf(float(edits.get(j, 0.0)), sum / float(count), soft)
 		for j in mixed:
 			edits[j] = mixed[j]
@@ -710,56 +737,11 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 	for j in zone:
 		if absf(float(edits.get(j, 0.0))) < 0.002:
 			edits.erase(j)
-			fill[j] = base_fill[j]
-		else:
-			fill[j] = base_fill[j] + float(edits[j])
+		# Огранка прибавляется ЗДЕСЬ, на живом пути лепки. Раньше она жила в
+		# пересчёте по ядру, которого никто не звал, и до картинки не доходила:
+		# камень отличался от земли одним цветом.
+		fill[j] = base_fill[j] + float(edits.get(j, 0.0)) + _facet(j)
 	return zone.keys()
-
-
-func stroke_many(cells: Array, amount: float) -> Array:
-	for c in cells:
-		if c >= 0 and c < fill.size():
-			edits[c] = float(edits.get(c, 0.0)) + amount
-			if absf(float(edits[c])) < 0.001:
-				edits.erase(c)
-	# Пересчитываем разом всю задетую округу: у мазка кистью области соседей
-	# перекрываются, и по отдельности это была бы та же работа десять раз.
-	var touched: Dictionary = {}
-	for c in cells:
-		if c < 0:
-			continue
-		var node: Vector3i = node_of(c)
-		for dx in range(-EDIT_SPAN, EDIT_SPAN + 1):
-			for dy in range(-EDIT_SPAN, EDIT_SPAN + 1):
-				for dz in range(-EDIT_SPAN, EDIT_SPAN + 1):
-					var j: int = node_seed(node + Vector3i(dx, dy, dz))
-					if j >= 0:
-						touched[j] = true
-	for j in touched:
-		_refresh_fill(j)
-	return touched.keys()
-
-
-# Заполнение ячейки = природный рельеф плюс сумма мазков вокруг. Считается
-# заново от исходных данных, поэтому отмена возвращает поверхность точно.
-func _refresh_fill(index: int) -> void:
-	var here: Vector3 = seeds[index]
-	var node: Vector3i = node_of(index)
-	var sum := 0.0
-	for dx in range(-EDIT_SPAN, EDIT_SPAN + 1):
-		for dy in range(-EDIT_SPAN, EDIT_SPAN + 1):
-			for dz in range(-EDIT_SPAN, EDIT_SPAN + 1):
-				var j: int = node_seed(node + Vector3i(dx, dy, dz))
-				if j < 0 or not edits.has(j):
-					continue
-				var d: float = here.distance_to(seeds[j]) / _spacing
-				if d >= EDIT_R:
-					continue
-				var t: float = 1.0 - (d / EDIT_R) * (d / EDIT_R)
-				sum += float(edits[j]) * t * t
-	# Тоже без обрезки: мазок сдвигает поверхность ровно на свою величину, и
-	# насыпь растёт от земли, а не всплывает отдельной коркой рядом с ней.
-	fill[index] = base_fill[index] + sum + _facet(index)
 
 
 # ОГРАНЁННОСТЬ КАМНЯ. К полю возле камня добавляется крупный шум: поверхность
@@ -767,13 +749,20 @@ func _refresh_fill(index: int) -> void:
 # снимках. Шипов от этого быть не может — это плавная величина, а не отдельные
 # тела; резкость даёт только частота, и она нарочно низкая.
 #
-# Облик зависит от МЕСТА, как и просили:
+# Облик зависит от МЕСТА:
 #   больше камня в кучке — сильнее гранёность (одинокий валун окатан, массив
 #     набирает уступы);
 #   выше над морем — крупнее и жёстче грани (внизу мягкие спины, наверху плиты);
-#   круче склон — сильнее выступает (на пологом глыба тонет в дёрне).
+#   круче склон — резче выступает (на пологом глыба тонет в дёрне).
+#
+# Величина мала не случайно. Сдвиг поля на единицу двигает поверхность примерно
+# на шаг решётки, то есть почти на два метра: столько «шума» оторвало бы от
+# глыбы куски и разбросало их вокруг. Грани должны читаться уступами, а не
+# перекраивать тело.
+const FACET_AMP: float = 1.10
+
 func _facet(index: int) -> float:
-	var s: float = float(stone.get(index, 0.0))
+	var s: float = stone_of(index)
 	if s < 0.02 or _rock_noise == null:
 		return 0.0
 	var p: Vector3 = seeds[index]
@@ -788,7 +777,33 @@ func _facet(index: int) -> float:
 	# округлыми, потому что подтягиваем лишь частично, а не защёлкиваем.
 	var steps := 2.5
 	n = lerpf(n, round(n * steps) / steps, 0.65)
-	return n * s * s * (0.55 + 0.75 * high)
+	var steep: float = _steepness(index)
+	return n * s * s * (0.55 + 0.75 * high) * (0.45 + 1.05 * steep) * FACET_AMP
+
+
+# Насколько круто стоит поверхность у этой ячейки: 0 — плоско, 1 — отвесно.
+#
+# Считаем по полю БЕЗ огранки. По готовому полю нельзя: огранка тогда кормит
+# сама себя — где она задрала склон, наклон становится круче, огранка ещё
+# сильнее, и камень идёт шипами.
+func _steepness(index: int) -> float:
+	var node: Vector3i = node_of(index)
+	var here: Vector3 = seeds[index]
+	var f0: float = base_fill[index] + float(edits.get(index, 0.0))
+	var g := Vector3.ZERO
+	for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+			Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+		var s: int = node_seed(node + step)
+		if s < 0:
+			continue
+		var d: Vector3 = seeds[s] - here
+		var len2: float = d.length_squared()
+		if len2 > 0.000001:
+			g += d * ((base_fill[s] + float(edits.get(s, 0.0)) - f0) / len2)
+	var mag: float = g.length()
+	if mag < 0.000001:
+		return 0.0
+	return clampf(1.0 - absf(g.y) / mag, 0.0, 1.0)
 
 
 # Семя по узлу решётки — по этому строится разбиение на тетраэдры.
