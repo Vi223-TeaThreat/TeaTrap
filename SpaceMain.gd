@@ -604,6 +604,9 @@ func _setup_frame() -> void:
 
 # Показываем тонкий контур того, что появится по клику: глыбы или пятачка.
 func _update_frame() -> void:
+	if _hide_cursor:
+		frame_node.visible = false
+		return
 	if PlantsData.is_plant(current_tool) or PlantsData.is_prop(current_tool):
 		_update_frame_spot()
 		return
@@ -1161,6 +1164,7 @@ func _selftest() -> void:
 var _macro_focus: Vector3 = Vector3.ZERO
 var _cliff_focus: Vector3 = Vector3.ZERO
 var _structure_gap: Vector3 = Vector3.ZERO
+var _hide_cursor: bool = false
 
 # Для кадра: пара скал и башня из зданий рядом с центром.
 # Строим так же, как строил бы игрок: широкой кистью, слоями вверх. На одной
@@ -1195,7 +1199,7 @@ func _seed_structures() -> void:
 			for _again in range(3):
 				_stroke(head, _brush_radius(), STROKE, kind)
 		if kind == "cliff":
-			_cliff_focus = s + Vector3(0, CELL_SPACING, 0)
+			_cliff_focus = head
 		placed += 1
 		# Второй объект ставим подальше, чтобы группы не слились в одну.
 		if placed == 1:
@@ -1299,6 +1303,7 @@ func _shot_mode() -> void:
 	# Кадр на обрыв: по нему видно слоистость породы и край зелени на кромке.
 	# Надписи убираем — тут смотрят на породу, а не на управление.
 	if _cliff_focus != Vector3.ZERO:
+		_hide_cursor = true          # курсор светит ровно на глыбу и мешает судить
 		frame_node.visible = false
 		for child in get_children():
 			if child is CanvasLayer:
