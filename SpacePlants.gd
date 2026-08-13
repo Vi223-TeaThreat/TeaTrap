@@ -56,7 +56,7 @@ func setup(main_ref: Node3D) -> void:
 	# перекрывающихся пучков начинают мигать друг сквозь друга.
 	_blade_mat = ShaderMaterial.new()
 	_blade_mat.shader = load("res://Blades.gdshader")
-	_blade_mat.set_shader_parameter("blades", _make_blade_texture())
+	_blade_mat.set_shader_parameter("blades", _blade_texture())
 
 
 # ЛИСТ С КУРТИНКАМИ МХА — рисуем прямо в коде, без файла с картинкой.
@@ -78,6 +78,26 @@ func setup(main_ref: Node3D) -> void:
 const TILE: int = 32               # сторона одного пучка в точках
 const STAGES: int = 9              # столько возрастов
 const KINDS: int = 4               # столько разновидностей у каждого возраста
+
+# НАРИСОВАННЫЙ ЛИСТ ГЛАВНЕЕ СЧИТАННОГО. Если в `art/moss.png` лежит картинка,
+# берём её; иначе рисуем сами. Так рисунок от руки подменяет заглушку без
+# единой правки в коде — и без риска потерять заглушку, если файла нет.
+#
+# Разметка листа та же: `KINDS` клеток в ряду (разновидности), `STAGES` рядов
+# (возрасты, сверху молодой), клетка `TILE`×`TILE`, фон прозрачный.
+const ART_PATH := "res://art/moss.png"
+
+func _blade_texture() -> Texture2D:
+	if ResourceLoader.exists(ART_PATH):
+		var drawn = load(ART_PATH)
+		if drawn is Texture2D:
+			var want := Vector2i(TILE * KINDS, TILE * STAGES)
+			if drawn.get_size() != Vector2(want):
+				push_warning("art/moss.png ожидается %d×%d, а он %s"
+					% [want.x, want.y, str(drawn.get_size())])
+			return drawn
+	return _make_blade_texture()
+
 
 func _make_blade_texture() -> ImageTexture:
 	var img := Image.create(TILE * KINDS, TILE * STAGES, false, Image.FORMAT_RGBA8)
