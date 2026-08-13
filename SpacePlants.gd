@@ -25,11 +25,12 @@ const TICK: float = 0.15
 const STEPS: int = 9
 
 # Насколько далеко от себя растение даёт отросток, в долях шага решётки.
-const SPREAD_NEAR: float = 0.20
-const SPREAD_FAR: float = 0.60
+const SPREAD_NEAR: float = 0.13
+const SPREAD_FAR: float = 0.34
 # Ближе этого друг к другу не садимся: иначе пятно сгущается в одну точку и
-# кочки лезут одна из другой.
-const CROWD: float = 0.17
+# кочки лезут одна из другой. Подушки должны СМЫКАТЬСЯ краями, поэтому зазор
+# чуть меньше их поперечника.
+const CROWD: float = 0.15
 
 var main: Node3D
 var patches: Dictionary = {}      # номер -> {pos, nrm, id, m, step, cell, salt}
@@ -199,10 +200,11 @@ func _create(spot: Dictionary, id: String, maturity: float) -> int:
 	var pid := _next
 	_next += 1
 	var cell: int = int(spot["cell"])
+	var salt: int = pid * 7919 + int(absf(spot["pos"].x) * 131)
 	patches[pid] = {
 		"pos": spot["pos"], "nrm": spot["nrm"], "id": id,
-		"m": maturity, "step": -1, "cell": cell,
-		"salt": pid * 7919 + int(absf(spot["pos"].x) * 131),
+		"m": maturity, "step": -1, "cell": cell, "salt": salt,
+		"blades": _make_blades(spot, PlantsData.ITEMS[id], salt),
 	}
 	if not by_cell.has(cell):
 		by_cell[cell] = {}
@@ -359,6 +361,9 @@ func surface_changed(cells: Array = []) -> void:
 		var was: int = int(p["cell"])
 		p["pos"] = spot["pos"]
 		p["nrm"] = spot["nrm"]
+		# Земля сдвинулась — раскладку ворсинок пересаживаем заново, иначе
+		# подушка останется висеть по старому рельефу.
+		p["blades"] = _make_blades(spot, PlantsData.ITEMS[p["id"]], int(p["salt"]))
 		var now: int = int(spot["cell"])
 		if now != was:
 			if by_cell.has(was):
@@ -441,55 +446,86 @@ func _rebuild_cell(cell: int) -> void:
 # вбок, и трава на солнечном склоне вышла бы тёмной, будто в тени.
 # Дощечек в пучке. Кочка должна быть ГУСТОЙ: редкий пучок читается пучком
 # соломы, а не подушкой мха.
-const BLADES_MIN: int = 4
-const BLADES_MAX: int = 18
-# Насколько сильно край кочки идёт вслед за выпуклостью земли. Подбиралось по
-# кадру на валуне: при нуле пучок висит над камнем, при большом — врастает в него.
-const CURVE_DROP: float = 2.6
+# Ворсинок в подушке. Их МНОГО и они МЕЛКИЕ: пышность набирается числом, а
+# несколько крупных дощечек всегда читаются несколькими дощечками.
+const BLADES_MAX: int = 22
+const BLADES_MIN: int = 3
+# Насколько подушка выпуклая: середина приподнята над краем на эту долю своей
+# высоты. Без этого все ворсинки стоят корнями на одном уровне, и кочка выходит
+# плоской лепёшкой, сколько ни добавляй дощечек.
+const DOME: float = 0.55
 
-func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
-	var def: Dictionary = PlantsData.ITEMS[p["id"]]
-	var m: float = p["m"]
-	var salt: int = int(p["salt"])
-	var centre: Vector3 = p["pos"]
-	var nrm: Vector3 = p["nrm"]
 
+# РАСКЛАДКА ВОРСИНОК СЧИТАЕТСЯ ОДИН РАЗ, при рождении кочки, и живёт с ней.
+#
+# Каждая ворсинка сажается на НАСТОЯЩУЮ землю — поиском по полю. Раньше место
+# бралось по плоскости наклона с поправкой на кривизну, и на валуне подушка то
+# висела в воздухе, то уходила внутрь камня: одной кривизной изгиб не описать.
+# Считать это на каждой перестройке нельзя (сорок пять секунд роста стоили
+# двадцати четырёх секунд счёта), а один раз на кочку — вполне.
+#
+# Порядок ворсинок — ОТ СЕРЕДИНЫ К КРАЮ, по золотому углу. Тогда растущая
+# подушка добавляет их с краю, а не втыкает посреди уже готовых: разрастание
+# читается разрастанием, а не мельтешением.
+func _make_blades(spot: Dictionary, def: Dictionary, salt: int) -> Array:
+	var centre: Vector3 = spot["pos"]
+	var nrm: Vector3 = spot["nrm"]
 	var side: Vector3 = nrm.cross(Vector3.UP)
 	if side.length_squared() < 0.001:
 		side = nrm.cross(Vector3.RIGHT)
 	side = side.normalized()
 	var along: Vector3 = nrm.cross(side).normalized()
 
-	# Молодая кочка — несколько ворсинок, взрослая — густая подушка.
-	var count: int = BLADES_MIN + int(float(BLADES_MAX - BLADES_MIN) * m)
-	var reach: float = main.CELL_SPACING * lerpf(0.04, 0.13, m)
-	var tall: float = main.CELL_SPACING * lerpf(0.05, 0.16, m)
-
-	# ЗЕМЛЯ ПОД КОЧКОЙ ВЫГНУТА. Ворсинки отступают от середины по плоскости
-	# наклона, а поверхность из-под них уходит вниз — на валуне край пучка
-	# повисал над камнем с ясно видимым зазором.
-	#
-	# Считаем это ПО КРИВИЗНЕ, а не поиском земли под каждой ворсинкой. Поиск
-	# точен, но он ходит по полю, а пучок пересобирается на каждой ступени
-	# роста: с ним сорок пять секунд жизни сада стоили двадцати четырёх секунд
-	# счёта вместо полусекунды. Кривизна же у сетки уже посчитана — это та самая
-	# впадина, с минусом на выпуклом. Просадка на расстоянии r от середины идёт
-	# как r², и одного числа на всю кочку хватает.
-	var bulge: float = maxf(0.0, -main.grid.cavity_of(int(p["cell"]))) \
-		* CURVE_DROP / main.CELL_SPACING
-
-	# ЛИАНА — тот же пучок, но не круглый, а вытянутый по подъёму: плеть ползёт
-	# вверх по склону узкой полосой. Своей формы — стебля с листьями — у неё
-	# пока нет, и это заглушка, а не решение.
+	# Лиана ползёт вверх по склону узкой полосой — её пятно вытянуто. Сильнее
+	# полутора раз растягивать нельзя: дощечки выстраиваются вдоль одной оси и
+	# складываются стопкой, как страницы в книге.
 	var creep: float = 1.0
-	var climb_dir: Vector3 = side
 	if str(def.get("shape", "")) == "vine":
 		var up: Vector3 = Vector3.UP - nrm * nrm.dot(Vector3.UP)
 		if up.length_squared() > 0.001:
-			climb_dir = up.normalized()
-			side = climb_dir
+			side = up.normalized()
 			along = nrm.cross(side).normalized()
-		creep = 2.4
+		creep = 1.5
+
+	var span: float = main.CELL_SPACING * 0.115      # радиус взрослой подушки
+	var out: Array = []
+	for i in range(BLADES_MAX):
+		var t: float = float(i) / float(BLADES_MAX - 1)
+		var r: float = sqrt(t)                       # равномерно по площади
+		var a: float = float(i) * 2.39996323          # золотой угол: без колец и лучей
+		var wob: float = 0.72 + 0.56 * _hash01(salt + i * 7717)
+		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a))
+		var at: Vector3 = centre + dir * (r * span * wob)
+		var on: Dictionary = main.grid.surface_near(at)
+		var pos: Vector3 = on["pos"] if not on.is_empty() else at
+		var up_n: Vector3 = on["nrm"] if not on.is_empty() else nrm
+		out.append({
+			"pos": pos, "nrm": up_n,
+			"out": dir.normalized() if dir.length_squared() > 0.0001 else side,
+			"r": r,
+			"turn": TAU * _hash01(salt + i * 2113),
+			"lean": _hash01(salt + i * 3319) - 0.5,
+			"wide": 0.70 + 0.60 * _hash01(salt + i * 4409),
+			"high": 0.65 + 0.70 * _hash01(salt + i * 5501),
+			"kind": int(_hash01(salt + i * 6607) * float(KINDS)) % KINDS,
+			"shade": 0.90 + 0.18 * _hash01(salt + i * 8819),
+		})
+	return out
+
+
+func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
+	var def: Dictionary = PlantsData.ITEMS[p["id"]]
+	var m: float = p["m"]
+	var blades: Array = p.get("blades", [])
+	if blades.is_empty():
+		return false
+
+	# Молодая кочка — три ворсинки, взрослая — все тридцать. Растёт и число, и
+	# рост каждой: одним ростом получается раздутая копия младенца.
+	var count: int = clampi(BLADES_MIN + int(float(BLADES_MAX - BLADES_MIN) * m),
+		BLADES_MIN, BLADES_MAX)
+	var tall: float = main.CELL_SPACING * lerpf(0.035, 0.105, m)
+	var stage: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
 	# и умножение на тёмно-зелёный сделало бы пучок чёрным. И оттенок подмешиваем
@@ -501,46 +537,37 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		Color(c.r / lum, c.g / lum, c.b / lum), 0.5)
 
 	for i in range(count):
-		# Отходим от середины по кругу, но не по краю: корень квадратный из
-		# случайного даёт равномерное пятно, а не кольцо.
-		var ra: float = TAU * _hash01(salt + i * 13)
-		var rr: float = reach * sqrt(_hash01(salt + i * 71))
-		var out: Vector3 = (side * (cos(ra) * creep) + along * sin(ra)).normalized()
-		var at: Vector3 = centre + (side * (cos(ra) * creep) + along * sin(ra)) * rr \
-			- nrm * (bulge * rr * rr)
-		var stand: Vector3 = nrm
-		# Своя сторона у каждой дощечки — она и даёт «под разными углами».
-		var turn: float = TAU * _hash01(salt + i * 29)
+		var b: Dictionary = blades[i]
+		var stand: Vector3 = b["nrm"]
+		var side: Vector3 = stand.cross(Vector3.UP)
+		if side.length_squared() < 0.001:
+			side = stand.cross(Vector3.RIGHT)
+		side = side.normalized()
+		var along: Vector3 = stand.cross(side).normalized()
+		var turn: float = float(b["turn"])
 		var face: Vector3 = side * cos(turn) + along * sin(turn)
-		# Подушка ШИРЕ, чем выше: мох стелется, а не тянется вверх.
-		var w: float = tall * (1.15 + 0.55 * _hash01(salt + i * 97))
-		# КРАЙ КОЧКИ ЛОЖИТСЯ. В середине былинки стоят торчком, а к краю всё
-		# сильнее заваливаются наружу и к земле — так растёт живая подушка: она
-		# расползается кромкой, а не обрывается стенкой. Заодно пропадает вид
-		# щётки: у щётки все ворсинки одной высоты и одного наклона.
-		var edge: float = rr / maxf(reach, 0.0001)
-		var lie: float = edge * edge * 0.85
-		var h: float = tall * (0.60 + 0.45 * _hash01(salt + i * 53)) * (1.0 - 0.35 * lie)
-		# Заваливаем дощечку набок — иначе пучок стоит звездой из ровных стенок.
-		var up: Vector3 = (stand * (1.0 - lie * 0.75) + out * lie
-			+ face * (_hash01(salt + i * 37) - 0.5) * 0.55).normalized()
-		var half: Vector3 = face * (w * 0.5)
-		var foot: Vector3 = at - stand * (h * 0.22)  # корень утоплен в землю
 
-		# Столбец — разновидность, строка — возраст. Возраст берём у растения,
-		# разновидность у самой дощечки: в одном пучке стоят разные былинки.
-		var cx: int = (salt + i * 7) % KINDS
-		var cy: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
+		# ВЫПУКЛОСТЬ ПОДУШКИ: середина поднята, край лежит на земле. Отсюда и
+		# пышность — силуэт становится куполом, а не блином.
+		var r: float = float(b["r"])
+		var rise: float = (1.0 - r * r) * tall * DOME
+		# Край ЗАВАЛИВАЕТСЯ наружу: подушка расползается кромкой, а не
+		# обрывается стенкой.
+		var lie: float = r * r * 0.8
+		var w: float = tall * float(b["wide"])
+		var h: float = tall * float(b["high"]) * (1.0 - 0.3 * lie)
+		var up: Vector3 = (stand * (1.0 - lie * 0.7) + Vector3(b["out"]) * lie
+			+ face * (float(b["lean"]) * 0.5)).normalized()
+		var half: Vector3 = face * (w * 0.5)
+		var foot: Vector3 = Vector3(b["pos"]) + stand * (rise - h * 0.30)
+
+		var cx: int = int(b["kind"])
 		var u0: float = float(cx) / float(KINDS)
 		var u1: float = float(cx + 1) / float(KINDS)
-		var v0: float = float(cy) / float(STAGES)         # верх клетки — концы
-		var v1: float = float(cy + 1) / float(STAGES)     # низ — корни
+		var v0: float = float(stage) / float(STAGES)      # верх клетки — концы
+		var v1: float = float(stage + 1) / float(STAGES)  # низ — корни
 
-		# Разброс яркости между дощечками МАЛЫЙ. При большом соседние ворсинки
-		# одной подушки отличаются как день и ночь, и бархат рассыпается на
-		# отдельные лоскуты. У живого мха вся куртинка почти одного тона.
-		var shade: float = 0.92 + 0.14 * _hash01(salt + i * 11)
-		st.set_color((hue * shade).srgb_to_linear())
+		st.set_color((hue * float(b["shade"])).srgb_to_linear())
 		var quad := [foot - half, foot + half,
 			foot + half + up * h, foot - half + up * h]
 		var uvs := [Vector2(u0, v1), Vector2(u1, v1), Vector2(u1, v0), Vector2(u0, v0)]
@@ -553,41 +580,45 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 
 	# ШАПКА. Стоячие дощечки видны сверху с ребра, и посреди пучка зияет плешь —
 	# смотришь на кочку сверху, а видишь землю между ворсинками. Кладём поверх
-	# несколько лоскутов ПО ЗЕМЛЕ: сверху они закрывают середину, сбоку почти не
-	# видны. У мха это ещё и правда: подушка сверху сплошная.
-	var caps: int = 2 + int(3.0 * m)
+	# несколько лоскутов ПО ЗЕМЛЕ, по макушке купола: сверху они закрывают
+	# середину, сбоку почти не видны. У мха это ещё и правда: подушка сверху
+	# сплошная.
+	var caps: int = 2 + int(7.0 * m)
 	for i in range(caps):
-		var ca: float = TAU * _hash01(salt + 401 + i * 61)
-		var cr: float = reach * 0.55 * sqrt(_hash01(salt + 233 + i * 17))
-		var cdir: Vector3 = side * (cos(ca) * creep) + along * sin(ca)
-		var cn: Vector3 = nrm
-		var cp: Vector3 = centre + cdir * cr - nrm * (bulge * cr * cr)
-		var turn2: float = TAU * _hash01(salt + 577 + i * 43)
-		var e1: Vector3 = (side * cos(turn2) + along * sin(turn2)) * (reach * 0.72)
-		var e2: Vector3 = (side * -sin(turn2) + along * cos(turn2)) * (reach * 0.62)
-		# Приподнимаем на высоту подушки: шапка лежит по её макушке, не по земле.
-		var lift: Vector3 = cn * (tall * (0.34 + 0.22 * _hash01(salt + i * 29)))
-		var c0: Vector3 = cp + lift
+		var b: Dictionary = blades[(i * 5 + 1) % count]
+		var cn: Vector3 = b["nrm"]
+		var cs: Vector3 = cn.cross(Vector3.UP)
+		if cs.length_squared() < 0.001:
+			cs = cn.cross(Vector3.RIGHT)
+		cs = cs.normalized()
+		var cl: Vector3 = cn.cross(cs).normalized()
+		var cr: float = float(b["r"])
+		var turn2: float = float(b["turn"]) * 0.7
+		# Шапки МЕЛКИЕ. Крупная лежачая заплата видна сбоку плоским листом, и
+		# подушка сразу читается наклейкой; мелкие же прячутся между ворсинками
+		# и делают своё дело только сверху.
+		var wide: float = tall * (0.50 + 0.30 * float(b["wide"]))
+		var e1: Vector3 = (cs * cos(turn2) + cl * sin(turn2)) * wide
+		var e2: Vector3 = (cs * -sin(turn2) + cl * cos(turn2)) * (wide * 0.85)
+		# Кладём по макушке купола, а не по земле: иначе шапка торчит из-под
+		# ворсинок юбкой.
+		var c0: Vector3 = Vector3(b["pos"]) \
+			+ cn * ((1.0 - cr * cr) * tall * DOME + tall * 0.20)
 		var cap := [c0 - e1 - e2, c0 + e1 - e2, c0 + e1 + e2, c0 - e1 + e2]
 		# Берём середину клетки — самую густую часть подушки, без её края.
-		var mu0: float = float(cx_cap(salt, i)) / float(KINDS) + 0.18 / float(KINDS)
-		var mu1: float = float(cx_cap(salt, i)) / float(KINDS) + 0.82 / float(KINDS)
-		var stage: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
+		var ck: int = int(b["kind"])
+		var mu0: float = (float(ck) + 0.18) / float(KINDS)
+		var mu1: float = (float(ck) + 0.82) / float(KINDS)
 		var mv0: float = (float(stage) + 0.10) / float(STAGES)
 		var mv1: float = (float(stage) + 0.62) / float(STAGES)
 		var cuv := [Vector2(mu0, mv1), Vector2(mu1, mv1), Vector2(mu1, mv0), Vector2(mu0, mv0)]
-		var cshade: float = 0.95 + 0.12 * _hash01(salt + 811 + i * 13)
-		st.set_color((hue * cshade).srgb_to_linear())
+		st.set_color((hue * float(b["shade"])).srgb_to_linear())
 		for tri2 in [[0, 1, 2], [0, 2, 3]]:
 			for k in tri2:
 				st.set_normal(cn)
 				st.set_uv(cuv[k])
 				st.add_vertex(cap[k])
 	return count > 0
-
-
-func cx_cap(salt: int, i: int) -> int:
-	return (salt / 5 + i * 3) % KINDS
 
 
 func _hash01(n: int) -> float:

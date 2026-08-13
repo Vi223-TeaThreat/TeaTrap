@@ -217,6 +217,7 @@ func _process(delta: float) -> void:
 	cur_pivot = cur_pivot.lerp(target_pivot, t)
 	_apply_camera()
 	_update_frame()
+	_hold_tick(delta)
 	if fill_label != null:
 		fill_label.visible = fill_done < 1.0
 		if fill_done < 1.0:
@@ -522,7 +523,7 @@ func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> 
 			return
 		_after_field_change(delta.keys())
 		if record:
-			history.append({"blur": delta})
+			history.append({"blur": delta, "group": _group})
 		return
 
 	# Камень кладём ТЕСНЕЕ земли: глыба должна быть плотным телом, а не
@@ -531,7 +532,8 @@ func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> 
 	var rad := _brush_radius() * tight
 	_stroke(at, rad, amount, material, _stone_push(amount, material))
 	if record:
-		history.append({"at": at, "rad": rad, "amount": amount, "mat": material})
+		history.append({"at": at, "rad": rad, "amount": amount, "mat": material,
+			"group": _group})
 
 
 # Куда мазок ведёт каменистость: кладём камень — к камню, кладём землю — от
@@ -569,9 +571,21 @@ func _erase(pick: Dictionary) -> void:
 		_dab(pick["pos"], -STROKE, "")
 
 
+# Отменяем ВСЁ ОДНО ПРОВЕДЕНИЕ кистью, а не последний мазок. Пока кнопка
+# держалась, мазки шли десятками, и снимать их поодиночке — мука.
 func _undo() -> void:
 	if history.is_empty():
 		return
+	var mark: int = int(history[history.size() - 1].get("group", 0))
+	_undo_one()
+	if mark == 0:
+		return
+	while not history.is_empty() \
+			and int(history[history.size() - 1].get("group", 0)) == mark:
+		_undo_one()
+
+
+func _undo_one() -> void:
 	var a = history.pop_back()
 	# Мазок снимается вычитанием ровно того, что прибавил, в том же месте —
 	# и по массе, и по каменистости. Поэтому отмена повторяет мазок с обратным
@@ -705,7 +719,7 @@ func _try_put(screen_pos: Vector2) -> void:
 		return                       # объекты ждут своего переезда
 	var pid: int = plants.plant_at(spot["pos"], current_tool)
 	if pid >= 0:
-		history.append({"plant": pid})
+		history.append({"plant": pid, "group": _group})
 
 
 # Убрать то, что растёт под прицелом.
@@ -948,25 +962,75 @@ func _setup_hint() -> void:
 
 
 # --- Ввод --------------------------------------------------------------------
+# Кисть ведут удержанием. Первый мазок ложится сразу по нажатию, дальше они идут
+# через `HOLD_STEP` — пауза перед вторым чуть длиннее, чтобы одиночный щелчок не
+# превращался в два мазка от дрожи руки.
+const HOLD_FIRST: float = 0.22
+const HOLD_STEP: float = 0.07
+
+var held: bool = false
+var held_erase: bool = false
+var _hold_wait: float = 0.0
+var _group: int = 0            # каким числом помечены мазки одного проведения
+var _group_next: int = 1
+
+
+# Один мазок в точке экрана — тем, что сейчас выбрано в панели.
+func _apply_at(screen_pos: Vector2, erase: bool) -> void:
+	if PlantsData.is_plant(current_tool) or PlantsData.is_prop(current_tool):
+		if erase:
+			_try_clear(screen_pos)
+		else:
+			_try_put(screen_pos)
+		return
+	var pick := _pick(screen_pos)
+	if pick.is_empty():
+		return
+	if erase:
+		_erase(pick)
+	else:
+		_paint(pick, current_tool)
+
+
+# Одно проведение кистью — ОДНА отмена. Иначе, проведя по склону, пришлось бы
+# щёлкать отмену столько же раз, сколько легло мазков.
+func _open_group() -> void:
+	_group = _group_next
+	_group_next += 1
+
+
+func _close_group() -> void:
+	_group = 0
+
+
+func _hold_tick(delta: float) -> void:
+	if not held:
+		return
+	_hold_wait -= delta
+	if _hold_wait > 0.0:
+		return
+	_hold_wait = HOLD_STEP
+	_apply_at(get_viewport().get_mouse_position(), held_erase)
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			orbiting = event.pressed
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			panning = event.pressed
-		elif event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
-			if PlantsData.is_plant(current_tool) or PlantsData.is_prop(current_tool):
-				if event.shift_pressed:
-					_try_clear(event.position)
-				else:
-					_try_put(event.position)
+		elif event.button_index == MOUSE_BUTTON_LEFT:
+			# Кисть ведут НАЖАТИЕМ И УДЕРЖАНИЕМ. Пока кнопка держится, мазок
+			# повторяется сам — иначе насыпать холм значит долбить по кнопке
+			# три десятка раз, и рука устаёт раньше, чем появляется форма.
+			held = event.pressed
+			held_erase = event.shift_pressed
+			if event.pressed:
+				_open_group()
+				_apply_at(event.position, event.shift_pressed)
+				_hold_wait = HOLD_FIRST
 			else:
-				var pick := _pick(event.position)
-				if not pick.is_empty():
-					if event.shift_pressed:
-						_erase(pick)
-					else:
-						_paint(pick, current_tool)
+				_close_group()
 		elif event.button_index == MOUSE_BUTTON_XBUTTON1 and event.pressed:
 			_undo()                                    # 1-я боковая — отмена
 		elif event.button_index == MOUSE_BUTTON_XBUTTON2 and event.pressed:
