@@ -732,21 +732,60 @@ func _try_clear(screen_pos: Vector2) -> void:
 		plants.remove_at(pid)
 
 
-# --- Панель ярусов -----------------------------------------------------------
+# --- Панели ------------------------------------------------------------------
+# Панель слева отдана ТОЛЬКО выбору: что кладём и какой ширины кисть. Время
+# уехало в свою панель справа — оно к выбору породы отношения не имеет, а две
+# строки наверху отодвигали список вниз и мешали читать его как одно целое.
+#
+# Список ужат: мельче шрифт, теснее строки, подписи без отступов пробелами.
+# Подсказки к ярусам («самые высокие») ушли во всплывающие — они длиннее самих
+# названий и вдвое расширяли панель.
+const UI_FONT: int = 13
+const UI_FONT_SMALL: int = 11
+
+func _panel_box(round_right: bool) -> StyleBoxFlat:
+	var box := StyleBoxFlat.new()
+	box.bg_color = Color(0.06, 0.08, 0.07, 0.55)
+	box.content_margin_left = 8
+	box.content_margin_right = 8
+	box.content_margin_top = 6
+	box.content_margin_bottom = 6
+	if round_right:
+		box.corner_radius_top_right = 10
+		box.corner_radius_bottom_right = 10
+	else:
+		box.corner_radius_top_left = 10
+		box.corner_radius_bottom_left = 10
+	return box
+
+
+# Кнопка списка: плоская, без рамки фокуса, с мелким шрифтом и тесными полями.
+func _list_button(size: int = UI_FONT) -> Button:
+	var b := Button.new()
+	b.flat = true
+	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	b.focus_mode = Control.FOCUS_NONE
+	b.add_theme_font_size_override("font_size", size)
+	b.add_theme_constant_override("h_separation", 0)
+	# Поля у кнопки по умолчанию щедрые — из них и набегает высота списка.
+	# Подменяем их пустой рамкой с узкими полями, иначе шрифт мельче, а строки
+	# всё те же.
+	var tight := StyleBoxEmpty.new()
+	tight.content_margin_left = 2
+	tight.content_margin_right = 4
+	tight.content_margin_top = 1
+	tight.content_margin_bottom = 1
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		b.add_theme_stylebox_override(state, tight)
+	return b
+
+
 func _setup_toolbar() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 
 	var panel := PanelContainer.new()
-	var box := StyleBoxFlat.new()
-	box.bg_color = Color(0.06, 0.08, 0.07, 0.55)
-	box.content_margin_left = 10
-	box.content_margin_right = 18
-	box.content_margin_top = 8
-	box.content_margin_bottom = 8
-	box.corner_radius_top_right = 10
-	box.corner_radius_bottom_right = 10
-	panel.add_theme_stylebox_override("panel", box)
+	panel.add_theme_stylebox_override("panel", _panel_box(true))
 	panel.anchor_top = 1.0
 	panel.anchor_bottom = 1.0
 	panel.offset_left = 12
@@ -756,53 +795,14 @@ func _setup_toolbar() -> void:
 	layer.add_child(panel)
 
 	var column := VBoxContainer.new()
-	column.add_theme_constant_override("separation", 1)
+	column.add_theme_constant_override("separation", 0)
 	panel.add_child(column)
-
-	var speed_title := Label.new()
-	speed_title.text = "Время"
-	speed_title.modulate = Color(1, 1, 1, 0.55)
-	column.add_child(speed_title)
-
-	var speed_row := HBoxContainer.new()
-	speed_row.add_theme_constant_override("separation", 2)
-	column.add_child(speed_row)
-	for i in range(SPEEDS.size()):
-		var sb := Button.new()
-		sb.flat = true
-		sb.focus_mode = Control.FOCUS_NONE
-		sb.pressed.connect(_set_time_scale.bind(i))
-		speed_row.add_child(sb)
-		speed_buttons.append(sb)
-
-	var brush_title := Label.new()
-	brush_title.text = "Кисть"
-	brush_title.modulate = Color(1, 1, 1, 0.55)
-	column.add_child(brush_title)
-
-	var brush_row := HBoxContainer.new()
-	brush_row.add_theme_constant_override("separation", 2)
-	column.add_child(brush_row)
-	for w in BRUSHES:
-		var bb := Button.new()
-		bb.flat = true
-		bb.focus_mode = Control.FOCUS_NONE
-		bb.pressed.connect(_set_brush.bind(int(w["width"])))
-		brush_row.add_child(bb)
-		brush_buttons.append(bb)
-
-	var gap := Control.new()
-	gap.custom_minimum_size = Vector2(0, 8)
-	column.add_child(gap)
 
 	# Три пункта верхнего уровня. Ярусы растительности вложены внутрь одного
 	# из них — иначе список занимал бы полэкрана.
 	for group in PlantsData.GROUPS:
 		var g: int = group["key"]
-		var head := Button.new()
-		head.flat = true
-		head.alignment = HORIZONTAL_ALIGNMENT_LEFT
-		head.focus_mode = Control.FOCUS_NONE
+		var head := _list_button()
 		head.pressed.connect(_toggle_group.bind(g))
 		column.add_child(head)
 
@@ -815,11 +815,9 @@ func _setup_toolbar() -> void:
 		for t in tiers:
 			if not single:
 				# Внутри «Растений» ярусы остаются отдельными подпунктами.
-				var sub := Button.new()
-				sub.flat = true
-				sub.alignment = HORIZONTAL_ALIGNMENT_LEFT
-				sub.focus_mode = Control.FOCUS_NONE
+				var sub := _list_button(UI_FONT_SMALL)
 				sub.pressed.connect(_toggle_branch.bind(t))
+				sub.tooltip_text = String(PlantsData.tier_info(t)["hint"])
 				body.add_child(sub)
 				branch_headers[t] = sub
 
@@ -832,24 +830,77 @@ func _setup_toolbar() -> void:
 
 			var ids := PlantsData.of_tier(t)
 			for id in ids:
-				var button := Button.new()
-				button.flat = true
-				button.alignment = HORIZONTAL_ALIGNMENT_LEFT
-				button.focus_mode = Control.FOCUS_NONE
+				var button := _list_button()
 				button.pressed.connect(_select_tool.bind(id))
 				items.add_child(button)
 				tool_buttons[id] = button
 			if ids.is_empty():
 				var empty := Label.new()
-				empty.text = "           пока пусто"
+				empty.text = "   пока пусто"
 				empty.modulate = Color(1, 1, 1, 0.35)
+				empty.add_theme_font_size_override("font_size", UI_FONT_SMALL)
 				items.add_child(empty)
 
 		group_headers[g] = head
 		group_boxes[g] = body
 		group_open[g] = true
 
+	var gap := Control.new()
+	gap.custom_minimum_size = Vector2(0, 6)
+	column.add_child(gap)
+
+	# Ширина кисти — внизу, одной строкой: она относится к выбранному, а не
+	# наоборот, и наверху отталкивала список от глаза.
+	var brush_row := HBoxContainer.new()
+	brush_row.add_theme_constant_override("separation", 0)
+	column.add_child(brush_row)
+	var brush_title := Label.new()
+	brush_title.text = "кисть "
+	brush_title.modulate = Color(1, 1, 1, 0.5)
+	brush_title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	brush_row.add_child(brush_title)
+	for w in BRUSHES:
+		var bb := _list_button(UI_FONT_SMALL)
+		bb.pressed.connect(_set_brush.bind(int(w["width"])))
+		brush_row.add_child(bb)
+		brush_buttons.append(bb)
+
+	_setup_time_panel(layer)
 	_refresh_toolbar()
+
+
+# Время — своя панель у правого края, на той же высоте, что и список слева.
+func _setup_time_panel(layer: CanvasLayer) -> void:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _panel_box(false))
+	panel.anchor_left = 1.0
+	panel.anchor_right = 1.0
+	panel.anchor_top = 1.0
+	panel.anchor_bottom = 1.0
+	panel.offset_right = -12
+	panel.offset_bottom = -12
+	panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	panel.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	layer.add_child(panel)
+
+	var column := VBoxContainer.new()
+	column.add_theme_constant_override("separation", 0)
+	panel.add_child(column)
+
+	var title := Label.new()
+	title.text = "Время"
+	title.modulate = Color(1, 1, 1, 0.5)
+	title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	column.add_child(title)
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 0)
+	column.add_child(row)
+	for i in range(SPEEDS.size()):
+		var sb := _list_button()
+		sb.pressed.connect(_set_time_scale.bind(i))
+		row.add_child(sb)
+		speed_buttons.append(sb)
 
 
 func _toggle_group(group: int) -> void:
@@ -890,22 +941,23 @@ func _refresh_toolbar() -> void:
 		var picked: bool = brush == int(BRUSHES[i]["width"])
 		brush_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if picked else " %s " % BRUSHES[i]["label"]
 		brush_buttons[i].modulate = Color(1, 1, 1, 1.0 if picked else 0.5)
+	# Отступы задаём НЕ пробелами, а самой строкой из знака и названия: пробелы
+	# считаются по ширине шрифта и на мелком кегле разъезжаются.
 	for group in PlantsData.GROUPS:
 		var g: int = group["key"]
 		var open: bool = group_open[g]
-		group_headers[g].text = "%s  %d · %s" % ["▾" if open else "▸", g, group["name"]]
+		# Номер оставляем: по нему раздел сворачивается с клавиатуры.
+		group_headers[g].text = "%s %d %s" % ["▾" if open else "▸", g, group["name"]]
 		group_boxes[g].visible = open
 		for t in group["tiers"]:
 			var info := PlantsData.tier_info(t)
 			if branch_headers.has(t):
-				var hint: String = info["hint"]
-				var suffix := "" if hint == "" else "  (%s)" % hint
-				branch_headers[t].text = "    %s  %s%s" % [
-					"▾" if branch_open[t] else "▸", info["name"], suffix]
+				branch_headers[t].text = "  %s %s" % [
+					"▾" if branch_open[t] else "▸", info["name"]]
 			branch_boxes[t].visible = branch_open[t] or not branch_headers.has(t)
 	for id in tool_buttons:
 		var mark := "●" if id == current_tool else "○"
-		tool_buttons[id].text = "     %s  %s" % [mark, PlantsData.ITEMS[id]["name"]]
+		tool_buttons[id].text = "   %s %s" % [mark, PlantsData.ITEMS[id]["name"]]
 
 
 # В режиме посадки подсвечиваем ТО ЖЕ ПЯТНО, что и при лепке, только мельче и
