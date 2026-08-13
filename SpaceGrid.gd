@@ -28,6 +28,12 @@ extends RefCounted
 
 const EPS: float = 0.00001
 const WELD: float = 0.01          # на таком расстоянии вершины считаем одной
+# Шесть прямых соседей по решётке. Кольцо нарочно узкое: по всем двадцати шести
+# всё, что считается по соседям, расползается заметно дальше своего места.
+const NEIGHBOURS := [
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+	Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+]
 
 var seeds: PackedVector3Array = PackedVector3Array()
 var lattice: PackedVector3Array = PackedVector3Array()   # узлы решётки семян
@@ -42,6 +48,7 @@ var _cell_size: float = 1.8
 var _node_index: Dictionary = {}  # узел решётки Vector3i -> номер семени
 var fill: PackedFloat32Array = PackedFloat32Array()       # насколько ячейка полна
 var base_fill: PackedFloat32Array = PackedFloat32Array()  # природный рельеф
+var cavity: PackedFloat32Array = PackedFloat32Array()     # −1 выступ, +1 щель
 var edits: Dictionary = {}        # ячейка -> насколько её подняли мазками
 var stone: Dictionary = {}        # ячейка -> насколько она каменистая, 0..1
 var _rock_noise: FastNoiseLite
@@ -591,6 +598,46 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 			solid[i] = true
 	base_fill = fill.duplicate()
 	edits = {}
+	cavity.resize(seeds.size())
+	for i in range(seeds.size()):
+		if _play[i] != 0:
+			_refresh_cavity(i)
+
+
+# ВПАДИНА. Насколько ячейка сидит в складке: −1 на голом выступе, 0 на ровном,
+# +1 в глубокой щели. Считается по перегибу поля — у впадины соседи в среднем
+# полнее самой ячейки, у выступа беднее, и величина этой разницы говорит,
+# насколько круто поверхность заворачивает.
+#
+# Это ловит сразу всё, что нужно окраске: щели между глыбами, складки огранки,
+# стык насыпи с землёй и подножие камня. По этому числу шейдер темнит стыки,
+# пускает зелень в трещины и целиком зарастает затенённые глыбы — до сих пор
+# вместо него в поверхность клалась постоянная, и вся эта треть облика молча
+# умножалась на ноль.
+const CAVITY_GAIN: float = 2.6
+
+func _refresh_cavity(index: int) -> void:
+	if index < 0 or index >= cavity.size():
+		return
+	var node: Vector3i = node_of(index)
+	var sum := 0.0
+	var count := 0
+	for step in NEIGHBOURS:
+		var s: int = node_seed(node + step)
+		if s < 0:
+			continue
+		sum += fill[s]
+		count += 1
+	if count == 0:
+		cavity[index] = 0.0
+		return
+	cavity[index] = clampf((sum / float(count) - fill[index]) * CAVITY_GAIN, -1.0, 1.0)
+
+
+func cavity_of(index: int) -> float:
+	if index < 0 or index >= cavity.size():
+		return 0.0
+	return cavity[index]
 
 
 # Мягкий минимум: там, где два ограничения близки, стык скругляется на `k`.
@@ -741,6 +788,19 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 		# пересчёте по ядру, которого никто не звал, и до картинки не доходила:
 		# камень отличался от земли одним цветом.
 		fill[j] = base_fill[j] + float(edits.get(j, 0.0)) + _facet(j)
+
+	# Впадину пересчитываем ШИРЕ мазка: она смотрит на соседей, и у ячейки за
+	# краем зоны сосед только что изменился. Наружу отдаём всё равно саму зону —
+	# ячейки за её краем не поменяли ни породы, ни вида, только затенение стыка.
+	var seen: Dictionary = zone.duplicate()
+	for j in zone:
+		var node3: Vector3i = node_of(j)
+		for step in NEIGHBOURS:
+			var n3: int = node_seed(node3 + step)
+			if n3 >= 0:
+				seen[n3] = true
+	for j in seen:
+		_refresh_cavity(j)
 	return zone.keys()
 
 

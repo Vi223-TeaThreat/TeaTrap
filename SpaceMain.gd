@@ -275,12 +275,6 @@ func _touch_chunks(cell: int, dirty: bool = true) -> void:
 					_dirty_chunks[ch] = true
 
 
-# Доля породы у семени: 0 земля, 1 камень. Берём её из поля, а не из материала
-# ячейки: там она меняется плавно, и камень сходит в траву без резкой границы.
-func _stone_of(cell: int) -> float:
-	return grid.stone_of(cell)
-
-
 # Мир достраивается КУСКАМИ, от середины наружу, отпуская кадр между ними.
 #
 # Вырезать многогранник дорого, а при мелкой сетке их тысячи — весь остров
@@ -439,7 +433,7 @@ func _rebuild_chunk(chunk: Vector3i) -> void:
 		chunk_nodes.erase(chunk)
 	var lo: Vector3i = chunk * CHUNK_NODES
 	var hi: Vector3i = lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES)
-	var mesh: ArrayMesh = SurfaceScript.build(grid, lo, hi, _stone_of)
+	var mesh: ArrayMesh = SurfaceScript.build(grid, lo, hi)
 	if mesh == null:
 		return
 
@@ -648,7 +642,7 @@ func _update_frame() -> void:
 	var node: Vector3i = grid.node_of(target)
 	var span := 1 + brush
 	var edge := Vector3i(span, span, span)
-	frame_node.mesh = SurfaceScript.build(grid, node - edge, node + edge, _stone_of)
+	frame_node.mesh = SurfaceScript.build(grid, node - edge, node + edge)
 	if frame_node.mesh == null:
 		frame_node.visible = false
 

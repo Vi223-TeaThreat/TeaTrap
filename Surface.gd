@@ -46,8 +46,12 @@ const CORNER := [
 
 # Собирает кусок поверхности по кубикам решётки в заданных пределах.
 # `grid` — сетка, `lo`/`hi` — углы области в узлах решётки.
-# `stone_of` — доля породы у семени (0 земля, 1 скала), для раскраски.
-static func build(grid, lo: Vector3i, hi: Vector3i, stone_of: Callable) -> ArrayMesh:
+#
+# Породу и впадину берём У САМОЙ СЕТКИ, без посредника. Раньше долю породы
+# приносил переданный сюда вызов, и на каждую вершину приходилось по два таких
+# обращения; вершин у куска тысячи, и один клик стоил тридцати семи миллисекунд
+# вместо трёх. Отклик здесь дороже красоты устройства.
+static func build(grid, lo: Vector3i, hi: Vector3i) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var any := false
@@ -75,7 +79,7 @@ static func build(grid, lo: Vector3i, hi: Vector3i, stone_of: Callable) -> Array
 				if not ok or below == 0 or below == 8:
 					continue
 				for t in TETS:
-					if _emit_tet(st, grid, idx, val, t, stone_of):
+					if _emit_tet(st, grid, idx, val, t):
 						any = true
 
 	if not any:
@@ -113,12 +117,12 @@ static func tet_polygon(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 
 
 static func _emit_tet(st: SurfaceTool, grid, idx: PackedInt32Array,
-		val: PackedFloat32Array, t: Array, stone_of: Callable) -> bool:
+		val: PackedFloat32Array, t: Array) -> bool:
 	var poly: Array = tet_polygon(grid, idx, val, t)
 	if poly.is_empty():
 		return false
 
-	_face(st, poly, _outward(grid, idx, val, t), grid, stone_of)
+	_face(st, poly, _outward(grid, idx, val, t), grid)
 	return true
 
 
@@ -227,8 +231,9 @@ static func _cut(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 # Вывернутый треугольник не рисуется со своей стороны — сквозь него видно небо,
 # и это неотличимо от дыры с прямыми краями. Сетка при этом остаётся замкнутой,
 # поэтому поиск незамкнутых рёбер таких мест не находит.
-static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid,
-		stone_of: Callable) -> void:
+static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
+	var stone_raw: Dictionary = grid.stone
+	var cav_all: PackedFloat32Array = grid.cavity
 	for i in range(1, cut.size() - 1):
 		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
 		if tri.is_empty():
@@ -240,9 +245,16 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid,
 		# многогранником. Это ничего не стоит и ничем не рискует: сама сетка не
 		# меняется, меняется только то, как её освещает.
 		var stones := [0.0, 0.0, 0.0]
+		var cavs := [0.0, 0.0, 0.0]
 		for k in range(3):
-			stones[k] = lerpf(float(stone_of.call(int(tri[k]["a"]))),
-				float(stone_of.call(int(tri[k]["b"]))), float(tri[k]["t"]))
+			var a: int = int(tri[k]["a"])
+			var b: int = int(tri[k]["b"])
+			var w: float = float(tri[k]["t"])
+			stones[k] = clampf(lerpf(float(stone_raw.get(a, 0.0)),
+				float(stone_raw.get(b, 0.0)), w), 0.0, 1.0)
+			# Впадина приходит с сетки: по ней шейдер темнит стыки и пускает
+			# зелень в трещины. Половина — ровное место, больше — щель.
+			cavs[k] = 0.5 + 0.5 * lerpf(cav_all[a], cav_all[b], w)
 		var flat: Vector3 = (tri[1]["p"] - tri[0]["p"]).cross(tri[2]["p"] - tri[0]["p"])
 		flat = flat.normalized() if flat.length() > 0.000001 else Vector3.ZERO
 		for k in range(3):
@@ -254,7 +266,7 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid,
 				# он одинаково смотрит в обе.
 				var faced: Vector3 = flat if flat.dot(smooth) > 0.0 else -flat
 				n = smooth.lerp(faced, minf(stones[k], 1.0) * FACE_LIGHT).normalized()
-			st.set_uv(Vector2(stones[k], 0.5))
+			st.set_uv(Vector2(stones[k], cavs[k]))
 			st.set_normal(n)
 			st.add_vertex(cc["p"])
 
