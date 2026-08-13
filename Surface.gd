@@ -34,6 +34,10 @@ const TETS := [
 	[0, 7, 6, 4], [0, 7, 4, 5], [0, 7, 5, 1],
 ]
 
+# Насколько камень освещается по граням, а не по гладкому полю: 0 — как земля,
+# 1 — чистый многогранник.
+const FACE_LIGHT: float = 1.0
+
 const CORNER := [
 	Vector3i(0, 0, 0), Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(1, 1, 0),
 	Vector3i(0, 0, 1), Vector3i(1, 0, 1), Vector3i(0, 1, 1), Vector3i(1, 1, 1),
@@ -229,11 +233,29 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid,
 		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
 		if tri.is_empty():
 			continue
-		for cc in tri:
-			var stone: float = lerpf(float(stone_of.call(int(cc["a"]))),
-				float(stone_of.call(int(cc["b"]))), float(cc["t"]))
-			st.set_uv(Vector2(stone, 0.5))
-			st.set_normal(_slope(grid, cc))
+		# КАМЕНЬ ГРАНИТСЯ СВЕТОМ. Поверхность и так набрана из треугольников по
+		# полторы-две сажени — но нормаль у неё берётся от наклона поля, и свет
+		# течёт по ним гладко, пряча грани. Земле так и надо. Камню — нет: у него
+		# нормаль ведём к нормали самого треугольника, и глыба сразу читается
+		# многогранником. Это ничего не стоит и ничем не рискует: сама сетка не
+		# меняется, меняется только то, как её освещает.
+		var stones := [0.0, 0.0, 0.0]
+		for k in range(3):
+			stones[k] = lerpf(float(stone_of.call(int(tri[k]["a"]))),
+				float(stone_of.call(int(tri[k]["b"]))), float(tri[k]["t"]))
+		var flat: Vector3 = (tri[1]["p"] - tri[0]["p"]).cross(tri[2]["p"] - tri[0]["p"])
+		flat = flat.normalized() if flat.length() > 0.000001 else Vector3.ZERO
+		for k in range(3):
+			var cc: Dictionary = tri[k]
+			var smooth: Vector3 = _slope(grid, cc)
+			var n: Vector3 = smooth
+			if flat != Vector3.ZERO and stones[k] > 0.0:
+				# Сторону берём от гладкой нормали: у треугольника своей нет,
+				# он одинаково смотрит в обе.
+				var faced: Vector3 = flat if flat.dot(smooth) > 0.0 else -flat
+				n = smooth.lerp(faced, minf(stones[k], 1.0) * FACE_LIGHT).normalized()
+			st.set_uv(Vector2(stones[k], 0.5))
+			st.set_normal(n)
 			st.add_vertex(cc["p"])
 
 
@@ -288,3 +310,5 @@ static func _gradient(grid, seed_index: int) -> Vector3:
 		if len2 > 0.000001:
 			g += d * ((grid.fill[s] - f0) / len2)
 	return g
+
+
