@@ -634,6 +634,56 @@ func _refresh_cavity(index: int) -> void:
 	cavity[index] = clampf((sum / float(count) - fill[index]) * CAVITY_GAIN, -1.0, 1.0)
 
 
+# Наклон поля у семени. Та же величина, по которой `Surface.gd` берёт нормаль,
+# — там она посчитана своей копией нарочно: это самое горячее место отрисовки,
+# и вызов через ссылку стоил бы кадра. ПРАВИТЬ ОБЕ.
+func field_slope(index: int) -> Vector3:
+	var node: Vector3i = node_of(index)
+	var here: Vector3 = seeds[index]
+	var f0: float = fill[index]
+	var g := Vector3.ZERO
+	for step in NEIGHBOURS:
+		var s: int = node_seed(node + step)
+		if s < 0:
+			continue
+		var d: Vector3 = seeds[s] - here
+		var len2: float = d.length_squared()
+		if len2 > 0.000001:
+			g += d * ((fill[s] - f0) / len2)
+	return g
+
+
+# ГДЕ РЯДОМ С ТОЧКОЙ ПРОХОДИТ ЗЕМЛЯ. Нужно всему, что на земле живёт: растение
+# садится не в ячейку, а в точку, и точку эту надо посадить ровно на уровень.
+#
+# Поле у семени продолжаем его наклоном: до половинного уровня по прямой
+# остаётся ровно (заполнение − половина), делённое на крутизну. Шага хватает
+# двух — после первого точка уже у поверхности, второе семя её уточняет.
+#
+# Считаем ПОЛЕМ, а не лучом по телу столкновений: луч можно пускать только в
+# такт физики, а рост растений идёт своим ходом и в проверке — вообще без окна.
+func surface_near(p: Vector3) -> Dictionary:
+	var at := p
+	var j: int = -1
+	for _step in range(2):
+		j = cell_at(at)
+		if j < 0 or not in_play(j):
+			return {}
+		var g: Vector3 = field_slope(j)
+		var mag2: float = g.length_squared()
+		if mag2 < 0.0000001:
+			return {}
+		var here: float = fill[j] + g.dot(at - seeds[j])
+		at -= g * ((here - SOLID_AT) / mag2)
+	j = cell_at(at)
+	if j < 0 or not in_play(j):
+		return {}
+	var n: Vector3 = field_slope(j)
+	if n.length_squared() < 0.0000001:
+		return {}
+	return {"pos": at, "nrm": -n.normalized(), "cell": j}
+
+
 func cavity_of(index: int) -> float:
 	if index < 0 or index >= cavity.size():
 		return 0.0

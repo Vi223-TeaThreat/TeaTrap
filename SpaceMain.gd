@@ -55,6 +55,7 @@ const CHUNK_NODES: int = 4
 var chunk_list: Dictionary = {}   # какие куски вообще есть
 var chunk_nodes: Dictionary = {}  # кусок -> меш этого куска
 var _dirty_chunks: Dictionary = {}
+var _touched_cells: Dictionary = {}   # что задели мазки до ближайшей пересборки
 var face_geo: Dictionary = {}     # Vector2i(ячейка, грань) -> её вид после сглаживания
 var edge_faces: Dictionary = {}   # ребро -> какие грани его делят
 var _buried_cache: Dictionary = {}
@@ -414,8 +415,12 @@ func _flush_chunks() -> void:
 		buildings.rebuild_all()
 	if rocks != null:
 		rocks.rebuild_all()
-	if plants != null:
-		plants.surface_changed()
+	# Растениям отдаём СПИСОК задетых ячеек. Без него пришлось бы на каждый
+	# мазок пересаживать весь сад: заросшая карта — это тысячи кочек, а мазок
+	# трогает три десятка ячеек.
+	if plants != null and not _touched_cells.is_empty():
+		plants.surface_changed(_touched_cells.keys())
+	_touched_cells.clear()
 	if props != null:
 		props.surface_changed()
 
@@ -468,6 +473,8 @@ func _brush_radius() -> float:
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
 		stone_push: float = 0.0) -> void:
 	var touched: Array = grid.stroke_at(at, radius, amount, stone_push)
+	for c in touched:
+		_touched_cells[c] = true
 	if amount > 0.0:
 		for c in touched:
 			paint[c] = material
@@ -555,10 +562,8 @@ func _undo() -> void:
 	if a.has("at"):
 		_stroke(a["at"], float(a["rad"]), -float(a["amount"]), "",
 			-_stone_push(float(a["amount"]), String(a["mat"])))
-	elif a.has("prop"):
-		props.remove_at(a["prop"])
-	elif a.has("spot"):
-		plants.remove_at(a["spot"])
+	elif a.has("plant"):
+		plants.remove_at(int(a["plant"]))
 	elif a["added"]:
 		_remove(a["cell"], false)
 	else:
@@ -647,7 +652,8 @@ func _update_frame() -> void:
 		frame_node.visible = false
 
 
-# Куда указывает курсор на поверхности: ячейка, грань и её угол.
+# Куда указывает курсор на земле: сама точка и наклон под ней. Луч ловит
+# видимую поверхность, а наклон берём у поля — у луча он скачет на кромках.
 func _pick_spot(screen_pos: Vector2) -> Dictionary:
 	var from := camera.project_ray_origin(screen_pos)
 	var dir := camera.project_ray_normal(screen_pos)
@@ -655,43 +661,31 @@ func _pick_spot(screen_pos: Vector2) -> Dictionary:
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
 	if result.is_empty():
 		return {}
-	var body = result.collider
-	if body == null or not body.has_meta("cell"):
+	var on: Dictionary = grid.surface_near(result.position)
+	if on.is_empty():
 		return {}
-	var cell: int = body.get_meta("cell")
-
-	# Ищем среди кусочков этой глыбы и её соседей — тогда у края выбирается
-	# именно тот кусочек, на который смотрит курсор.
-	var around: Array = [cell]
-	for nb in grid.neighbors_of(cell):
-		if nb >= 0:
-			around.append(nb)
-	var key: Vector3i = plants.spot_under_ray(from, dir, around)
-	if key.x < 0:
-		return {}
-	return {"key": key}
+	return on
 
 
 func _try_put(screen_pos: Vector2) -> void:
 	var spot := _pick_spot(screen_pos)
 	if spot.is_empty():
 		return
-	var key: Vector3i = spot["key"]
 	if PlantsData.is_prop(current_tool):
-		if props.place(key, current_tool):
-			history.append({"prop": key})
-	elif plants.plant_at(key, current_tool):
-		history.append({"spot": key})
+		return                       # объекты ждут своего переезда
+	var pid: int = plants.plant_at(spot["pos"], current_tool)
+	if pid >= 0:
+		history.append({"plant": pid})
 
 
-# Убрать с кусочка то, что на нём стоит или растёт.
+# Убрать то, что растёт под прицелом.
 func _try_clear(screen_pos: Vector2) -> void:
 	var spot := _pick_spot(screen_pos)
 	if spot.is_empty():
 		return
-	var key: Vector3i = spot["key"]
-	if not props.remove_at(key):
-		plants.remove_at(key)
+	var pid: int = plants.nearest_to(spot["pos"], CELL_SPACING * 0.6)
+	if pid >= 0:
+		plants.remove_at(pid)
 
 
 # --- Панель ярусов -----------------------------------------------------------
@@ -870,30 +864,47 @@ func _refresh_toolbar() -> void:
 		tool_buttons[id].text = "     %s  %s" % [mark, PlantsData.ITEMS[id]["name"]]
 
 
-# В режиме посадки обводим сам кусочек поверхности, куда ляжет растение.
+# В режиме посадки обводим КРУГ на земле — то место, которое займёт молодая
+# кочка. Раньше обводился кусочек грани ячейки; кусочков больше нет, растение
+# садится в любую точку, и обводить надо саму землю под прицелом.
 func _update_frame_spot() -> void:
 	var spot := _pick_spot(get_viewport().get_mouse_position())
 	if spot.is_empty():
 		frame_node.visible = false
 		frame_id = ""
 		return
-	var key: Vector3i = spot["key"]
+	var pos: Vector3 = spot["pos"]
+	var nrm: Vector3 = spot["nrm"]
 	frame_node.visible = true
-	var id := "s%d_%d_%d" % [key.x, key.y, key.z]
+	# Обод пересобираем не чаще, чем прицел сдвинулся на заметную долю ячейки:
+	# кольцо из тридцати отрезков каждый кадр — работа впустую.
+	var id := "s%d_%d_%d" % [int(pos.x * 8.0), int(pos.y * 8.0), int(pos.z * 8.0)]
 	if id == frame_id:
 		return
 	frame_id = id
 
-	var poly: Array = plants.patch_outline(key)
-	if poly.size() < 3:
-		frame_node.visible = false
-		return
-	var lift: Vector3 = plants._patch_normal(key) * 0.015
+	var side: Vector3 = nrm.cross(Vector3.UP)
+	if side.length_squared() < 0.001:
+		side = nrm.cross(Vector3.RIGHT)
+	side = side.normalized()
+	var along: Vector3 = nrm.cross(side).normalized()
+	# Круг кладём НА ЗЕМЛЮ каждой своей точкой, а не в плоскость: на выпуклом
+	# месте плоское кольцо наполовину уходит в грунт.
+	var radius: float = CELL_SPACING * 0.22
+	var ring: Array = []
+	var steps := 24
+	for i in range(steps):
+		var a: float = TAU * float(i) / float(steps)
+		var at: Vector3 = pos + (side * cos(a) + along * sin(a)) * radius
+		var on: Dictionary = grid.surface_near(at)
+		ring.append((on["pos"] if not on.is_empty() else at)
+			+ (on["nrm"] if not on.is_empty() else nrm) * 0.02)
+
 	var mesh := ImmediateMesh.new()
 	mesh.surface_begin(Mesh.PRIMITIVE_LINES, frame_node.material_override)
-	for i in range(poly.size()):
-		mesh.surface_add_vertex(poly[i] + lift)
-		mesh.surface_add_vertex(poly[(i + 1) % poly.size()] + lift)
+	for i in range(steps):
+		mesh.surface_add_vertex(ring[i])
+		mesh.surface_add_vertex(ring[(i + 1) % steps])
 	mesh.surface_end()
 	frame_node.mesh = mesh
 
@@ -1138,28 +1149,26 @@ func _selftest() -> void:
 		" стало ", chunk_nodes.size())
 	_seed_moss(6)
 	_flush_chunks()
-	# Мох не должен пережить снос глыбы, на которой рос.
+	print("Посев мха: кочек — ", plants.patches.size())
+	# Мох не должен пережить снос земли, на которой рос.
 	var host := -1
-	for key in plants.patches:
-		host = key.x
+	for pid in plants.patches:
+		host = int(plants.patches[pid]["cell"])
 		break
-	var moss_before := 0
-	for key in plants.patches:
-		if key.x == host:
-			moss_before += 1
-	_remove(host)
+	var moss_before: int = plants.patches.size()
+	# Сносим то место несколько раз подряд: одного мазка мало, чтобы земля ушла
+	# из-под кочки дальше половины ячейки.
+	for _i in range(4):
+		_remove(host)
 	_flush_chunks()
-	var moss_after := 0
-	for key in plants.patches:
-		if key.x == host:
-			moss_after += 1
-	print("Мох на снесённой глыбе: было ", moss_before, ", осталось ", moss_after)
+	print("Мох на снесённой земле: было ", moss_before,
+		", осталось ", plants.patches.size())
 
 	var t1 := Time.get_ticks_usec()
 	for _i in range(300):
 		plants._tick(0.15)
 	var grow := (Time.get_ticks_usec() - t1) / 1000.0
-	print("Растения: кусочков — ", plants.patches.size(),
+	print("Растения: кочек — ", plants.patches.size(),
 		", 45 секунд роста за ", snappedf(grow, 0.1), " мс")
 
 	await get_tree().physics_frame
@@ -1295,44 +1304,38 @@ func _seed_props() -> void:
 		if props.place(spot, kinds[placed]):
 			placed += 1
 
-# Сеем на самых высоких площадках у центра — чтобы попало в кадр. Порог по
-# высоте брать нельзя: он зависит от размера ячейки, и на мелкой сетке макушки
-# до него уже не дотягиваются — проверка молча оказывалась пустой.
+# Сеем на самых высоких местах у середины острова — чтобы попало в кадр.
+# Порог по высоте брать нельзя: он зависит от размера ячейки, и на мелкой сетке
+# макушки до него уже не дотягиваются — проверка молча оказывалась пустой.
 func _seed_moss(count: int) -> void:
 	var tops: Array = []
-	for key in face_geo:
-		var mid: Vector3 = face_geo[key]["mid"]
-		if Vector2(mid.x, mid.z).length() > 5.0:
+	for cell in solid:
+		var s: Vector3 = grid.seeds[cell]
+		if Vector2(s.x, s.z).length() > 5.0 or _buried(cell):
 			continue
-		tops.append([mid.y, key])
+		tops.append([s.y, cell])
 	tops.sort_custom(func(a, b): return a[0] > b[0])
 
 	var planted := 0
 	for item in tops:
 		if planted >= count:
 			break
-		var key: Vector2i = item[1]
-		if plants.plant(Vector3i(key.x, key.y, 0), "moss"):
+		var pid: int = plants.plant_at(grid.seeds[int(item[1])], "moss")
+		if pid >= 0:
 			if planted == 0:
-				_macro_focus = face_geo[key]["mid"]
+				_macro_focus = plants.patches[pid]["pos"]
 			planted += 1
 
 
-# Лианы заводим у подножия построек — там, где у них есть опора.
+# Лианы заводим у камня — там, где у них есть опора.
 func _seed_vines(count: int) -> void:
 	var planted := 0
-	for key in face_geo:
+	for cell in solid:
 		if planted >= count:
 			break
-		var mid: Vector3 = face_geo[key]["mid"]
-		var near := false
-		for nb in grid.neighbors_of(key.x):
-			if nb >= 0 and (material_of(nb) == "building" or material_of(nb) == "cliff"):
-				near = true
-				break
-		if not near:
+		if _buried(cell) or grid.stone_of(cell) < 0.3:
 			continue
-		if plants.plant(Vector3i(key.x, key.y, 0), "vine"):
+		if plants.plant_at(grid.seeds[cell], "vine") >= 0:
 			planted += 1
 
 
@@ -1365,8 +1368,8 @@ func _shot_mode() -> void:
 	if _macro_focus != Vector3.ZERO:
 		cur_pivot = _macro_focus
 		target_pivot = cur_pivot
-		cur_zoom = 1.6
-		target_zoom = 1.6
+		cur_zoom = 3.2
+		target_zoom = 3.2
 		cur_pitch = -32.0
 		_apply_camera()
 		for _i in range(4):
