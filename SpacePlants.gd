@@ -20,7 +20,9 @@ extends Node3D
 const PlantsData = preload("res://Plants.gd")
 
 const TICK: float = 0.15
-const STEPS: int = 6              # ступеней роста, на которых меш пересобирается
+# Ступеней роста, на которых меш пересобирается. Ровно столько же, сколько
+# возрастов у картинки: реже — и кочка меняла бы вид не тогда, когда взрослеет.
+const STEPS: int = 9
 
 # Насколько далеко от себя растение даёт отросток, в долях шага решётки.
 const SPREAD_NEAR: float = 0.20
@@ -38,17 +40,12 @@ var _dirty: Dictionary = {}
 var _accum: float = 0.0
 var _next: int = 1
 var _rng := RandomNumberGenerator.new()
-var _material: StandardMaterial3D
 var _blade_mat: StandardMaterial3D
 
 
 func setup(main_ref: Node3D) -> void:
 	main = main_ref
 	_rng.seed = 20260811
-	_material = StandardMaterial3D.new()
-	_material.vertex_color_use_as_albedo = true
-	_material.roughness = 0.95
-
 	# Материал пучков. Прозрачность — ОТСЕЧЕНИЕМ, а не смешиванием: у смешивания
 	# порядок отрисовки решается по расстоянию до всего меша целиком, и сотни
 	# перекрывающихся пучков начинают мигать друг сквозь друга. Отсечение
@@ -63,53 +60,100 @@ func setup(main_ref: Node3D) -> void:
 	_blade_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_blade_mat.vertex_color_use_as_albedo = true
 	_blade_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-	_blade_mat.roughness = 0.95
-	_blade_mat.metallic_specular = 0.05
+	_blade_mat.roughness = 1.0
+	_blade_mat.metallic_specular = 0.0
+	# СВЕТ ПО МХУ МЯГКИЙ. Мох просвечивает: на солнце он светится изнутри, а в
+	# тени не проваливается в чёрное. Подсвет сзади и снимает жёсткость — без
+	# него теневая сторона подушки выходит грязно-тёмной, будто выжжена.
+	_blade_mat.backlight_enabled = true
+	_blade_mat.backlight = Color(0.26, 0.36, 0.16)
+	# Своего блика у мха нет совсем — он матовый до бархатности.
+	_blade_mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 
 
-# ПУЧОК ТРАВЫ — рисуем прямо в коде, без файла с картинкой. Четыре разных
-# пучка в одном листе: по два в ряд. Разные пучки на соседних дощечках дают
-# кочке неповторяющийся вид — один и тот же рисунок, повёрнутый вокруг, сразу
-# читается как повторение.
+# ЛИСТ С КУРТИНКАМИ МХА — рисуем прямо в коде, без файла с картинкой.
+#
+# МОХ — НЕ ПУЧОК ТРАВИНОК, а плотная бархатная подушка из очень коротких
+# ворсинок: на снимках отдельной былинки не разглядеть ни с какого расстояния,
+# видно сросшиеся округлые холмики с мохнатым краем. Поэтому каждая клетка
+# листа — не букет стеблей, а купол: тело подушки с вертикальной рябью внутри
+# и короткой щетиной по макушке.
+#
+# Разложен лист ДВУМЯ ОСЯМИ. По вертикали — возраст: девять ступеней от плоской
+# лепёшки до пухлой подушки. По горизонтали — разновидности одного возраста:
+# без них поворот одной картинки вокруг оси сразу читается как повторение,
+# кочка к кочке.
+#
+# Возраст меняет не только рост, но и ворс: у молодой куртинки край почти
+# гладкий, у старой мохнатый, и местами проступает ржавчина. Одним масштабом
+# такого не изобразить — у растянутой вчетверо картинки и ворс стал бы бревном.
 const TILE: int = 32               # сторона одного пучка в точках
-const ATLAS: int = 2               # столько пучков в ряду
+const STAGES: int = 9              # столько возрастов
+const KINDS: int = 4               # столько разновидностей у каждого возраста
 
 func _make_blade_texture() -> ImageTexture:
-	var size := TILE * ATLAS
-	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	var img := Image.create(TILE * KINDS, TILE * STAGES, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 913377
-	# Палитра снизу вверх: у земли бурое, в середине зелёное, на концах жёлтое.
-	var root := Color(0.20, 0.20, 0.09)
-	var mid := Color(0.33, 0.46, 0.15)
-	var tip := Color(0.62, 0.66, 0.26)
 
-	for cy in range(ATLAS):
-		for cx in range(ATLAS):
-			var ox := cx * TILE
-			var oy := cy * TILE
-			for _b in range(rng.randi_range(7, 11)):
-				var x0: float = rng.randf_range(5.0, float(TILE) - 5.0)
-				var high: int = rng.randi_range(13, TILE - 5)
-				var lean: float = rng.randf_range(-7.0, 7.0)
-				var shift: float = rng.randf_range(-0.10, 0.10)
-				for t in range(high):
-					var f: float = float(t) / float(high)
-					# Наклон растёт к концу по квадрату — стебель гнётся, а не
-					# стоит под углом от самого корня.
-					var x: int = int(round(x0 + lean * f * f))
-					var y: int = TILE - 1 - t
-					# Толщина: у корня две точки, к концу одна.
-					var wide: int = 2 if f < 0.55 else 1
-					var col: Color = root.lerp(mid, minf(f * 2.2, 1.0))
-					if f > 0.45:
-						col = col.lerp(tip, (f - 0.45) / 0.55)
-					col = col.lightened(shift) if shift > 0.0 else col.darkened(-shift)
-					for w in range(wide):
-						var px: int = ox + x + w
-						if px >= ox and px < ox + TILE and y >= 0:
-							img.set_pixel(px, oy + y, Color(col.r, col.g, col.b, 1.0))
+	for s in range(STAGES):
+		var age: float = float(s) / float(STAGES - 1)
+		# Молодая куртинка — низкая лепёшка, взрослая — пухлая подушка. Ворс с
+		# возрастом длиннее, а край мохнатее.
+		var high: float = lerpf(0.16, 0.62, age) * float(TILE)
+		var half: float = lerpf(0.22, 0.46, age) * float(TILE)
+		var fuzz: int = int(round(lerpf(1.0, 4.0, age)))
+		# Палитра тесная: у мха нет ни сухой соломы, ни чёрных теней — весь он
+		# в узкой жёлто-зелёной вилке, и разница между тенью и светом мала.
+		# Резкий перепад сразу превращает бархат в щётку из палок.
+		var deep := Color(0.26, 0.40, 0.15).lerp(Color(0.21, 0.34, 0.12), age)
+		var body := Color(0.44, 0.62, 0.21).lerp(Color(0.38, 0.56, 0.18), age)
+		var lit := Color(0.58, 0.74, 0.29).lerp(Color(0.54, 0.68, 0.24), age)
+		var rust := Color(0.40, 0.34, 0.15)      # ржавчина у старых куртин
+
+		for k in range(KINDS):
+			var ox := k * TILE
+			var oy := s * TILE
+			var mid_x: float = float(TILE) * 0.5 + rng.randf_range(-2.0, 2.0)
+			# Верхний край подушки — эллипс, сбитый мелкой волной: у живого мха
+			# он бугристый, из сросшихся холмиков, а не гладкая дуга.
+			var wave_a: float = rng.randf_range(0.0, TAU)
+			var wave_b: float = rng.randf_range(0.0, TAU)
+			for x in range(TILE):
+				var dx: float = (float(x) - mid_x) / half
+				if absf(dx) >= 1.0:
+					continue
+				var dome: float = sqrt(maxf(0.0, 1.0 - dx * dx))
+				var lump: float = sin(float(x) * 0.9 + wave_a) * 0.11 \
+					+ sin(float(x) * 2.3 + wave_b) * 0.06
+				var top: int = TILE - 1 - int(round(high * (dome + lump)))
+				top = clampi(top, 0, TILE - 1)
+				# Тело подушки: снизу глубже и темнее, к макушке светлее.
+				for y in range(top, TILE):
+					var up: float = float(TILE - 1 - y) / maxf(high, 1.0)
+					var col: Color = deep.lerp(body, clampf(up * 1.6, 0.0, 1.0))
+					if up > 0.55:
+						col = col.lerp(lit, (up - 0.55) / 0.45)
+					# Ворсинки: тонкая вертикальная рябь через столбец. Именно
+					# она и делает бархат — сплошная заливка выглядит краской.
+					if (x + int(up * 7.0)) % 3 == 0:
+						col = col.darkened(0.10)
+					elif x % 5 == 0:
+						col = col.lightened(0.08)
+					if age > 0.6 and rng.randf() < 0.012:
+						col = col.lerp(rust, 0.5)
+					img.set_pixel(ox + x, oy + y, Color(col.r, col.g, col.b, 1.0))
+				# Мохнатый край: короткие ворсинки поверх макушки, редеющие
+				# кверху. Без них подушка обрезана ножницами.
+				for f in range(fuzz):
+					if rng.randf() > 0.55 - 0.10 * float(f):
+						continue
+					var y2: int = top - 1 - f
+					if y2 < 0:
+						continue
+					img.set_pixel(ox + x, oy + y2,
+						Color(lit.r, lit.g, lit.b, 1.0))
 	return ImageTexture.create_from_image(img)
 
 
@@ -357,49 +401,47 @@ func _flush() -> void:
 	_dirty.clear()
 
 
-# У ячейки может выйти ДВА набора граней: пучки на своём материале с картинкой
-# и подушки на простом. Материал вешаем на каждый набор отдельно, а не на весь
-# меш: `material_override` накрыл бы оба одним.
+# Всё живое рисуется одинаково — дощечками с картинкой. Гладкая подушка для
+# лианы, стоявшая тут прежде, оказалась хуже заглушки: бледные пузыри облепляли
+# глыбу и забивали собой весь кадр. Лиана теперь тот же пучок, только вытянутый
+# по подъёму; своя форма со стеблем и листьями за ней всё ещё числится.
 func _rebuild_cell(cell: int) -> void:
-	if cell_nodes.has(cell):
-		cell_nodes[cell].queue_free()
-		cell_nodes.erase(cell)
-
 	var here: Dictionary = by_cell.get(cell, {})
 	if here.is_empty():
+		if cell_nodes.has(cell):
+			cell_nodes[cell].queue_free()
+			cell_nodes.erase(cell)
 		return
 
 	var tufts := SurfaceTool.new()
 	tufts.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var cushions := SurfaceTool.new()
-	cushions.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var any_tuft := false
-	var any_cushion := false
 	for pid in here:
-		if not patches.has(pid):
-			continue
-		var p: Dictionary = patches[pid]
-		if str(PlantsData.ITEMS[p["id"]].get("shape", "")) == "vine":
-			if _emit_patch(cushions, p):
-				any_cushion = true
-		elif _emit_tuft(tufts, p):
+		if patches.has(pid) and _emit_tuft(tufts, patches[pid]):
 			any_tuft = true
-	if not any_tuft and not any_cushion:
+	if not any_tuft:
+		if cell_nodes.has(cell):
+			cell_nodes[cell].queue_free()
+			cell_nodes.erase(cell)
 		return
 
-	var mesh: ArrayMesh = null
-	if any_tuft:
-		tufts.set_material(_blade_mat)
-		mesh = tufts.commit()
-	if any_cushion:
-		cushions.set_material(_material)
-		mesh = cushions.commit(mesh)
-
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(mi)
-	cell_nodes[cell] = mi
+	# И УЗЕЛ, И МЕШ ПЕРЕИСПОЛЬЗУЕМ, а не создаём заново. Кочка пересобирается на
+	# каждой ступени роста, ступеней девять, кочек сотни — за один прогон это
+	# тысячи мешей. Снятие узла отложенное, и старые доживают до конца кадра
+	# рядом с новыми: видеокарта упиралась в предел числа буферов и переставала
+	# выдавать новые («Can't create buffer of size…»). Со снятием граней у того
+	# же меша буферы освобождаются на месте, и запас не копится.
+	var mi: MeshInstance3D = cell_nodes.get(cell)
+	if mi == null:
+		mi = MeshInstance3D.new()
+		mi.mesh = ArrayMesh.new()
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(mi)
+		cell_nodes[cell] = mi
+	var mesh: ArrayMesh = mi.mesh
+	mesh.clear_surfaces()
+	tufts.set_material(_blade_mat)
+	tufts.commit(mesh)
 
 
 # КОЧКА — не подушка, а ПУЧОК ПЛОСКИХ КАРТИНОК, поставленных под разными
@@ -409,8 +451,10 @@ func _rebuild_cell(cell: int) -> void:
 #
 # Освещаем пучок НОРМАЛЬЮ ЗЕМЛИ, а не своей: у стоячей дощечки нормаль смотрит
 # вбок, и трава на солнечном склоне вышла бы тёмной, будто в тени.
-const BLADES_MIN: int = 3
-const BLADES_MAX: int = 12
+# Дощечек в пучке. Кочка должна быть ГУСТОЙ: редкий пучок читается пучком
+# соломы, а не подушкой мха.
+const BLADES_MIN: int = 4
+const BLADES_MAX: int = 18
 
 func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[p["id"]]
@@ -425,10 +469,23 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	side = side.normalized()
 	var along: Vector3 = nrm.cross(side).normalized()
 
-	# Молодая кочка — три былинки, взрослая — дюжина: пучок густеет числом.
+	# Молодая кочка — несколько ворсинок, взрослая — густая подушка.
 	var count: int = BLADES_MIN + int(float(BLADES_MAX - BLADES_MIN) * m)
 	var reach: float = main.CELL_SPACING * lerpf(0.04, 0.13, m)
 	var tall: float = main.CELL_SPACING * lerpf(0.05, 0.16, m)
+
+	# ЛИАНА — тот же пучок, но не круглый, а вытянутый по подъёму: плеть ползёт
+	# вверх по склону узкой полосой. Своей формы — стебля с листьями — у неё
+	# пока нет, и это заглушка, а не решение.
+	var creep: float = 1.0
+	var climb_dir: Vector3 = side
+	if str(def.get("shape", "")) == "vine":
+		var up: Vector3 = Vector3.UP - nrm * nrm.dot(Vector3.UP)
+		if up.length_squared() > 0.001:
+			climb_dir = up.normalized()
+			side = climb_dir
+			along = nrm.cross(side).normalized()
+		creep = 2.4
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
 	# и умножение на тёмно-зелёный сделало бы пучок чёрным.
@@ -441,25 +498,39 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		# случайного даёт равномерное пятно, а не кольцо.
 		var ra: float = TAU * _hash01(salt + i * 13)
 		var rr: float = reach * sqrt(_hash01(salt + i * 71))
-		var at: Vector3 = centre + (side * cos(ra) + along * sin(ra)) * rr
+		var out: Vector3 = (side * (cos(ra) * creep) + along * sin(ra)).normalized()
+		var at: Vector3 = centre + (side * (cos(ra) * creep) + along * sin(ra)) * rr
 		# Своя сторона у каждой дощечки — она и даёт «под разными углами».
 		var turn: float = TAU * _hash01(salt + i * 29)
 		var face: Vector3 = side * cos(turn) + along * sin(turn)
-		var w: float = tall * (0.50 + 0.45 * _hash01(salt + i * 97))
-		var h: float = tall * (0.65 + 0.70 * _hash01(salt + i * 53))
+		# Подушка ШИРЕ, чем выше: мох стелется, а не тянется вверх.
+		var w: float = tall * (1.15 + 0.55 * _hash01(salt + i * 97))
+		# КРАЙ КОЧКИ ЛОЖИТСЯ. В середине былинки стоят торчком, а к краю всё
+		# сильнее заваливаются наружу и к земле — так растёт живая подушка: она
+		# расползается кромкой, а не обрывается стенкой. Заодно пропадает вид
+		# щётки: у щётки все ворсинки одной высоты и одного наклона.
+		var edge: float = rr / maxf(reach, 0.0001)
+		var lie: float = edge * edge * 0.85
+		var h: float = tall * (0.60 + 0.45 * _hash01(salt + i * 53)) * (1.0 - 0.35 * lie)
 		# Заваливаем дощечку набок — иначе пучок стоит звездой из ровных стенок.
-		var up: Vector3 = (nrm + face * (_hash01(salt + i * 37) - 0.5) * 0.55).normalized()
+		var up: Vector3 = (nrm * (1.0 - lie * 0.75) + out * lie
+			+ face * (_hash01(salt + i * 37) - 0.5) * 0.55).normalized()
 		var half: Vector3 = face * (w * 0.5)
 		var foot: Vector3 = at - nrm * (h * 0.12)   # корень чуть утоплен в землю
 
-		var cx: int = (salt + i * 7) % ATLAS
-		var cy: int = (salt / 3 + i * 5) % ATLAS
-		var u0: float = float(cx) / float(ATLAS)
-		var u1: float = float(cx + 1) / float(ATLAS)
-		var v0: float = float(cy) / float(ATLAS)          # верх листа — концы
-		var v1: float = float(cy + 1) / float(ATLAS)      # низ — корни
+		# Столбец — разновидность, строка — возраст. Возраст берём у растения,
+		# разновидность у самой дощечки: в одном пучке стоят разные былинки.
+		var cx: int = (salt + i * 7) % KINDS
+		var cy: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
+		var u0: float = float(cx) / float(KINDS)
+		var u1: float = float(cx + 1) / float(KINDS)
+		var v0: float = float(cy) / float(STAGES)         # верх клетки — концы
+		var v1: float = float(cy + 1) / float(STAGES)     # низ — корни
 
-		var shade: float = 0.80 + 0.34 * _hash01(salt + i * 11)
+		# Разброс яркости между дощечками МАЛЫЙ. При большом соседние ворсинки
+		# одной подушки отличаются как день и ночь, и бархат рассыпается на
+		# отдельные лоскуты. У живого мха вся куртинка почти одного тона.
+		var shade: float = 0.92 + 0.14 * _hash01(salt + i * 11)
 		st.set_color((hue * shade).srgb_to_linear())
 		var quad := [foot - half, foot + half,
 			foot + half + up * h, foot - half + up * h]
@@ -471,94 +542,6 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 				st.set_uv(uvs[k])
 				st.add_vertex(quad[k])
 	return count > 0
-
-
-# Кочка: несколько сужающихся кверху колец, каждое со своей неровностью.
-# Получается пухлый бугор неправильной формы, а не плоская нашлёпка.
-const CUSHION := [
-	{"scale": 1.00, "height": 0.00},
-	{"scale": 0.88, "height": 0.48},
-	{"scale": 0.56, "height": 0.84},
-]
-const RIM_POINTS: int = 9          # столько точек по кругу подушки
-
-func _emit_patch(st: SurfaceTool, p: Dictionary) -> bool:
-	var def: Dictionary = PlantsData.ITEMS[p["id"]]
-	var m: float = p["m"]
-	var salt: int = int(p["salt"])
-	var centre: Vector3 = p["pos"]
-	var nrm: Vector3 = p["nrm"]
-
-	var side: Vector3 = nrm.cross(Vector3.UP)
-	if side.length_squared() < 0.001:
-		side = nrm.cross(Vector3.RIGHT)
-	side = side.normalized()
-	var along: Vector3 = nrm.cross(side).normalized()
-
-	# Молодая кочка мала, взрослая — с ладонь. Размер держим МЕЛКИМ: подушка в
-	# полшага решётки — это полтора метра мха, валун, а не кочка. Заросли должны
-	# набираться числом кочек, а не величиной каждой.
-	var reach: float = main.CELL_SPACING * lerpf(0.07, 0.22, m)
-	# Лиана не подушка, а плеть: тот же бугор, но вытянутый по склону вверх и
-	# приплюснутый. Отдельная плеть с листьями вернётся, когда дойдут руки.
-	var stretch: float = 1.0
-	var flat: float = 1.0
-	var lead: Vector3 = side
-	if str(def.get("shape", "")) == "vine":
-		var up: Vector3 = Vector3.UP - nrm * nrm.dot(Vector3.UP)
-		if up.length_squared() > 0.001:
-			lead = up.normalized()
-			side = lead
-			along = nrm.cross(side).normalized()
-		stretch = 2.1
-		flat = 0.45
-
-	# Точки обода — по кругу, каждая со своим отклонением. Отклонение считаем
-	# ОДИН РАЗ на точку и применяем ко всем кольцам: если сбивать каждое кольцо
-	# отдельно, они пересекаются и кочка обрастает шипами.
-	var rim: Array = []
-	var swell: Array = []
-	for i in range(RIM_POINTS):
-		var a: float = TAU * float(i) / float(RIM_POINTS)
-		var wobble: float = 0.74 + 0.52 * _hash01(salt + i * 17)
-		var dir: Vector3 = side * (cos(a) * stretch) + along * sin(a)
-		rim.append(centre + dir * reach * wobble)
-		swell.append(0.85 + 0.30 * _hash01(salt + i * 53))
-
-	var height: float = reach * flat * 0.85 * (0.35 + 0.65 * m)
-	# Кочку ПРИТАПЛИВАЕМ: обод строится по прямой от середины, а земля под ним
-	# выгнута — на вогнутом месте кочка повисала бы с видимым зазором.
-	var sink: float = height * 0.30
-
-	var levels: Array = []
-	for li in range(CUSHION.size()):
-		var ring: Array = []
-		for i in range(RIM_POINTS):
-			var f: Vector3 = centre + (rim[i] - centre) * float(CUSHION[li]["scale"])
-			ring.append(f + nrm * (height * float(CUSHION[li]["height"]) * swell[i] - sink))
-		levels.append(ring)
-	var crown: Vector3 = centre + nrm * (height - sink)
-
-	var base_color: Color = def["color"]
-	for li in range(levels.size()):
-		# Снизу темнее, к макушке светлее — так бугор читается объёмным.
-		var shade: float = float(li) / float(levels.size())
-		var tint := base_color.darkened(0.16 * (1.0 - shade)).lightened(0.16 * shade)
-		tint = tint.lightened(0.10 * _hash01(salt + 3))
-		st.set_color(tint.srgb_to_linear())
-		var lower: Array = levels[li]
-		if li < levels.size() - 1:
-			var upper: Array = levels[li + 1]
-			for i in range(RIM_POINTS):
-				var j: int = (i + 1) % RIM_POINTS
-				var want: Vector3 = ((lower[i] + lower[j]) * 0.5 - centre).normalized() + nrm
-				main._emit_polygon(st, [lower[i], lower[j], upper[j], upper[i]],
-					want.normalized())
-		else:
-			for i in range(RIM_POINTS):
-				var j2: int = (i + 1) % RIM_POINTS
-				main._emit_polygon(st, [crown, lower[i], lower[j2]], nrm)
-	return true
 
 
 func _hash01(n: int) -> float:

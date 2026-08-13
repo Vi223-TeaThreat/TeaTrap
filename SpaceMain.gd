@@ -603,6 +603,12 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 # Курсор — мягкое светящееся пятно там, куда придётся мазок. Линии контура
 # на крутых местах видны с ребра и читались криво; пятно понятно с любой
 # стороны и не спорит с самой формой земли.
+#
+# Пятно посадки ярче и желтее пятна лепки, и вдвое меньше: по одному взгляду
+# видно, что сейчас произойдёт — ляжет земля или сядет росток.
+const DIG_TONE := Color(0.42, 0.72, 0.34)
+const PLANT_TONE := Color(0.62, 0.98, 0.26)
+
 func _setup_frame() -> void:
 	frame_mat = ShaderMaterial.new()
 	frame_mat.shader = load("res://Cursor.gdshader")
@@ -639,6 +645,8 @@ func _update_frame() -> void:
 	var rad: float = CELL_SPACING * (0.75 + 0.55 * float(brush))
 	frame_mat.set_shader_parameter("spot", pick["pos"])
 	frame_mat.set_shader_parameter("reach", rad)
+	frame_mat.set_shader_parameter("tone", DIG_TONE)
+	frame_mat.set_shader_parameter("strength", 0.55)
 
 	var id := "%d:%d" % [target, brush]
 	if id == frame_id:
@@ -864,9 +872,10 @@ func _refresh_toolbar() -> void:
 		tool_buttons[id].text = "     %s  %s" % [mark, PlantsData.ITEMS[id]["name"]]
 
 
-# В режиме посадки обводим КРУГ на земле — то место, которое займёт молодая
-# кочка. Раньше обводился кусочек грани ячейки; кусочков больше нет, растение
-# садится в любую точку, и обводить надо саму землю под прицелом.
+# В режиме посадки подсвечиваем ТО ЖЕ ПЯТНО, что и при лепке, только мельче и
+# зеленее. Прежде тут рисовалось кольцо из отрезков — на крутом месте его видно
+# с ребра, и понять, куда сядет росток, было нельзя. Пятно лежит по форме земли
+# и читается с любой стороны.
 func _update_frame_spot() -> void:
 	var spot := _pick_spot(get_viewport().get_mouse_position())
 	if spot.is_empty():
@@ -874,39 +883,26 @@ func _update_frame_spot() -> void:
 		frame_id = ""
 		return
 	var pos: Vector3 = spot["pos"]
-	var nrm: Vector3 = spot["nrm"]
+	var cell: int = int(spot["cell"])
 	frame_node.visible = true
-	# Обод пересобираем не чаще, чем прицел сдвинулся на заметную долю ячейки:
-	# кольцо из тридцати отрезков каждый кадр — работа впустую.
-	var id := "s%d_%d_%d" % [int(pos.x * 8.0), int(pos.y * 8.0), int(pos.z * 8.0)]
+
+	# Пятно размером с молодую кочку — столько места растение и займёт.
+	frame_mat.set_shader_parameter("spot", pos)
+	frame_mat.set_shader_parameter("reach", CELL_SPACING * 0.42)
+	frame_mat.set_shader_parameter("tone", PLANT_TONE)
+	frame_mat.set_shader_parameter("strength", 0.75)
+
+	# Накладку по форме земли пересобираем только при смене ячейки: точка
+	# прицела ходит непрерывно, а форма под ней — нет.
+	var id := "p%d" % cell
 	if id == frame_id:
 		return
 	frame_id = id
-
-	var side: Vector3 = nrm.cross(Vector3.UP)
-	if side.length_squared() < 0.001:
-		side = nrm.cross(Vector3.RIGHT)
-	side = side.normalized()
-	var along: Vector3 = nrm.cross(side).normalized()
-	# Круг кладём НА ЗЕМЛЮ каждой своей точкой, а не в плоскость: на выпуклом
-	# месте плоское кольцо наполовину уходит в грунт.
-	var radius: float = CELL_SPACING * 0.22
-	var ring: Array = []
-	var steps := 24
-	for i in range(steps):
-		var a: float = TAU * float(i) / float(steps)
-		var at: Vector3 = pos + (side * cos(a) + along * sin(a)) * radius
-		var on: Dictionary = grid.surface_near(at)
-		ring.append((on["pos"] if not on.is_empty() else at)
-			+ (on["nrm"] if not on.is_empty() else nrm) * 0.02)
-
-	var mesh := ImmediateMesh.new()
-	mesh.surface_begin(Mesh.PRIMITIVE_LINES, frame_node.material_override)
-	for i in range(steps):
-		mesh.surface_add_vertex(ring[i])
-		mesh.surface_add_vertex(ring[(i + 1) % steps])
-	mesh.surface_end()
-	frame_node.mesh = mesh
+	var node: Vector3i = grid.node_of(cell)
+	var edge := Vector3i(2, 2, 2)
+	frame_node.mesh = SurfaceScript.build(grid, node - edge, node + edge)
+	if frame_node.mesh == null:
+		frame_node.visible = false
 
 
 func _setup_hint() -> void:
@@ -1347,8 +1343,14 @@ func _shot_mode() -> void:
 	_seed_props()
 	_seed_structures()
 	_seed_vines(14)
+	# Отпускаем кадр по ходу роста. Здесь сорок пять секунд жизни сада
+	# проматываются подряд, без единого кадра, — а видеокарта освобождает
+	# отпущенное как раз на границе кадра. В самой игре такого не бывает: там
+	# между толчками роста кадры идут своим чередом.
 	for _i in range(260):
 		plants._tick(0.15)
+		if _i % 15 == 14:
+			await get_tree().process_frame
 	for _i in range(12):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
@@ -1366,13 +1368,25 @@ func _shot_mode() -> void:
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png("user://space_close.png")
-	# Макро-кадр: подлетаем вплотную к первой посаженной кочке.
+	# Макро-кадр: подлетаем вплотную к кочке мха — но выбираем ту, что ПОДАЛЬШЕ
+	# ОТ КАМНЯ. У камня сидят лианы, они крупнее мха, и вблизи кадр упирался в
+	# их плети: мха за ними было не разглядеть.
+	var far_best: float = -1.0
+	for pid in plants.patches:
+		var pp: Dictionary = plants.patches[pid]
+		if String(pp["id"]) != "moss":
+			continue
+		var d: float = 99.0 if _cliff_focus == Vector3.ZERO \
+			else pp["pos"].distance_to(_cliff_focus)
+		if d > far_best:
+			far_best = d
+			_macro_focus = pp["pos"]
 	if _macro_focus != Vector3.ZERO:
 		cur_pivot = _macro_focus
 		target_pivot = cur_pivot
-		cur_zoom = 1.9
-		target_zoom = 1.9
-		cur_pitch = -22.0
+		cur_zoom = 1.4
+		target_zoom = 1.4
+		cur_pitch = -34.0
 		_apply_camera()
 		for _i in range(4):
 			await get_tree().process_frame

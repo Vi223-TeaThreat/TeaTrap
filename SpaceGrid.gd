@@ -602,6 +602,7 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 	for i in range(seeds.size()):
 		if _play[i] != 0:
 			_refresh_cavity(i)
+	_smooth_cavity()
 
 
 # ВПАДИНА. Насколько ячейка сидит в складке: −1 на голом выступе, 0 на ровном,
@@ -682,6 +683,39 @@ func surface_near(p: Vector3) -> Dictionary:
 	if n.length_squared() < 0.0000001:
 		return {}
 	return {"pos": at, "nrm": -n.normalized(), "cell": j}
+
+
+# РАЗГЛАЖИВАЕМ ВПАДИНУ по соседям. Она считается вторым перегибом поля, а
+# вторая разность у соседних семян скачет — семена разбросаны, и у одного из
+# них соседи чуть ближе. Дальше это число идёт в порог, а порог превращает
+# скачок между двумя вершинами в ПРЯМУЮ ЛИНИЮ поперёк треугольника: на камне
+# вылезали резкие зелёные клинья по форме сетки.
+#
+# Сглаживание — единственное настоящее лекарство: подсовывать под порог ровную
+# величину, а не подкрашивать последствия.
+func _smooth_cavity(cells: Array = []) -> void:
+	var soft := PackedFloat32Array()
+	var which: Array = cells
+	if which.is_empty():
+		which = range(cavity.size())
+	soft.resize(which.size())
+	var at := 0
+	for i in which:
+		var node: Vector3i = node_of(i)
+		var sum: float = cavity[i]
+		var count := 1
+		for step in NEIGHBOURS:
+			var s: int = node_seed(node + step)
+			if s < 0:
+				continue
+			sum += cavity[s]
+			count += 1
+		soft[at] = sum / float(count)
+		at += 1
+	at = 0
+	for i in which:
+		cavity[i] = soft[at]
+		at += 1
 
 
 func cavity_of(index: int) -> float:
@@ -851,6 +885,7 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 				seen[n3] = true
 	for j in seen:
 		_refresh_cavity(j)
+	_smooth_cavity(seen.keys())
 	return zone.keys()
 
 
