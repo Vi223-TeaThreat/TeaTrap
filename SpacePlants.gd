@@ -517,8 +517,18 @@ func _make_blades(spot: Dictionary, def: Dictionary, salt: int) -> Array:
 		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a))
 		var at: Vector3 = centre + dir * (r * span * wob)
 		var on: Dictionary = main.grid.surface_near(at)
-		var pos: Vector3 = on["pos"] if not on.is_empty() else at
-		var up_n: Vector3 = on["nrm"] if not on.is_empty() else nrm
+		# Не села — ворсинки просто НЕ БУДЕТ. Раньше на этом месте оставалась
+		# точка «как есть», то есть висящая в воздухе: у кромки обрыва такие
+		# ворсинки торчали наружу целыми охапками. Пусть подушка у края будет
+		# пореже, чем с бахромой из ничего.
+		if on.is_empty():
+			continue
+		var pos: Vector3 = on["pos"]
+		var up_n: Vector3 = on["nrm"]
+		# И место, и наклон должны быть СВОИ. Уехала дальше, чем отпущено, или
+		# завернулась круче прямого угла — значит нашлась чужая земля за краем.
+		if pos.distance_to(at) > span * 0.9 or up_n.dot(nrm) < 0.2:
+			continue
 		out.append({
 			"pos": pos, "nrm": up_n,
 			"out": dir.normalized() if dir.length_squared() > 0.0001 else side,
@@ -542,8 +552,10 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 
 	# Молодая кочка — три ворсинки, взрослая — все тридцать. Растёт и число, и
 	# рост каждой: одним ростом получается раздутая копия младенца.
+	# Ворсинок может оказаться меньше задуманного: те, что не нашли под собой
+	# земли, не родились вовсе.
 	var count: int = clampi(BLADES_MIN + int(float(BLADES_MAX - BLADES_MIN) * m),
-		BLADES_MIN, BLADES_MAX)
+		1, blades.size())
 	var tall: float = main.CELL_SPACING * lerpf(0.035, 0.105, m)
 	var stage: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
 

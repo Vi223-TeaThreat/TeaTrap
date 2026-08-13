@@ -666,7 +666,7 @@ func field_slope(index: int) -> Vector3:
 func surface_near(p: Vector3) -> Dictionary:
 	var at := p
 	var j: int = -1
-	for _step in range(2):
+	for _step in range(3):
 		j = cell_at(at)
 		if j < 0 or not in_play(j):
 			return {}
@@ -675,9 +675,24 @@ func surface_near(p: Vector3) -> Dictionary:
 		if mag2 < 0.0000001:
 			return {}
 		var here: float = fill[j] + g.dot(at - seeds[j])
-		at -= g * ((here - SOLID_AT) / mag2)
+		# Шаг ОГРАНИЧЕН одной ячейкой. Наклон — это прямая, продолженная от
+		# семени, и вдали от поверхности она врёт тем сильнее, чем дальше:
+		# у обрыва она выбрасывала точку на другую сторону кромки или вовсе в
+		# воздух. Короткими шагами приходим туда же, а мимо не улетаем.
+		var move: Vector3 = -g * ((here - SOLID_AT) / mag2)
+		var span: float = move.length()
+		if span > _spacing:
+			move *= _spacing / span
+		at += move
 	j = cell_at(at)
 	if j < 0 or not in_play(j):
+		return {}
+	# ПРОВЕРЯЕМ, ЧТО ПРИШЛИ. Поле у семени продолжается прямой, и если точка
+	# села далеко от него, значит прямую продолжили за пределы, где она верна:
+	# такому месту верить нельзя, лучше признать, что земли рядом нет.
+	if absf(fill[j] - SOLID_AT) > 0.5:
+		return {}
+	if at.distance_to(p) > _spacing * 1.5:
 		return {}
 	var n: Vector3 = field_slope(j)
 	if n.length_squared() < 0.0000001:
@@ -757,11 +772,24 @@ func fill_of(index: int) -> float:
 # мазка, и поверхность переставала зависеть от величин — она прилипала к самим
 # семенам, превращаясь в угловатое тело с остриями. Предел держит форму
 # гладкой, а расти вверх заставляет двигать курсор, а не долбить в одну точку.
-# Предел большой: он страхует от совсем уж дикого перепада, но не мешает
-# копать и насыпать. От остриёв спасает не он, а подтягивание к соседям —
-# оно срезает резкие перепады и почти не трогает уже гладкую форму, поэтому
-# лепить можно сколько угодно, а угловатости не набирается.
+#
+# ОГРАНИЧИВАЕМ МЯГКО, а не обрезкой. Обрезка ломает наклон ровно по тому
+# контуру, где она включилась: внутри него поле стоит на месте, снаружи ещё
+# растёт — и на стыке идёт ОСТРАЯ СКЛАДКА через всю насыпь. Пока мазок ставили
+# щелчками, до предела доходили редко; с удержанием кнопки в него упираются за
+# секунду, и складки полезли.
+#
+# Мягкое насыщение подходит к тому же потолку, но плавно: наклон нигде не
+# рвётся, складке взяться неоткуда. В словаре при этом лежит НЕОБРЕЗАННЫЙ счёт —
+# иначе отмена, вычитая своё, не вернула бы ровно то, что было.
 const EDIT_CAP: float = 6.0
+
+# Мягко и БЕЗ ИЗЛОМОВ ПО ВСЕЙ ДЛИНЕ. Отдельной ветки «вдали от потолка вернуть
+# как есть» тут быть не должно: на её границе снова появится излом, только в
+# другом месте. У малых величин `tanh` и так почти не гнёт — на единице разница
+# в один процент.
+func _edit_of(index: int) -> float:
+	return EDIT_CAP * tanh(float(edits.get(index, 0.0)) / EDIT_CAP)
 # Подтягивание к соседям — это диффузия: она разглаживает не только сам мазок,
 # но и всё, что уже вылеплено рядом. При большой силе мазок возле холма
 # подъедал холм. Держим её слабой: острия она снимает и такой, а форму,
@@ -810,8 +838,7 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 					if d >= 1.0:
 						continue
 					var w: float = 1.0 - d * d
-					edits[j] = clampf(float(edits.get(j, 0.0)) + amount * w * w,
-						-EDIT_CAP, EDIT_CAP)
+					edits[j] = float(edits.get(j, 0.0)) + amount * w * w
 					# Каменистость кладётся тем же мазком, поэтому меняется
 					# плавно: у камня нет резкой границы, он сходит на нет.
 					#
@@ -874,7 +901,7 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 		# Огранка прибавляется ЗДЕСЬ, на живом пути лепки. Раньше она жила в
 		# пересчёте по ядру, которого никто не звал, и до картинки не доходила:
 		# камень отличался от земли одним цветом.
-		fill[j] = base_fill[j] + float(edits.get(j, 0.0)) + _facet(j)
+		fill[j] = base_fill[j] + _edit_of(j) + _facet(j)
 
 	# Впадину пересчитываем ШИРЕ мазка: она смотрит на соседей, и у ячейки за
 	# краем зоны сосед только что изменился. Наружу отдаём всё равно саму зону —
@@ -947,13 +974,12 @@ func blur_at(point: Vector3, radius: float, strength: float) -> Dictionary:
 func apply_delta(delta: Dictionary, sign: float) -> Array:
 	var zone: Dictionary = {}
 	for j in delta:
-		edits[j] = clampf(float(edits.get(j, 0.0)) + float(delta[j]) * sign,
-			-EDIT_CAP, EDIT_CAP)
+		edits[j] = float(edits.get(j, 0.0)) + float(delta[j]) * sign
 		if absf(float(edits[j])) < 0.002:
 			edits.erase(j)
 		zone[j] = true
 	for j in zone:
-		fill[j] = base_fill[j] + float(edits.get(j, 0.0)) + _facet(j)
+		fill[j] = base_fill[j] + _edit_of(j) + _facet(j)
 	var seen: Dictionary = zone.duplicate()
 	for j in zone:
 		var node: Vector3i = node_of(j)
@@ -998,10 +1024,28 @@ func _facet(index: int) -> float:
 	# Подтягивая значение к ближайшей ступени, получаем широкие плоские грани,
 	# разделённые складками: это и есть облик окатанной глыбы. Рёбра остаются
 	# округлыми, потому что подтягиваем лишь частично, а не защёлкиваем.
+	#
+	# Ступень берём СГЛАЖЕННУЮ, а не округлением. У округления наклон на границе
+	# ступени рвётся, и по этому месту через всю глыбу идёт острая складка —
+	# ровно та, что вылезала при лепке. Здесь плато остаются плоскими, а переход
+	# между ними имеет нулевой наклон с обоих концов: грань есть, лезвия нет.
 	var steps := 2.5
-	n = lerpf(n, round(n * steps) / steps, 0.65)
+	var q: float = n * steps
+	var base: float = floor(q)
+	var frac: float = q - base
+	n = lerpf(n, (base + smoothstep(0.30, 0.70, frac)) / steps, 0.65)
 	var steep: float = _steepness(index)
-	return n * s * s * (0.55 + 0.75 * high) * (0.45 + 1.05 * steep) * FACET_AMP
+	var out: float = n * s * s * (0.55 + 0.75 * high) * (0.45 + 1.05 * steep) * FACET_AMP
+	if out > 0.0:
+		# ПРИБАВЛЯТЬ ПОРОДУ МОЖНО ТОЛЬКО ТАМ, ГДЕ ОНА УЖЕ ЕСТЬ. Огранка — это
+		# прибавка к полю, и в пустом месте рядом с глыбой она поднимает его
+		# выше уровня: от тела отрастает тонкая плита, висящая в воздухе. Их и
+		# видно было отдельными лоскутами у подножия.
+		#
+		# Убавлять — можно где угодно: выемка в пустоте ничего не создаёт.
+		var body: float = base_fill[index] + _edit_of(index)
+		out *= clampf((body - (SOLID_AT - 1.0)) / 0.9, 0.0, 1.0)
+	return out
 
 
 # Насколько круто стоит поверхность у этой ячейки: 0 — плоско, 1 — отвесно.
@@ -1012,17 +1056,16 @@ func _facet(index: int) -> float:
 func _steepness(index: int) -> float:
 	var node: Vector3i = node_of(index)
 	var here: Vector3 = seeds[index]
-	var f0: float = base_fill[index] + float(edits.get(index, 0.0))
+	var f0: float = base_fill[index] + _edit_of(index)
 	var g := Vector3.ZERO
-	for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
-			Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+	for step in NEIGHBOURS:
 		var s: int = node_seed(node + step)
 		if s < 0:
 			continue
 		var d: Vector3 = seeds[s] - here
 		var len2: float = d.length_squared()
 		if len2 > 0.000001:
-			g += d * ((base_fill[s] + float(edits.get(s, 0.0)) - f0) / len2)
+			g += d * ((base_fill[s] + _edit_of(s) - f0) / len2)
 	var mag: float = g.length()
 	if mag < 0.000001:
 		return 0.0
