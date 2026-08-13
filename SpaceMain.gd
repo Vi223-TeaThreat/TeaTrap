@@ -1384,8 +1384,11 @@ func _shot_mode() -> void:
 				child.visible = false
 		cur_pivot = _cliff_focus
 		target_pivot = cur_pivot
-		cur_zoom = 7.5
-		target_zoom = 7.5
+		# Вплотную: с семи с половиной саженей глыба занимала пятую часть кадра,
+		# и судить по ней облик породы было нельзя — ни трещины, ни край зелени
+		# на таком удалении не разобрать.
+		cur_zoom = 3.4
+		target_zoom = 3.4
 		cur_pitch = -8.0
 		cur_yaw = 25.0
 		_apply_camera()
