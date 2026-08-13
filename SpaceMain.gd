@@ -465,6 +465,10 @@ func _refresh(cell: int) -> void:
 # набирается несколькими; поверхность идёт по уровню половинного заполнения,
 # поэтому прибавка выходит плавным наплывом, а не глыбой с углами.
 const STROKE: float = 0.75        # сколько добавляет один мазок
+# Насколько один проход кисти размывания подтягивает ячейку к соседям. Держим
+# небольшим: размывание должно набираться повторами, как и лепка, — иначе один
+# щелчок слизывает форму начисто и вернуть её можно только отменой.
+const BLUR: float = 0.34
 
 func _brush_radius() -> float:
 	return CELL_SPACING * (0.8 + 0.55 * float(brush))
@@ -473,24 +477,26 @@ func _brush_radius() -> float:
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
 		stone_push: float = 0.0) -> void:
 	var touched: Array = grid.stroke_at(at, radius, amount, stone_push)
-	for c in touched:
-		_touched_cells[c] = true
 	if amount > 0.0:
 		for c in touched:
 			paint[c] = material
-	# Порода у ячейки появляется и исчезает сама, по уровню заполнения.
+	_after_field_change(touched)
+
+
+# Поле в этих ячейках изменилось — разбираемся с последствиями. Порода у ячейки
+# появляется и исчезает САМА, по уровню заполнения; куски метим на пересборку.
+# Общее для лепки и размывания: и то и другое двигает одно и то же поле.
+func _after_field_change(touched: Array) -> void:
 	for c in touched:
+		_touched_cells[c] = true
 		var full: bool = grid.fill_of(c) > 0.5
 		if full and not solid.has(c):
 			solid[c] = paint.get(c, "ground")
 			_forget_buried(c)
-			_touch_chunks(c)
 		elif not full and solid.has(c):
 			solid.erase(c)
 			_forget_buried(c)
-			_touch_chunks(c)
-		else:
-			_touch_chunks(c)
+		_touch_chunks(c)
 
 
 func _place(cell: int, material: String = "ground", record: bool = true) -> void:
@@ -507,6 +513,18 @@ func _remove(cell: int, record: bool = true) -> void:
 
 # Один мазок в точке: и постановка, и снятие, и отмена ходят через него.
 func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> void:
+	# Размывание — не мазок: оно ничего не кладёт, а тянет поверхность к среднему
+	# по соседям. Отменить его вычислением нельзя (сколько снялось, зависит от
+	# того, что было вокруг), поэтому в память кладётся сам список прибавок.
+	if material == "smooth" and amount > 0.0:
+		var delta: Dictionary = grid.blur_at(at, _brush_radius() * 1.15, BLUR)
+		if delta.is_empty():
+			return
+		_after_field_change(delta.keys())
+		if record:
+			history.append({"blur": delta})
+		return
+
 	# Камень кладём ТЕСНЕЕ земли: глыба должна быть плотным телом, а не
 	# расплывшейся насыпью того же охвата.
 	var tight: float = 0.78 if material == "cliff" else 1.0
@@ -559,7 +577,11 @@ func _undo() -> void:
 	# и по массе, и по каменистости. Поэтому отмена повторяет мазок с обратным
 	# знаком по обеим величинам, а не «снимает землю»: снятие увело бы камень
 	# прочь и там, где мазок его прибавил.
-	if a.has("at"):
+	if a.has("blur"):
+		# Размывание снимается вычитанием ровно тех прибавок, которые оно
+		# положило: заново их не вычислить — они зависели от прежнего рельефа.
+		_after_field_change(grid.apply_delta(a["blur"], -1.0))
+	elif a.has("at"):
 		_stroke(a["at"], float(a["rad"]), -float(a["amount"]), "",
 			-_stone_push(float(a["amount"]), String(a["mat"])))
 	elif a.has("plant"):
@@ -1129,6 +1151,7 @@ func _selftest() -> void:
 			" мс, после отмены осталось ", solid.size() - was)
 	brush = 1
 
+	_blur_report()
 	_stone_report()
 
 	# Снос настоящей ячейки породы: поверхность обязана перестроиться.
@@ -1171,6 +1194,68 @@ func _selftest() -> void:
 	await get_tree().physics_frame
 	var pick := _pick(get_viewport().get_visible_rect().size * 0.5)
 	print("Самопроверка: прицел — ", "мимо" if pick.is_empty() else str(pick["hit"]))
+
+
+# РАЗМЫВАНИЕ ГЛАЗАМИ ЧИСЕЛ. Кисть обязана делать ровно две вещи: уменьшать
+# перепад между соседями и отменяться начисто. Первое меряем разбросом поля по
+# округе до и после, второе — сравнением с тем, что было.
+func _blur_report() -> void:
+	var at: Vector3 = grid.seeds[grid.cell_at(Vector3(0, 6, 0))]
+	var was_brush := brush
+	brush = 3
+	# Сначала лепим уступ: ровное место размывать бессмысленно, там и так гладко.
+	for _i in range(3):
+		_dab(at, STROKE, "ground")
+	_flush_chunks()
+
+	var near: Array = grid.seeds_near(at, CELL_SPACING * 2.5)
+	var before: Dictionary = {}
+	for c in near:
+		before[c] = grid.fill_of(c)
+	var rough_before: float = _roughness(near)
+
+	var t0 := Time.get_ticks_usec()
+	_dab(at, STROKE, "smooth")
+	_flush_chunks()
+	var ms := (Time.get_ticks_usec() - t0) / 1000.0
+	var rough_after: float = _roughness(near)
+
+	_undo()
+	_flush_chunks()
+	var left := 0.0
+	for c in near:
+		left = maxf(left, absf(grid.fill_of(c) - float(before[c])))
+	print("Размывание: перепад ", snappedf(rough_before, 0.001), " → ",
+		snappedf(rough_after, 0.001), ", за ", snappedf(ms, 0.1),
+		" мс, после отмены осталось ", snappedf(left, 0.0001))
+	for _i in range(3):
+		_undo()
+	_flush_chunks()
+	brush = was_brush
+
+
+# Насколько поле ИЗЛОМАНО: разница ячейки со средним по её соседям. Не разница
+# с соседями напрямую — та велика и у ровного склона, а склон размывать нечего.
+# Излом же есть ровно там, где кисти и место работы.
+func _roughness(cells: Array) -> float:
+	var sum := 0.0
+	var count := 0
+	for c in cells:
+		var node: Vector3i = grid.node_of(c)
+		var near := 0.0
+		var near_n := 0
+		for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+				Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
+			var n: int = grid.node_seed(node + step)
+			if n < 0:
+				continue
+			near += grid.fill_of(n)
+			near_n += 1
+		if near_n == 0:
+			continue
+		sum += absf(near / float(near_n) - grid.fill_of(c))
+		count += 1
+	return 0.0 if count == 0 else sum / float(count)
 
 
 # КАМЕНЬ ГЛАЗАМИ ЧИСЕЛ. На картинке не видно, отчего глыба вышла плоской:
@@ -1371,22 +1456,33 @@ func _shot_mode() -> void:
 	# Макро-кадр: подлетаем вплотную к кочке мха — но выбираем ту, что ПОДАЛЬШЕ
 	# ОТ КАМНЯ. У камня сидят лианы, они крупнее мха, и вблизи кадр упирался в
 	# их плети: мха за ними было не разглядеть.
-	var far_best: float = -1.0
+	var pick_best: float = 1e9
 	for pid in plants.patches:
 		var pp: Dictionary = plants.patches[pid]
 		if String(pp["id"]) != "moss":
 			continue
-		var d: float = 99.0 if _cliff_focus == Vector3.ZERO \
-			else pp["pos"].distance_to(_cliff_focus)
-		if d > far_best:
-			far_best = d
-			_macro_focus = pp["pos"]
+		var here: Vector3 = pp["pos"]
+		# Ближе к середине острова и подальше от камня. У кромки камера
+		# оказывалась НИЖЕ уровня земли и смотрела вдоль обрыва в море.
+		var from_edge: float = Vector2(here.x, here.z).length()
+		var from_rock: float = 99.0 if _cliff_focus == Vector3.ZERO \
+			else here.distance_to(_cliff_focus)
+		var score: float = from_edge - minf(from_rock, 8.0)
+		if score < pick_best:
+			pick_best = score
+			_macro_focus = here
 	if _macro_focus != Vector3.ZERO:
+		# Подсветку прицела прячем: вблизи её накладка ложится поперёк кадра
+		# зелёной плоскостью — она не пишет глубину и рисуется поверх всего.
+		_hide_cursor = true
+		frame_node.visible = false
 		cur_pivot = _macro_focus
 		target_pivot = cur_pivot
-		cur_zoom = 1.4
-		target_zoom = 1.4
-		cur_pitch = -34.0
+		# Не ближе четырёх метров: кочка меньше полуметра, и с полутора метров
+		# камера оказывалась ВНУТРИ неё — дощечки шли поперёк кадра полосами.
+		cur_zoom = 4.0
+		target_zoom = 4.0
+		cur_pitch = -42.0
 		_apply_camera()
 		for _i in range(4):
 			await get_tree().process_frame

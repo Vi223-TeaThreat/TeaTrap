@@ -40,35 +40,22 @@ var _dirty: Dictionary = {}
 var _accum: float = 0.0
 var _next: int = 1
 var _rng := RandomNumberGenerator.new()
-var _blade_mat: StandardMaterial3D
+var _blade_mat: ShaderMaterial
 
 
 func setup(main_ref: Node3D) -> void:
 	main = main_ref
 	_rng.seed = 20260811
-	# Материал пучков. Прозрачность — ОТСЕЧЕНИЕМ, а не смешиванием: у смешивания
-	# порядок отрисовки решается по расстоянию до всего меша целиком, и сотни
-	# перекрывающихся пучков начинают мигать друг сквозь друга. Отсечение
-	# работает по глубине, как обычная поверхность, и стоит дешевле.
+	# Материал пучков — СВОЙ шейдер, не встроенный. Встроенный переворачивал
+	# нормаль у изнанки дощечки, и половина квадратов в пучке чернела; и свет
+	# у него ложится жёстко, с резкой границей тени. Подробности в `Blades.gdshader`.
 	#
-	# Стороны не отсекаем: лист один и тот же с обеих сторон.
-	# Фильтр — ближайший: картинка нарочно пиксельная, сглаживание съело бы её.
-	_blade_mat = StandardMaterial3D.new()
-	_blade_mat.albedo_texture = _make_blade_texture()
-	_blade_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
-	_blade_mat.alpha_scissor_threshold = 0.5
-	_blade_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_blade_mat.vertex_color_use_as_albedo = true
-	_blade_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
-	_blade_mat.roughness = 1.0
-	_blade_mat.metallic_specular = 0.0
-	# СВЕТ ПО МХУ МЯГКИЙ. Мох просвечивает: на солнце он светится изнутри, а в
-	# тени не проваливается в чёрное. Подсвет сзади и снимает жёсткость — без
-	# него теневая сторона подушки выходит грязно-тёмной, будто выжжена.
-	_blade_mat.backlight_enabled = true
-	_blade_mat.backlight = Color(0.26, 0.36, 0.16)
-	# Своего блика у мха нет совсем — он матовый до бархатности.
-	_blade_mat.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
+	# Прозрачность — ОТСЕЧЕНИЕМ, а не смешиванием: у смешивания порядок
+	# отрисовки решается по расстоянию до всего меша целиком, и сотни
+	# перекрывающихся пучков начинают мигать друг сквозь друга.
+	_blade_mat = ShaderMaterial.new()
+	_blade_mat.shader = load("res://Blades.gdshader")
+	_blade_mat.set_shader_parameter("blades", _make_blade_texture())
 
 
 # ЛИСТ С КУРТИНКАМИ МХА — рисуем прямо в коде, без файла с картинкой.
@@ -104,13 +91,14 @@ func _make_blade_texture() -> ImageTexture:
 		var high: float = lerpf(0.16, 0.62, age) * float(TILE)
 		var half: float = lerpf(0.22, 0.46, age) * float(TILE)
 		var fuzz: int = int(round(lerpf(1.0, 4.0, age)))
-		# Палитра тесная: у мха нет ни сухой соломы, ни чёрных теней — весь он
-		# в узкой жёлто-зелёной вилке, и разница между тенью и светом мала.
-		# Резкий перепад сразу превращает бархат в щётку из палок.
-		var deep := Color(0.26, 0.40, 0.15).lerp(Color(0.21, 0.34, 0.12), age)
-		var body := Color(0.44, 0.62, 0.21).lerp(Color(0.38, 0.56, 0.18), age)
-		var lit := Color(0.58, 0.74, 0.29).lerp(Color(0.54, 0.68, 0.24), age)
-		var rust := Color(0.40, 0.34, 0.15)      # ржавчина у старых куртин
+		# Палитра тесная и ПРИГЛУШЁННАЯ. Ядовитая салатовая зелень сразу выдаёт
+		# компьютерную картинку; на рисованных задниках зелень плотная, чуть
+		# сизая в тени и тёплая на свету, а разница между ними невелика.
+		# Резкий перепад к тому же превращает бархат в щётку из палок.
+		var deep := Color(0.20, 0.31, 0.17).lerp(Color(0.17, 0.26, 0.15), age)
+		var body := Color(0.33, 0.47, 0.22).lerp(Color(0.29, 0.42, 0.19), age)
+		var lit := Color(0.47, 0.60, 0.29).lerp(Color(0.44, 0.55, 0.26), age)
+		var rust := Color(0.36, 0.31, 0.17)      # ржавчина у старых куртин
 
 		for k in range(KINDS):
 			var ox := k * TILE
@@ -455,6 +443,9 @@ func _rebuild_cell(cell: int) -> void:
 # соломы, а не подушкой мха.
 const BLADES_MIN: int = 4
 const BLADES_MAX: int = 18
+# Насколько сильно край кочки идёт вслед за выпуклостью земли. Подбиралось по
+# кадру на валуне: при нуле пучок висит над камнем, при большом — врастает в него.
+const CURVE_DROP: float = 2.6
 
 func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[p["id"]]
@@ -474,6 +465,19 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var reach: float = main.CELL_SPACING * lerpf(0.04, 0.13, m)
 	var tall: float = main.CELL_SPACING * lerpf(0.05, 0.16, m)
 
+	# ЗЕМЛЯ ПОД КОЧКОЙ ВЫГНУТА. Ворсинки отступают от середины по плоскости
+	# наклона, а поверхность из-под них уходит вниз — на валуне край пучка
+	# повисал над камнем с ясно видимым зазором.
+	#
+	# Считаем это ПО КРИВИЗНЕ, а не поиском земли под каждой ворсинкой. Поиск
+	# точен, но он ходит по полю, а пучок пересобирается на каждой ступени
+	# роста: с ним сорок пять секунд жизни сада стоили двадцати четырёх секунд
+	# счёта вместо полусекунды. Кривизна же у сетки уже посчитана — это та самая
+	# впадина, с минусом на выпуклом. Просадка на расстоянии r от середины идёт
+	# как r², и одного числа на всю кочку хватает.
+	var bulge: float = maxf(0.0, -main.grid.cavity_of(int(p["cell"]))) \
+		* CURVE_DROP / main.CELL_SPACING
+
 	# ЛИАНА — тот же пучок, но не круглый, а вытянутый по подъёму: плеть ползёт
 	# вверх по склону узкой полосой. Своей формы — стебля с листьями — у неё
 	# пока нет, и это заглушка, а не решение.
@@ -488,10 +492,13 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		creep = 2.4
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
-	# и умножение на тёмно-зелёный сделало бы пучок чёрным.
+	# и умножение на тёмно-зелёный сделало бы пучок чёрным. И оттенок подмешиваем
+	# лишь наполовину — на полную он перекрашивал картинку в свой цвет, стирая
+	# всю проработку, ради которой она и рисовалась.
 	var c: Color = def["color"]
 	var lum: float = maxf(0.001, (c.r + c.g + c.b) / 3.0)
-	var hue := Color(c.r / lum, c.g / lum, c.b / lum)
+	var hue := Color(1.0, 1.0, 1.0).lerp(
+		Color(c.r / lum, c.g / lum, c.b / lum), 0.5)
 
 	for i in range(count):
 		# Отходим от середины по кругу, но не по краю: корень квадратный из
@@ -499,7 +506,9 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		var ra: float = TAU * _hash01(salt + i * 13)
 		var rr: float = reach * sqrt(_hash01(salt + i * 71))
 		var out: Vector3 = (side * (cos(ra) * creep) + along * sin(ra)).normalized()
-		var at: Vector3 = centre + (side * (cos(ra) * creep) + along * sin(ra)) * rr
+		var at: Vector3 = centre + (side * (cos(ra) * creep) + along * sin(ra)) * rr \
+			- nrm * (bulge * rr * rr)
+		var stand: Vector3 = nrm
 		# Своя сторона у каждой дощечки — она и даёт «под разными углами».
 		var turn: float = TAU * _hash01(salt + i * 29)
 		var face: Vector3 = side * cos(turn) + along * sin(turn)
@@ -513,10 +522,10 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		var lie: float = edge * edge * 0.85
 		var h: float = tall * (0.60 + 0.45 * _hash01(salt + i * 53)) * (1.0 - 0.35 * lie)
 		# Заваливаем дощечку набок — иначе пучок стоит звездой из ровных стенок.
-		var up: Vector3 = (nrm * (1.0 - lie * 0.75) + out * lie
+		var up: Vector3 = (stand * (1.0 - lie * 0.75) + out * lie
 			+ face * (_hash01(salt + i * 37) - 0.5) * 0.55).normalized()
 		var half: Vector3 = face * (w * 0.5)
-		var foot: Vector3 = at - nrm * (h * 0.12)   # корень чуть утоплен в землю
+		var foot: Vector3 = at - stand * (h * 0.22)  # корень утоплен в землю
 
 		# Столбец — разновидность, строка — возраст. Возраст берём у растения,
 		# разновидность у самой дощечки: в одном пучке стоят разные былинки.
@@ -538,10 +547,47 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		# Стороны у материала не отсекаются, поэтому порядок обхода не важен.
 		for tri in [[0, 1, 2], [0, 2, 3]]:
 			for k in tri:
-				st.set_normal(nrm)
+				st.set_normal(stand)
 				st.set_uv(uvs[k])
 				st.add_vertex(quad[k])
+
+	# ШАПКА. Стоячие дощечки видны сверху с ребра, и посреди пучка зияет плешь —
+	# смотришь на кочку сверху, а видишь землю между ворсинками. Кладём поверх
+	# несколько лоскутов ПО ЗЕМЛЕ: сверху они закрывают середину, сбоку почти не
+	# видны. У мха это ещё и правда: подушка сверху сплошная.
+	var caps: int = 2 + int(3.0 * m)
+	for i in range(caps):
+		var ca: float = TAU * _hash01(salt + 401 + i * 61)
+		var cr: float = reach * 0.55 * sqrt(_hash01(salt + 233 + i * 17))
+		var cdir: Vector3 = side * (cos(ca) * creep) + along * sin(ca)
+		var cn: Vector3 = nrm
+		var cp: Vector3 = centre + cdir * cr - nrm * (bulge * cr * cr)
+		var turn2: float = TAU * _hash01(salt + 577 + i * 43)
+		var e1: Vector3 = (side * cos(turn2) + along * sin(turn2)) * (reach * 0.72)
+		var e2: Vector3 = (side * -sin(turn2) + along * cos(turn2)) * (reach * 0.62)
+		# Приподнимаем на высоту подушки: шапка лежит по её макушке, не по земле.
+		var lift: Vector3 = cn * (tall * (0.34 + 0.22 * _hash01(salt + i * 29)))
+		var c0: Vector3 = cp + lift
+		var cap := [c0 - e1 - e2, c0 + e1 - e2, c0 + e1 + e2, c0 - e1 + e2]
+		# Берём середину клетки — самую густую часть подушки, без её края.
+		var mu0: float = float(cx_cap(salt, i)) / float(KINDS) + 0.18 / float(KINDS)
+		var mu1: float = float(cx_cap(salt, i)) / float(KINDS) + 0.82 / float(KINDS)
+		var stage: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
+		var mv0: float = (float(stage) + 0.10) / float(STAGES)
+		var mv1: float = (float(stage) + 0.62) / float(STAGES)
+		var cuv := [Vector2(mu0, mv1), Vector2(mu1, mv1), Vector2(mu1, mv0), Vector2(mu0, mv0)]
+		var cshade: float = 0.95 + 0.12 * _hash01(salt + 811 + i * 13)
+		st.set_color((hue * cshade).srgb_to_linear())
+		for tri2 in [[0, 1, 2], [0, 2, 3]]:
+			for k in tri2:
+				st.set_normal(cn)
+				st.set_uv(cuv[k])
+				st.add_vertex(cap[k])
 	return count > 0
+
+
+func cx_cap(salt: int, i: int) -> int:
+	return (salt / 5 + i * 3) % KINDS
 
 
 func _hash01(n: int) -> float:

@@ -889,6 +889,81 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 	return zone.keys()
 
 
+# РАЗМЫВАНИЕ. Кисть, которая ничего не прибавляет и не убавляет, а СГЛАЖИВАЕТ:
+# каждая ячейка подтягивается к среднему по своим соседям. Ею снимают уступы,
+# заглаживают стык двух насыпей и растушёвывают склон — то, чего мазком не
+# сделать, потому что мазок всегда что-то кладёт.
+#
+# Правка ложится в те же `edits`, что и лепка, поэтому размывание работает и по
+# природному рельефу, и по вылепленному. Но обратить его нельзя вычислением:
+# сколько снялось, зависит от того, что было вокруг. Поэтому наружу отдаётся
+# СПИСОК ПРИБАВОК — по нему отмена возвращает всё в точности.
+func blur_at(point: Vector3, radius: float, strength: float) -> Dictionary:
+	var inside: Dictionary = {}
+	var span := int(ceil(radius / _cell_size)) + 1
+	var base := _key_of(point)
+	for dx in range(-span, span + 1):
+		for dy in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var key := base + Vector3i(dx, dy, dz)
+				if not _seed_hash.has(key):
+					continue
+				for j in _seed_hash[key]:
+					var d: float = seeds[j].distance_to(point) / radius
+					if d >= 1.0:
+						continue
+					inside[j] = (1.0 - d * d) * (1.0 - d * d)
+
+	# Среднее считаем ПО ИСХОДНОМУ полю, до правок: если менять на ходу, ячейки
+	# в начале списка сглаживаются по уже сглаженным соседям, и кисть тянет
+	# рельеф в сторону обхода.
+	var delta: Dictionary = {}
+	for j in inside:
+		var node: Vector3i = node_of(j)
+		var sum := 0.0
+		var count := 0
+		for step in NEIGHBOURS:
+			var n: int = node_seed(node + step)
+			if n < 0:
+				continue
+			sum += fill[n]
+			count += 1
+		if count == 0:
+			continue
+		var want: float = sum / float(count) - fill[j]
+		var add: float = want * strength * float(inside[j])
+		if absf(add) > 0.0005:
+			delta[j] = add
+
+	apply_delta(delta, 1.0)
+	return delta
+
+
+# Прибавляет к правкам готовый список — им ходят и размывание, и его отмена
+# (с обратным знаком).
+func apply_delta(delta: Dictionary, sign: float) -> Array:
+	var zone: Dictionary = {}
+	for j in delta:
+		edits[j] = clampf(float(edits.get(j, 0.0)) + float(delta[j]) * sign,
+			-EDIT_CAP, EDIT_CAP)
+		if absf(float(edits[j])) < 0.002:
+			edits.erase(j)
+		zone[j] = true
+	for j in zone:
+		fill[j] = base_fill[j] + float(edits.get(j, 0.0)) + _facet(j)
+	var seen: Dictionary = zone.duplicate()
+	for j in zone:
+		var node: Vector3i = node_of(j)
+		for step in NEIGHBOURS:
+			var n: int = node_seed(node + step)
+			if n >= 0:
+				seen[n] = true
+	for j in seen:
+		_refresh_cavity(j)
+	_smooth_cavity(seen.keys())
+	return zone.keys()
+
+
 # ОГРАНЁННОСТЬ КАМНЯ. К полю возле камня добавляется крупный шум: поверхность
 # набирает широкие плосковатые грани и складки, как у окатанных глыб на
 # снимках. Шипов от этого быть не может — это плавная величина, а не отдельные
