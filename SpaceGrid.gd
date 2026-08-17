@@ -28,6 +28,10 @@ extends RefCounted
 
 const EPS: float = 0.00001
 const WELD: float = 0.01          # на таком расстоянии вершины считаем одной
+# Разбиение кубика на тетраэдры берём У ОТРИСОВКИ, а не заводим своё: посадка
+# растений обязана попадать в ту же поверхность, которую видно, и вторая копия
+# таблицы рано или поздно разошлась бы с первой.
+const SurfaceGeo = preload("res://Surface.gd")
 # Шесть прямых соседей по решётке. Кольцо нарочно узкое: по всем двадцати шести
 # всё, что считается по соседям, расползается заметно дальше своего места.
 const NEIGHBOURS := [
@@ -687,7 +691,119 @@ func surface_near(p: Vector3) -> Dictionary:
 	var n: Vector3 = field_slope(j)
 	if n.length_squared() < 0.0000001:
 		return {}
+	# И ТОЛЬКО ТЕПЕРЬ — НА САМУ ПОВЕРХНОСТЬ. Всё выше было приближением по
+	# наклону; последний шаг сажает точку на срез того же поля, по которому
+	# режется картинка. Без него растение сидело рядом с землёй, а не на ней.
+	var exact: Dictionary = _snap_to_facet(at, j)
+	if exact.is_empty():
+		return {}
+	at = exact["pos"]
+	j = exact["cell"]
+	if at.distance_to(p) > _spacing * 1.5:
+		return {}
+	n = field_slope(j)
+	if n.length_squared() < 0.0000001:
+		return {}
 	return {"pos": at, "nrm": -n.normalized(), "cell": j}
+
+
+# ТОЧНАЯ ПОСАДКА НА ТУ САМУЮ ПОВЕРХНОСТЬ, КОТОРУЮ ВИДНО.
+#
+# Выше поле продолжалось от семени ПРЯМОЙ. Рисуется поверхность иначе: восьмёрка
+# семян делится на шесть тетраэдров, и внутри каждого поле считается линейным ПО
+# ЧЕТЫРЁМ УГЛАМ. Это две разные поверхности. На ровном месте они совпадают, а на
+# гребне расходятся: там наклон у семени усреднён по соседям с обеих сторон
+# перегиба, и прямая проходит то выше среза, то ниже. На кадре это был мох,
+# парящий над хребтом и тонущий в склоне.
+#
+# Здесь точка досаживается на срез ТОГО ЖЕ линейного поля, что режет картинку, —
+# значит, ложится ровно на треугольник, а не рядом с ним.
+#
+# Кубик ищем среди восьми, что сходятся в узле ближайшего семени: дальше точка
+# уйти не могла. Кубики БЕЗ СРЕЗА пропускаем — поверхности в них нет вовсе, и
+# сесть там не на что. Если ни один не подошёл, земли рядом ПРОСТО НЕТ: пусть
+# растения там не будет, чем оно повиснет в воздухе.
+func _snap_to_facet(at: Vector3, home: int) -> Dictionary:
+	var node: Vector3i = node_of(home)
+	var idx := PackedInt32Array()
+	idx.resize(8)
+	var val := PackedFloat32Array()
+	val.resize(8)
+	var best_room: float = -INF
+	var best: Vector3 = at
+	var found := false
+	for bx in range(-1, 1):
+		for by in range(-1, 1):
+			for bz in range(-1, 1):
+				var base := node + Vector3i(bx, by, bz)
+				var ok := true
+				var below := 0
+				for c in range(8):
+					var s: int = node_seed(base + SurfaceGeo.CORNER[c])
+					if s < 0:
+						ok = false
+						break
+					idx[c] = s
+					val[c] = fill[s]
+					if val[c] <= SOLID_AT:
+						below += 1
+				if not ok or below == 0 or below == 8:
+					continue
+				for t in SurfaceGeo.TETS:
+					var p0: Vector3 = seeds[idx[t[0]]]
+					var e1: Vector3 = seeds[idx[t[1]]] - p0
+					var e2: Vector3 = seeds[idx[t[2]]] - p0
+					var e3: Vector3 = seeds[idx[t[3]]] - p0
+					# Обратная тройка: одним набором считаем и «внутри ли точка»,
+					# и наклон линейного поля. Определитель — шестикратный объём.
+					var c1: Vector3 = e2.cross(e3)
+					var det: float = e1.dot(c1)
+					if absf(det) < 0.000001:
+						continue
+					var c2: Vector3 = e3.cross(e1)
+					var c3: Vector3 = e1.cross(e2)
+					var v: Vector3 = at - p0
+					var l1: float = v.dot(c1) / det
+					var l2: float = v.dot(c2) / det
+					var l3: float = v.dot(c3) / det
+					# Насколько точка ВНУТРИ: у своего тетраэдра все четыре доли
+					# неотрицательны. Берём лучший — на границе годятся оба.
+					var room: float = minf(minf(l1, l2), minf(l3, 1.0 - l1 - l2 - l3))
+					if room <= best_room:
+						continue
+					var f0: float = val[t[0]]
+					var g: Vector3 = (c1 * (val[t[1]] - f0) + c2 * (val[t[2]] - f0)
+						+ c3 * (val[t[3]] - f0)) / det
+					var mag2: float = g.length_squared()
+					if mag2 < 0.0000001:
+						continue
+					best_room = room
+					best = at - g * ((f0 + g.dot(v) - SOLID_AT) / mag2)
+					found = true
+	# Далеко за своим тетраэдром или далеко от точки — значит, попали не в тот
+	# срез, а в чужой по соседству. Такому месту верить нельзя.
+	if not found or best_room < -0.35 or best.distance_to(at) > _spacing * 0.6:
+		return {}
+	var cell: int = cell_at(best)
+	if cell < 0 or not in_play(cell):
+		return {}
+	return {"pos": best, "cell": cell}
+
+
+# НА СКОЛЬКО ТОЧКА ОТОРВАЛАСЬ ОТ ВИДИМОЙ ЗЕМЛИ, в метрах. Меньше нуля — земли
+# рядом нет вовсе.
+#
+# Нужно самопроверке: парящий мох видно на кадре, а я кадров не сужу — значит,
+# у этого должно быть число. Меряем тем же срезом, по которому режется картинка,
+# поэтому промах здесь — это ровно тот зазор, который видит глаз.
+func surface_gap(p: Vector3) -> float:
+	var j: int = cell_at(p)
+	if j < 0:
+		return -1.0
+	var snapped: Dictionary = _snap_to_facet(p, j)
+	if snapped.is_empty():
+		return -1.0
+	return p.distance_to(snapped["pos"])
 
 
 # РАЗГЛАЖИВАЕМ ВПАДИНУ по соседям. Она считается вторым перегибом поля, а

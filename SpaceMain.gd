@@ -1249,6 +1249,24 @@ func _selftest() -> void:
 	print("Растения: кочек — ", plants.patches.size(),
 		", 45 секунд роста за ", snappedf(grow, 0.1), " мс")
 
+	# СИДИТ ЛИ МОХ НА ЗЕМЛЕ. Промах считаем до того самого среза, по которому
+	# режется картинка: сколько тут метров — столько глаз и видит просвета под
+	# кочкой. Норма — нули; оторвавшихся быть не должно вовсе.
+	var gap_max := 0.0
+	var gap_sum := 0.0
+	var lost := 0
+	for pid in plants.patches:
+		var gap: float = grid.surface_gap(plants.patches[pid]["pos"])
+		if gap < 0.0:
+			lost += 1
+			continue
+		gap_sum += gap
+		gap_max = maxf(gap_max, gap)
+	var sat: int = plants.patches.size() - lost
+	print("Мох на земле: оторвалось — ", lost, ", промах в среднем ",
+		snappedf(gap_sum / maxf(1.0, float(sat)), 0.001), " м, наибольший ",
+		snappedf(gap_max, 0.001), " м")
+
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 	var pick := _pick(get_viewport().get_visible_rect().size * 0.5)
