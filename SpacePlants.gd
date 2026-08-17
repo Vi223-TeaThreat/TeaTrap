@@ -119,12 +119,12 @@ func setup(main_ref: Node3D) -> void:
 # `DENSE_ROW` ширины клетки, и пересекаем эти куски между собой. Пересечение
 # сплошных отрезков сплошное по построению — дыр внутри не будет.
 func _scan_solid(sheet: Texture2D) -> void:
-	_solid_uv.resize(STAGES * KINDS)
+	_solid_uv.resize(STAGES * COLS)
 	_solid_holes = 0
 	_solid_least = 1 << 30
 	var img: Image = sheet.get_image() if sheet != null else null
 	if img == null:
-		for i in range(STAGES * KINDS):
+		for i in range(STAGES * COLS):
 			_solid_uv[i] = Rect2(0.4, 0.4, 0.2, 0.2)
 		_solid_least = 0
 		return
@@ -132,13 +132,16 @@ func _scan_solid(sheet: Texture2D) -> void:
 		img.decompress()
 	var w: int = img.get_width()
 	var h: int = img.get_height()
-	var cw: int = maxi(1, w / KINDS)
+	var cw: int = maxi(1, w / COLS)
 	var ch: int = maxi(1, h / STAGES)
 	for s in range(STAGES):
-		for kd in range(KINDS):
+		for kd in range(COLS):
 			var box: Rect2i = _dense_box(img, kd * cw, s * ch, cw, ch)
-			_solid_least = mini(_solid_least, box.size.x * box.size.y)
-			_solid_uv[s * KINDS + kd] = Rect2(
+			# Тесноту считаем ТОЛЬКО по столбцу тела: у клеток с фигурками
+			# сплошного места мало по природе, и его там никто не ищет.
+			if kd == BODY_COL:
+				_solid_least = mini(_solid_least, box.size.x * box.size.y)
+			_solid_uv[s * COLS + kd] = Rect2(
 				float(box.position.x) / float(w), float(box.position.y) / float(h),
 				float(box.size.x) / float(w), float(box.size.y) / float(h))
 			# Сторож: внутри найденного прямоугольника прозрачных точек быть не
@@ -208,35 +211,129 @@ func see_through() -> Vector2i:
 # Возраст меняет не только рост, но и ворс: у молодой куртинки край почти
 # гладкий, у старой мохнатый, и местами проступает ржавчина. Одним масштабом
 # такого не изобразить — у растянутой вчетверо картинки и ворс стал бы бревном.
-const TILE: int = 32               # сторона одного пучка в точках
+const TILE: int = 32               # сторона одной клетки в точках
 const STAGES: int = 9              # столько возрастов
-const KINDS: int = 4               # столько разновидностей у каждого возраста
+const KINDS: int = 4               # столько разновидностей ворсинки у возраста
+# ПЯТЫЙ СТОЛБЕЦ — ОБРАЗЕЦ ДЛЯ ТЕЛА, и он устроен иначе всех прочих.
+#
+# Клетки разновидностей — это ВЫРЕЗАННЫЕ ФИГУРКИ: куртинка в профиль, вокруг
+# прозрачный фон. Ими обтягивают плоскую дощечку, и это верно. Тело же —
+# замкнутая оболочка, его надо ОБИВАТЬ, как мебель обивают тканью, а вырезанной
+# фигуркой не обобьёшь: у неё нет ни однородности, ни повторяемости, и она
+# наполовину прозрачна. Оттого у молодых кочек и просвечивал центр.
+#
+# В пятом столбце лежит не фигурка, а КУСОК МХОВОЙ ПОВЕРХНОСТИ вплотную сверху:
+# заполнено от края до края, прозрачного фона нет вовсе, свой на каждый возраст.
+const BODY_COL: int = KINDS
+const COLS: int = KINDS + 1        # всего столбцов на листе
 
 # НАРИСОВАННЫЙ ЛИСТ ГЛАВНЕЕ СЧИТАННОГО. Если в `art/moss.png` лежит картинка,
 # берём её; иначе рисуем сами. Так рисунок от руки подменяет заглушку без
 # единой правки в коде — и без риска потерять заглушку, если файла нет.
 #
-# Разметка листа та же: `KINDS` клеток в ряду (разновидности), `STAGES` рядов
-# (возрасты, сверху молодой), клетка `TILE`×`TILE`, фон прозрачный.
+# Разметка листа: `COLS` клеток в ряду — четыре разновидности ворсинки и пятая,
+# образец для тела, — `STAGES` рядов (возрасты, сверху молодой), клетка
+# `TILE`×`TILE`.
+#
+# ЛИСТ ПРЕЖНЕЙ ШИРИНЫ ТОЖЕ ГОДИТСЯ. Пятый столбец появился позже, чем был
+# нарисован лист, и заставлять переделывать готовую работу неправильно: если в
+# файле только четыре столбца, столбец тела дорисовывается кодом на лету. Как
+# только он будет нарисован, лист станет шире, и дорисовка сама отключится.
 const ART_PATH := "res://art/moss.png"
 
 func _blade_texture() -> Texture2D:
 	if ResourceLoader.exists(ART_PATH):
 		var drawn = load(ART_PATH)
 		if drawn is Texture2D:
-			var want := Vector2i(TILE * KINDS, TILE * STAGES)
-			if drawn.get_size() != Vector2(want):
-				push_warning("art/moss.png ожидается %d×%d, а он %s"
-					% [want.x, want.y, str(drawn.get_size())])
+			var want := Vector2i(TILE * COLS, TILE * STAGES)
+			var got: Vector2i = Vector2i(drawn.get_size())
+			if got == want:
+				return drawn
+			if got == Vector2i(TILE * KINDS, TILE * STAGES):
+				return _widen_sheet(drawn)
+			push_warning("art/moss.png ожидается %d×%d (или %d×%d без столбца тела), а он %s"
+				% [want.x, want.y, TILE * KINDS, TILE * STAGES, str(got)])
 			return drawn
 	return _make_blade_texture()
 
 
+# Пририсовываем к нарисованному листу столбец тела. Саму работу пользователя не
+# трогаем — она переносится точка в точку.
+func _widen_sheet(drawn: Texture2D) -> ImageTexture:
+	var src: Image = drawn.get_image()
+	if src.is_compressed():
+		src.decompress()
+	if src.get_format() != Image.FORMAT_RGBA8:
+		src.convert(Image.FORMAT_RGBA8)
+	var img := Image.create(TILE * COLS, TILE * STAGES, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	img.blit_rect(src, Rect2i(0, 0, src.get_width(), src.get_height()), Vector2i.ZERO)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 5501
+	for s in range(STAGES):
+		_paint_body_cell(img, BODY_COL * TILE, s * TILE, s, rng)
+	return ImageTexture.create_from_image(img)
+
+
+# ОБРАЗЕЦ ДЛЯ ТЕЛА — заглушка, пока он не нарисован.
+#
+# Это не куртинка в профиль, а мховая поверхность вплотную СВЕРХУ: сросшиеся
+# округлые холмики, светлые на макушках и тёмные в стыках, поверх — та же
+# вертикальная рябь, что делает бархат. Заполнено насквозь, без единой
+# прозрачной точки: тело — цельная оболочка, и любая дырка в образце стала бы
+# дыркой в кочке.
+#
+# Расстояние до холмика считаем ПО КРУГУ, с заворотом через край клетки: тогда
+# образец стыкуется сам с собой, и у него нет заметного края.
+func _paint_body_cell(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator) -> void:
+	var age: float = float(s) / float(STAGES - 1)
+	var deep := Color(0.20, 0.31, 0.17).lerp(Color(0.17, 0.26, 0.15), age)
+	var body := Color(0.33, 0.47, 0.22).lerp(Color(0.29, 0.42, 0.19), age)
+	var lit := Color(0.47, 0.60, 0.29).lerp(Color(0.44, 0.55, 0.26), age)
+	var rust := Color(0.36, 0.31, 0.17)
+	# С возрастом холмиков больше, и они мельче: подушка не разрастается вширь,
+	# а густеет.
+	var humps: int = 4 + int(round(3.0 * age))
+	var hx := PackedFloat32Array()
+	var hy := PackedFloat32Array()
+	var hr := PackedFloat32Array()
+	hx.resize(humps)
+	hy.resize(humps)
+	hr.resize(humps)
+	for i in range(humps):
+		hx[i] = rng.randf_range(0.0, float(TILE))
+		hy[i] = rng.randf_range(0.0, float(TILE))
+		hr[i] = lerpf(11.0, 7.0, age) * rng.randf_range(0.75, 1.25)
+	for y in range(TILE):
+		for x in range(TILE):
+			var near: float = 1000.0
+			for i in range(humps):
+				var dx: float = absf(float(x) + 0.5 - hx[i])
+				dx = minf(dx, float(TILE) - dx)
+				var dy: float = absf(float(y) + 0.5 - hy[i])
+				dy = minf(dy, float(TILE) - dy)
+				near = minf(near, sqrt(dx * dx + dy * dy) / hr[i])
+			var col: Color
+			if near < 0.55:
+				col = lit.lerp(body, near / 0.55)
+			else:
+				col = body.lerp(deep, clampf((near - 0.55) / 0.75, 0.0, 1.0))
+			if (x + int(near * 5.0)) % 3 == 0:
+				col = col.darkened(0.07)
+			elif x % 5 == 0:
+				col = col.lightened(0.05)
+			if age > 0.55 and rng.randf() < 0.010:
+				col = col.lerp(rust, 0.55)
+			img.set_pixel(ox + x, oy + y, Color(col.r, col.g, col.b, 1.0))
+
+
 func _make_blade_texture() -> ImageTexture:
-	var img := Image.create(TILE * KINDS, TILE * STAGES, false, Image.FORMAT_RGBA8)
+	var img := Image.create(TILE * COLS, TILE * STAGES, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 913377
+	for s in range(STAGES):
+		_paint_body_cell(img, BODY_COL * TILE, s * TILE, s, rng)
 
 	for s in range(STAGES):
 		var age: float = float(s) / float(STAGES - 1)
@@ -800,7 +897,6 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 
 	return {
 		"up": nrm, "rim": rim, "fuzz": fuzz,
-		"kind": int(_hash01(salt + 31) * float(KINDS)) % KINDS,
 		"age": _hash01(salt + 577),
 		"shade": 0.92 + 0.14 * _hash01(salt + 1223),
 	}
@@ -886,10 +982,11 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 
 	# Разрез картинки — тоже вперёд, по кольцу и по сектору: внутри выкладки он
 	# считался бы заново на каждую из сотни вершин.
-	var bk: int = int(body["kind"])
 	var bstage: int = clampi(int(stage_f + float(body["age"])), 0, STAGES - 1)
-	# Разметку берём НЕ у клетки целиком, а у её сплошной части: см. `_scan_solid`.
-	var box: Rect2 = _solid_uv[bstage * KINDS + bk]
+	# Тело обтягиваем ОБРАЗЦОМ ИЗ ПЯТОГО СТОЛБЦА, а не клеткой с фигуркой. И даже
+	# у него берём не клетку целиком, а найденную сплошную часть: если образец
+	# нарисован не во всю клетку, дыр всё равно не будет. См. `_scan_solid`.
+	var box: Rect2 = _solid_uv[bstage * COLS + BODY_COL]
 	var cuts: Array = []
 	for r in range(rings):
 		var vv: float = box.position.y + box.size.y * _ring_v[r]
@@ -972,8 +1069,8 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 
 		var cx: int = int(b["kind"])
 		var stage: int = clampi(int(stage_f + float(b["age"])), 0, STAGES - 1)
-		var u0: float = float(cx) / float(KINDS)
-		var u1: float = float(cx + 1) / float(KINDS)
+		var u0: float = float(cx) / float(COLS)
+		var u1: float = float(cx + 1) / float(COLS)
 		var v0: float = float(stage) / float(STAGES)      # верх клетки — концы
 		var v1: float = float(stage + 1) / float(STAGES)  # низ — корни
 
