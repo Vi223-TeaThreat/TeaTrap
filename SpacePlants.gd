@@ -69,6 +69,11 @@ var _ring_prof := PackedFloat32Array()
 var _ring_sink := PackedFloat32Array()
 var _ring_v := PackedFloat32Array()
 var _sector_u := PackedFloat32Array()
+# Сплошной прямоугольник каждой клетки листа, в долях всей картинки. Ищется по
+# самой картинке при запуске — см. `_scan_solid`.
+var _solid_uv: Array = []
+var _solid_holes: int = 0
+var _solid_least: int = 0         # самая тесная клетка, в точках
 
 
 func setup(main_ref: Node3D) -> void:
@@ -83,7 +88,9 @@ func setup(main_ref: Node3D) -> void:
 	# перекрывающихся пучков начинают мигать друг сквозь друга.
 	_blade_mat = ShaderMaterial.new()
 	_blade_mat.shader = load("res://Blades.gdshader")
-	_blade_mat.set_shader_parameter("blades", _blade_texture())
+	var sheet: Texture2D = _blade_texture()
+	_blade_mat.set_shader_parameter("blades", sheet)
+	_scan_solid(sheet)
 
 	var rings: int = RING_AT.size()
 	_ring_prof.resize(rings)
@@ -96,9 +103,93 @@ func setup(main_ref: Node3D) -> void:
 		_ring_v[r] = lerpf(BODY_V_TOP, BODY_V_RIM, t)
 	_sector_u.resize(SECTORS)
 	for s in range(SECTORS):
-		# Разрез клетки ведём по кругу волной: иначе на всех семи секторах ложится
-		# одна и та же полоса рисунка. Волна замкнутая — на стыке шва нет.
-		_sector_u[s] = 0.22 + 0.56 * absf(sin(TAU * float(s) / float(SECTORS)))
+		# Разрез ведём по кругу волной: иначе на всех семи секторах ложится одна
+		# и та же полоса рисунка. Волна замкнутая — на стыке шва нет.
+		_sector_u[s] = 0.12 + 0.76 * absf(sin(TAU * float(s) / float(SECTORS)))
+
+
+# СПЛОШНОЙ ПРЯМОУГОЛЬНИК КАЖДОЙ КЛЕТКИ — ищем ПО САМОЙ КАРТИНКЕ, один раз при
+# запуске. Тело кочки — цельная оболочка, и брать ей рисунок можно только оттуда,
+# где он закрашен насквозь: любая прозрачная точка станет дырой навылет, потому
+# что движок режет по порогу, а не смешивает.
+#
+# Знать наперёд, где у клетки закрашено, нельзя: лист рисует пользователь, и
+# высота куртинки в клетке у каждого возраста своя. Поэтому не угадываем, а
+# СМОТРИМ: идём от корней вверх, пока в строке есть сплошной кусок не уже
+# `DENSE_ROW` ширины клетки, и пересекаем эти куски между собой. Пересечение
+# сплошных отрезков сплошное по построению — дыр внутри не будет.
+func _scan_solid(sheet: Texture2D) -> void:
+	_solid_uv.resize(STAGES * KINDS)
+	_solid_holes = 0
+	_solid_least = 1 << 30
+	var img: Image = sheet.get_image() if sheet != null else null
+	if img == null:
+		for i in range(STAGES * KINDS):
+			_solid_uv[i] = Rect2(0.4, 0.4, 0.2, 0.2)
+		_solid_least = 0
+		return
+	if img.is_compressed():
+		img.decompress()
+	var w: int = img.get_width()
+	var h: int = img.get_height()
+	var cw: int = maxi(1, w / KINDS)
+	var ch: int = maxi(1, h / STAGES)
+	for s in range(STAGES):
+		for kd in range(KINDS):
+			var box: Rect2i = _dense_box(img, kd * cw, s * ch, cw, ch)
+			_solid_least = mini(_solid_least, box.size.x * box.size.y)
+			_solid_uv[s * KINDS + kd] = Rect2(
+				float(box.position.x) / float(w), float(box.position.y) / float(h),
+				float(box.size.x) / float(w), float(box.size.y) / float(h))
+			# Сторож: внутри найденного прямоугольника прозрачных точек быть не
+			# может. Если появились — разметка врёт, и центр опять просветится.
+			for y in range(box.position.y, box.position.y + box.size.y):
+				for x in range(box.position.x, box.position.x + box.size.x):
+					if img.get_pixel(x, y).a < 0.5:
+						_solid_holes += 1
+
+
+func _dense_box(img: Image, ox: int, oy: int, cw: int, ch: int) -> Rect2i:
+	var lo := -1
+	var hi := -1
+	var top: int = oy + ch
+	for y in range(oy + ch - 1, oy - 1, -1):
+		# Самый длинный СПЛОШНОЙ кусок строки. Именно сплошной, а не «от первой
+		# закрашенной до последней»: между двумя холмиками бывает просвет, и по
+		# краям он бы попал внутрь прямоугольника.
+		var run := 0
+		var best := 0
+		var best_end := -1
+		for x in range(ox, ox + cw):
+			if img.get_pixel(x, y).a >= 0.5:
+				run += 1
+				if run > best:
+					best = run
+					best_end = x
+			else:
+				run = 0
+		if best_end < 0 or float(best) < DENSE_ROW * float(cw):
+			break
+		var x0: int = best_end - best + 1
+		var nl: int = x0 if lo < 0 else maxi(lo, x0)
+		var nh: int = best_end if hi < 0 else mini(hi, best_end)
+		if nh - nl + 1 < 2:
+			break
+		lo = nl
+		hi = nh
+		top = y
+	if lo < 0:
+		# Ни одной плотной строки — клетка пустая или нарисована совсем иначе.
+		# Берём точку у корней: пусть тело будет одноцветным, но не дырявым.
+		return Rect2i(ox + cw / 2, oy + ch - 2, 1, 1)
+	return Rect2i(lo, top, hi - lo + 1, oy + ch - top)
+
+
+# Сколько просвечивающих точек попало в разметку тела (норма — ноль) и насколько
+# тесной вышла самая скупая клетка. Числом меряется то, что иначе видно только на
+# кадре: дыра в центре молодой кочки и одноцветное тело.
+func see_through() -> Vector2i:
+	return Vector2i(_solid_holes, _solid_least)
 
 
 # ЛИСТ С КУРТИНКАМИ МХА — рисуем прямо в коде, без файла с картинкой.
@@ -546,11 +637,20 @@ const RIM_SINK: float = 0.10                # на сколько обод ут�
 const FUZZ_MAX: int = 14
 const FUZZ_MIN: int = 4
 const FUZZ_TALL: float = 0.62               # рост ворсинки в долях «М»
-# Куда по картинке смотрит тело кочки. Берём НУТРО клетки, у самых корней: там
-# рисунок сплошной. У макушки клетки ворс редкий и фон прозрачный, а движок
-# режет по порогу — телу оттуда достались бы дыры навылет.
-const BODY_V_TOP: float = 0.45
-const BODY_V_RIM: float = 0.85
+# Куда по картинке смотрит тело кочки — в долях СПЛОШНОГО ПРЯМОУГОЛЬНИКА клетки,
+# а не самой клетки.
+#
+# ГРАБЛИ: сперва тело брало нутро клетки на глазок, 45–85% её высоты. У молодых
+# возрастов куртинка нарисована только у нижнего края, выше прозрачный фон, а
+# движок режет по порогу — и у кочки МЛАДШЕ СЕДЬМОЙ СТУПЕНИ ПРОСВЕЧИВАЛ ЦЕНТР:
+# макушка тела попадала в пустоту. К седьмой рисунок дорастал, и дыра сама
+# закрывалась. Теперь сплошной прямоугольник у каждой клетки НАХОДИТСЯ ПО САМОЙ
+# КАРТИНКЕ при запуске, поэтому дыр не будет ни при какой рисовке.
+const BODY_V_TOP: float = 0.15
+const BODY_V_RIM: float = 0.92
+# Строка клетки считается плотной, если сплошной кусок в ней не уже этой доли
+# ширины клетки. По таким строкам и собирается прямоугольник.
+const DENSE_ROW: float = 0.30
 # Два треугольника пояса между кольцами: сдвиг по кольцу и по сектору. Таблица
 # ПОСТОЯННАЯ нарочно — собранная на месте, она бы заводила по шесть коротких
 # списков на каждый сектор каждого пояса каждой перестройки.
@@ -567,9 +667,16 @@ const BAND_TRI := [[0, 0], [0, 1], [1, 1], [0, 0], [1, 1], [1, 0]]
 const ADULT_SIZE: float = 0.105 * 0.75      # «М» — доля шага решётки
 const SIZE_PER_STAGE: float = 0.05
 const MID_STAGE: float = 5.0                # ступень, на которой размер ровно М
-# Самая старшая ступень — по ней раскладка и печётся один раз, а младшие
-# получаются сжатием к середине.
-const MAX_FACTOR: float = 1.0 + SIZE_PER_STAGE * (float(STAGES) - MID_STAGE)
+
+# ШИРИНА КУРТИНЫ РАСТЁТ САМА, много круче размера ворсинки (решение пользователя
+# 2026-08-17). Молодая кочка — отдельный бугорок уже своей мерки, взрослые же
+# должны СОМКНУТЬСЯ В СПЛОШНОЙ МАССИВ: садиться ближе 0.27 м друг к другу им
+# нельзя, значит к старости радиус должен этот зазор перекрыть.
+#
+# Ворсинка при этом держится прежнего правила «М ±5% за ступень». Так и у живого
+# мха: подушка ширится числом побегов, а не тем, что каждый побег толстеет.
+const PATCH_YOUNG: float = 0.65             # радиус на первой ступени, в долях М
+const PATCH_OLD: float = 1.45               # ... и на девятой; по ней и печём
 
 # Какую долю зрелости ворсинка тянется от нуля до полного роста. Отрезки
 # соседних ворсинок НАХЛЁСТЫВАЮТСЯ: чем длиннее отрезок, тем больше их растёт
@@ -617,7 +724,7 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 			along = nrm.cross(side).normalized()
 		creep = 1.5
 
-	var reach: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * MAX_FACTOR
+	var reach: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * PATCH_OLD
 	var rings: int = RING_AT.size()
 	var rim: Array = []
 	for s in range(SECTORS):
@@ -715,12 +822,13 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# пятой — ровно 5. Считаем непрерывно, а не по целой ступени, чтобы размер не
 	# подскакивал на переходе — ради этого и участились пересборки.
 	var stage_no: float = clampf(stage_f + 0.5, 1.0, float(STAGES))
+	# Ворсинка — по правилу «М ±5% за ступень», куртина — по своему, куда круче.
+	# Раскладка испечена при самом широком возрасте, младшие сжимают её к середине.
 	var size: float = 1.0 + SIZE_PER_STAGE * (stage_no - MID_STAGE)
-	# Раскладка испечена при самом старшем размере — младшие ступени сжимают её
-	# к середине. И тело, и ворс идут одной и той же долей: растёт кочка целиком.
-	var k: float = size / MAX_FACTOR
-	var high: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * MAX_FACTOR \
-		* BODY_RISE * k
+	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
+		(stage_no - 1.0) / float(STAGES - 1))
+	var k: float = wide_at / PATCH_OLD
+	var high: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at * BODY_RISE
 	var tall: float = main.CELL_SPACING * ADULT_SIZE * size * FUZZ_TALL
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
@@ -778,17 +886,19 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 
 	# Разрез картинки — тоже вперёд, по кольцу и по сектору: внутри выкладки он
 	# считался бы заново на каждую из сотни вершин.
-	var bk: float = float(int(body["kind"]))
-	var bstage: float = float(clampi(int(stage_f + float(body["age"])), 0, STAGES - 1))
+	var bk: int = int(body["kind"])
+	var bstage: int = clampi(int(stage_f + float(body["age"])), 0, STAGES - 1)
+	# Разметку берём НЕ у клетки целиком, а у её сплошной части: см. `_scan_solid`.
+	var box: Rect2 = _solid_uv[bstage * KINDS + bk]
 	var cuts: Array = []
 	for r in range(rings):
-		var vv: float = (bstage + _ring_v[r]) / float(STAGES)
+		var vv: float = box.position.y + box.size.y * _ring_v[r]
 		var ring_uv: Array = []
 		for s in range(SECTORS):
-			ring_uv.append(Vector2((bk + _sector_u[s]) / float(KINDS), vv))
+			ring_uv.append(Vector2(box.position.x + box.size.x * _sector_u[s], vv))
 		cuts.append(ring_uv)
-	var apex_uv := Vector2((bk + 0.5) / float(KINDS),
-		(bstage + BODY_V_TOP) / float(STAGES))
+	var apex_uv := Vector2(box.position.x + box.size.x * 0.5,
+		box.position.y + box.size.y * BODY_V_TOP)
 
 	st.set_color((hue * float(body["shade"])).srgb_to_linear())
 	for s in range(SECTORS):

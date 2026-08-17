@@ -1279,6 +1279,9 @@ func _selftest() -> void:
 	print("Кочка: треугольников всего — ", tris, ", на кочку — ",
 		snappedf(float(tris) / maxf(1.0, float(plants.patches.size())), 0.1),
 		", кусков меша — ", plants.cell_nodes.size())
+	var sheet: Vector2i = plants.see_through()
+	print("Разметка тела: просвечивающих точек — ", sheet.x,
+		", самая тесная клетка — ", sheet.y, " точек")
 
 	await get_tree().physics_frame
 	await get_tree().physics_frame
