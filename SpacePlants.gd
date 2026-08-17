@@ -61,6 +61,14 @@ var _accum: float = 0.0
 var _next: int = 1
 var _rng := RandomNumberGenerator.new()
 var _blade_mat: ShaderMaterial
+# Всё, что у кочки ОДИНАКОВО ВСЕГДА: срез по кольцам, утопление обода, разрез
+# картинки по кольцам и по секторам. Считается один раз при запуске. Внутри
+# перестройки это были бы `pow` и `sin` на каждую вершину — сотня на кочку,
+# сотни кочек, двадцать четыре перестройки за жизнь каждой.
+var _ring_prof := PackedFloat32Array()
+var _ring_sink := PackedFloat32Array()
+var _ring_v := PackedFloat32Array()
+var _sector_u := PackedFloat32Array()
 
 
 func setup(main_ref: Node3D) -> void:
@@ -76,6 +84,21 @@ func setup(main_ref: Node3D) -> void:
 	_blade_mat = ShaderMaterial.new()
 	_blade_mat.shader = load("res://Blades.gdshader")
 	_blade_mat.set_shader_parameter("blades", _blade_texture())
+
+	var rings: int = RING_AT.size()
+	_ring_prof.resize(rings)
+	_ring_sink.resize(rings)
+	_ring_v.resize(rings)
+	for r in range(rings):
+		var t: float = float(RING_AT[r])
+		_ring_prof[r] = _profile(t)
+		_ring_sink[r] = RIM_SINK * t * t
+		_ring_v[r] = lerpf(BODY_V_TOP, BODY_V_RIM, t)
+	_sector_u.resize(SECTORS)
+	for s in range(SECTORS):
+		# Разрез клетки ведём по кругу волной: иначе на всех семи секторах ложится
+		# одна и та же полоса рисунка. Волна замкнутая — на стыке шва нет.
+		_sector_u[s] = 0.22 + 0.56 * absf(sin(TAU * float(s) / float(SECTORS)))
 
 
 # ЛИСТ С КУРТИНКАМИ МХА — рисуем прямо в коде, без файла с картинкой.
@@ -236,14 +259,19 @@ func nearest_to(pos: Vector3, radius: float) -> int:
 
 
 func _create(spot: Dictionary, id: String, maturity: float) -> int:
+	var cell: int = int(spot["cell"])
+	var salt: int = _next * 7919 + int(absf(spot["pos"].x) * 131)
+	# Тело считаем ДО рождения: не нашлось земли под ободом — кочки не будет
+	# вовсе, и номер зря не расходуется.
+	var body: Dictionary = _make_cushion(spot, PlantsData.ITEMS[id], salt)
+	if body.is_empty():
+		return -1
 	var pid := _next
 	_next += 1
-	var cell: int = int(spot["cell"])
-	var salt: int = pid * 7919 + int(absf(spot["pos"].x) * 131)
 	patches[pid] = {
 		"pos": spot["pos"], "nrm": spot["nrm"], "id": id,
 		"m": maturity, "step": -1, "cell": cell, "salt": salt,
-		"blades": _make_blades(spot, PlantsData.ITEMS[id], salt),
+		"body": body,
 	}
 	if not by_cell.has(cell):
 		by_cell[cell] = {}
@@ -405,12 +433,18 @@ func surface_changed(cells: Array = []) -> void:
 				or not _fits_surface(spot["nrm"], PlantsData.ITEMS[p["id"]]):
 			doomed.append(pid)
 			continue
+		# Земля сдвинулась — раскладку пересаживаем заново, иначе кочка останется
+		# висеть по старому рельефу. Не нашлось нового места ободу — растение
+		# гибнет: рваного тела быть не должно.
+		var again: Dictionary = _make_cushion(spot, PlantsData.ITEMS[p["id"]],
+			int(p["salt"]))
+		if again.is_empty():
+			doomed.append(pid)
+			continue
 		var was: int = int(p["cell"])
 		p["pos"] = spot["pos"]
 		p["nrm"] = spot["nrm"]
-		# Земля сдвинулась — раскладку ворсинок пересаживаем заново, иначе
-		# подушка останется висеть по старому рельефу.
-		p["blades"] = _make_blades(spot, PlantsData.ITEMS[p["id"]], int(p["salt"]))
+		p["body"] = again
 		var now: int = int(spot["cell"])
 		if now != was:
 			if by_cell.has(was):
@@ -484,23 +518,43 @@ func _rebuild_cell(cell: int) -> void:
 	tufts.commit(mesh)
 
 
-# КОЧКА — не подушка, а ПУЧОК ПЛОСКИХ КАРТИНОК, поставленных под разными
-# углами вокруг своей точки. С любой стороны часть дощечек видна плашмя, часть
-# с ребра — и пучок читается объёмным, ничего объёмного не строя. Так рисуют
-# траву во всех играх, и на пиксельных образцах видно ровно это.
+# КОЧКА — ТЕЛО ПЛЮС ВОРС (решение пользователя, по двум её рисункам).
 #
-# Освещаем пучок НОРМАЛЬЮ ЗЕМЛИ, а не своей: у стоячей дощечки нормаль смотрит
-# вбок, и трава на солнечном склоне вышла бы тёмной, будто в тени.
-# Дощечек в пучке. Кочка должна быть ГУСТОЙ: редкий пучок читается пучком
-# соломы, а не подушкой мха.
-# Ворсинок в подушке. Их МНОГО и они МЕЛКИЕ: пышность набирается числом, а
-# несколько крупных дощечек всегда читаются несколькими дощечками.
-const BLADES_MAX: int = 22
-const BLADES_MIN: int = 3
-# Насколько подушка выпуклая: середина приподнята над краем на эту долю своей
-# высоты. Без этого все ворсинки стоят корнями на одном уровне, и кочка выходит
-# плоской лепёшкой, сколько ни добавляй дощечек.
-const DOME: float = 0.55
+# Прежде кочка была только пучком плоских картинок под разными углами. Объём у
+# такого пучка мнимый: он держится, пока часть дощечек видна плашмя, и рушится,
+# стоит посмотреть вдоль них — подушка схлопывается в зелёную нитку. Никаким
+# числом дощечек это не лечится, потому что лечить нечего: объёма там нет.
+#
+# Теперь объём НАСТОЯЩИЙ. У кочки есть тело — низкий купол из колец: сверху
+# неправильный многоугольник (в меру угловатый), сбоку плоская макушка,
+# скруглённое плечо и крутой бок. Ворсинки-картинки растут ИЗ ЭТОГО ТЕЛА по его
+# нормали: на макушке торчком, у края завалены наружу. Тело даёт массу и силуэт,
+# ворс — пушистый край; поодиночке ни то, ни другое мхом не выглядит.
+#
+# ЧЕМ ЭТО ПЛАТИТСЯ. Треугольников выходит примерно столько же, сколько было у
+# пучка с шапками, а поиск земли — ВТРОЕ ДЕШЕВЛЕ: раньше на землю сажали каждую
+# ворсинку по отдельности, теперь только обод и середину, а всё внутри
+# достраивается между ними.
+const SECTORS: int = 7                      # углов у кочки, если смотреть сверху
+const RING_AT := [0.45, 0.78, 1.0]          # где идут кольца, в долях радиуса
+const BODY_WIDE: float = 1.31               # радиус тела в долях «М»
+const BODY_RISE: float = 0.58               # высота тела в долях его радиуса
+const RIM_SINK: float = 0.10                # на сколько обод утоплен в землю
+# Ворсинок В РАЗЫ МЕНЬШЕ, чем было: пышность теперь держит тело, а ворс только
+# ломает силуэт. Прежние двадцать две поверх готового купола — это оплаченная
+# дважды одна и та же масса.
+const FUZZ_MAX: int = 14
+const FUZZ_MIN: int = 4
+const FUZZ_TALL: float = 0.62               # рост ворсинки в долях «М»
+# Куда по картинке смотрит тело кочки. Берём НУТРО клетки, у самых корней: там
+# рисунок сплошной. У макушки клетки ворс редкий и фон прозрачный, а движок
+# режет по порогу — телу оттуда достались бы дыры навылет.
+const BODY_V_TOP: float = 0.45
+const BODY_V_RIM: float = 0.85
+# Два треугольника пояса между кольцами: сдвиг по кольцу и по сектору. Таблица
+# ПОСТОЯННАЯ нарочно — собранная на месте, она бы заводила по шесть коротких
+# списков на каждый сектор каждого пояса каждой перестройки.
+const BAND_TRI := [[0, 0], [0, 1], [1, 1], [0, 0], [1, 1], [1, 0]]
 # РАЗМЕР ПОЧТИ НЕ МЕНЯЕТСЯ С ВОЗРАСТОМ — так решено по кадру.
 #
 # Прежде кочка росла втрое (0.035 → 0.105 доли шага), и молодую было не
@@ -513,6 +567,9 @@ const DOME: float = 0.55
 const ADULT_SIZE: float = 0.105 * 0.75      # «М» — доля шага решётки
 const SIZE_PER_STAGE: float = 0.05
 const MID_STAGE: float = 5.0                # ступень, на которой размер ровно М
+# Самая старшая ступень — по ней раскладка и печётся один раз, а младшие
+# получаются сжатием к середине.
+const MAX_FACTOR: float = 1.0 + SIZE_PER_STAGE * (float(STAGES) - MID_STAGE)
 
 # Какую долю зрелости ворсинка тянется от нуля до полного роста. Отрезки
 # соседних ворсинок НАХЛЁСТЫВАЮТСЯ: чем длиннее отрезок, тем больше их растёт
@@ -521,18 +578,27 @@ const MID_STAGE: float = 5.0                # ступень, на которо�
 const SPROUT_SPAN: float = 0.22
 
 
-# РАСКЛАДКА ВОРСИНОК СЧИТАЕТСЯ ОДИН РАЗ, при рождении кочки, и живёт с ней.
+# ПРОДОЛЬНЫЙ СРЕЗ КОЧКИ, от макушки (0) к ободу (1). Не полусфера: у мховой
+# подушки макушка плоская, плечо скруглено, а бок почти отвесный — так на рисунке
+# пользователя, и так же на снимках живого мха.
+static func _profile(t: float) -> float:
+	return pow(maxf(0.0, 1.0 - pow(t, 3.0)), 0.45)
+
+
+# РАСКЛАДКА КОЧКИ СЧИТАЕТСЯ ОДИН РАЗ, при рождении, и живёт с ней.
 #
-# Каждая ворсинка сажается на НАСТОЯЩУЮ землю — поиском по полю. Раньше место
-# бралось по плоскости наклона с поправкой на кривизну, и на валуне подушка то
-# висела в воздухе, то уходила внутрь камня: одной кривизной изгиб не описать.
-# Считать это на каждой перестройке нельзя (сорок пять секунд роста стоили
-# двадцати четырёх секунд счёта), а один раз на кочку — вполне.
+# На землю сажаем ТОЛЬКО ОБОД — семь точек по кругу — и середину. Всё, что внутри,
+# достраивается между ними: кочка поперёк вчетверо мельче ячейки, и земля на
+# таком клочке от хорды почти не отличается. Раньше на землю садили каждую из
+# двадцати двух ворсинок, и это была самая дорогая часть роста.
 #
-# Порядок ворсинок — ОТ СЕРЕДИНЫ К КРАЮ, по золотому углу. Тогда растущая
-# подушка добавляет их с краю, а не втыкает посреди уже готовых: разрастание
-# читается разрастанием, а не мельтешением.
-func _make_blades(spot: Dictionary, def: Dictionary, salt: int) -> Array:
+# Печём при САМОМ СТАРШЕМ размере, а младшие ступени сжимают обод к середине.
+# Иначе обод пришлось бы искать заново на каждой ступени роста.
+#
+# Не нашлось земли под ободом — кочки НЕ БУДЕТ вовсе. У пучка можно было
+# обронить отдельную ворсинку, у сплошного тела дыра в ободе — это рваная
+# оболочка. Зато у обрыва мох теперь не свесится: ему просто негде лечь.
+func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 	var centre: Vector3 = spot["pos"]
 	var nrm: Vector3 = spot["nrm"]
 	var side: Vector3 = nrm.cross(Vector3.UP)
@@ -542,8 +608,7 @@ func _make_blades(spot: Dictionary, def: Dictionary, salt: int) -> Array:
 	var along: Vector3 = nrm.cross(side).normalized()
 
 	# Лиана ползёт вверх по склону узкой полосой — её пятно вытянуто. Сильнее
-	# полутора раз растягивать нельзя: дощечки выстраиваются вдоль одной оси и
-	# складываются стопкой, как страницы в книге.
+	# полутора раз растягивать нельзя: кочка вырождается в лезвие.
 	var creep: float = 1.0
 	if str(def.get("shape", "")) == "vine":
 		var up: Vector3 = Vector3.UP - nrm * nrm.dot(Vector3.UP)
@@ -552,32 +617,65 @@ func _make_blades(spot: Dictionary, def: Dictionary, salt: int) -> Array:
 			along = nrm.cross(side).normalized()
 		creep = 1.5
 
-	var span: float = main.CELL_SPACING * 0.115      # радиус взрослой подушки
-	var out: Array = []
-	for i in range(BLADES_MAX):
-		var t: float = float(i) / float(BLADES_MAX - 1)
-		var r: float = sqrt(t)                       # равномерно по площади
-		var a: float = float(i) * 2.39996323          # золотой угол: без колец и лучей
-		var wob: float = 0.72 + 0.56 * _hash01(salt + i * 7717)
-		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a))
-		var at: Vector3 = centre + dir * (r * span * wob)
-		var on: Dictionary = main.grid.surface_near(at)
-		# Не села — ворсинки просто НЕ БУДЕТ. Раньше на этом месте оставалась
-		# точка «как есть», то есть висящая в воздухе: у кромки обрыва такие
-		# ворсинки торчали наружу целыми охапками. Пусть подушка у края будет
-		# пореже, чем с бахромой из ничего.
-		if on.is_empty():
-			continue
-		var pos: Vector3 = on["pos"]
-		var up_n: Vector3 = on["nrm"]
-		# И место, и наклон должны быть СВОИ. Уехала дальше, чем отпущено, или
-		# завернулась круче прямого угла — значит нашлась чужая земля за краем.
-		if pos.distance_to(at) > span * 0.9 or up_n.dot(nrm) < 0.2:
-			continue
-		out.append({
-			"pos": pos, "nrm": up_n,
-			"out": dir.normalized() if dir.length_squared() > 0.0001 else side,
-			"r": r,
+	var reach: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * MAX_FACTOR
+	var rings: int = RING_AT.size()
+	var rim: Array = []
+	for s in range(SECTORS):
+		var a: float = TAU * float(s) / float(SECTORS)
+		# Радиус у каждого сектора свой — отсюда неправильный многоугольник
+		# сверху. Ровный круг сразу читается штампом, повторённым сотни раз.
+		var wob: float = 0.78 + 0.42 * _hash01(salt + s * 7717)
+		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a)).normalized()
+		var far: float = reach * wob
+		var pos := Vector3.ZERO
+		var got := false
+		# Не нашлось на полном радиусе — подбираем сектор ближе к середине. Кочка
+		# у кромки выйдет кривобокой, но целой.
+		for k in [1.0, 0.62, 0.3]:
+			var on: Dictionary = main.grid.surface_near(centre + dir * (far * k))
+			if on.is_empty():
+				continue
+			if on["pos"].distance_to(centre) > far * k * 1.9 or on["nrm"].dot(nrm) < 0.2:
+				continue
+			pos = on["pos"]
+			got = true
+			break
+		if not got:
+			return {}
+		# Бугорки на макушке: каждое кольцо каждого сектора чуть выше или ниже
+		# ровного среза. Без них купол гладкий, как надувной, а мховая подушка
+		# сложена из сросшихся холмиков.
+		var lump := PackedFloat32Array()
+		lump.resize(rings)
+		for r in range(rings):
+			lump[r] = 0.90 + 0.20 * _hash01(salt + s * 131 + r * 977)
+		rim.append({"off": pos - centre, "lump": lump})
+
+	# ВОРС. Место — на теле, а не на земле: доля радиуса и угол, остальное
+	# считается по куполу. Порядок — ОТ СЕРЕДИНЫ К КРАЮ по золотому углу: растущая
+	# кочка добавляет ворсинки с краю, а не втыкает посреди уже готовых.
+	var fuzz: Array = []
+	for i in range(FUZZ_MAX):
+		var t: float = sqrt(float(i) / float(FUZZ_MAX - 1))   # равномерно по площади
+		var a: float = float(i) * 2.39996323
+		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a)).normalized()
+		# Насколько далеко обод в эту сторону — берём между соседними секторами.
+		var at: float = float(SECTORS) * a / TAU
+		var s0: int = int(floor(at)) % SECTORS
+		var s1: int = (s0 + 1) % SECTORS
+		var mix: float = at - floor(at)
+		var near: float = lerpf(Vector3(rim[s0]["off"]).length(),
+			Vector3(rim[s1]["off"]).length(), mix)
+		# Срез купола под ворсинкой и его наклон — величины ПОСТОЯННЫЕ: доля
+		# радиуса у ворсинки своя на всю жизнь, меняется только общий размер.
+		# Считать их при каждой перестройке значило бы звать `pow` по два раза
+		# на каждую ворсинку каждой кочки.
+		var tc: float = minf(t, 0.92)
+		var t2: float = minf(1.0, tc + 0.08)
+		fuzz.append({
+			"dir": dir, "t": tc, "reach": near,
+			"prof": _profile(tc), "dprof": _profile(t2) - _profile(tc),
+			"dt": t2 - tc,
 			"turn": TAU * _hash01(salt + i * 2113),
 			"lean": _hash01(salt + i * 3319) - 0.5,
 			"wide": 0.70 + 0.60 * _hash01(salt + i * 4409),
@@ -585,49 +683,48 @@ func _make_blades(spot: Dictionary, def: Dictionary, salt: int) -> Array:
 			"kind": int(_hash01(salt + i * 6607) * float(KINDS)) % KINDS,
 			"shade": 0.90 + 0.18 * _hash01(salt + i * 8819),
 			# СВОЙ ВОЗРАСТ У КАЖДОЙ ВОРСИНКИ — точнее, свой сдвиг на доле ступени.
-			# Возрастов у картинки девять, и пока весь пучок переключался разом,
+			# Возрастов у картинки девять, и пока весь ворс переключался разом,
 			# кочка меняла облик рывком, сколько бы ни было ступеней роста. Со
 			# сдвигом ворсинки переваливают на следующий возраст поодиночке: в
-			# любой миг подушка набрана из двух соседних возрастов, и их доля
-			# перетекает плавно. Это ещё и правда: в живой подушке мха соседние
-			# холмики разного возраста.
+			# любой миг кочка набрана из двух соседних возрастов, и их доля
+			# перетекает плавно.
 			"age": _hash01(salt + i * 9931),
 		})
-	return out
+
+	return {
+		"up": nrm, "rim": rim, "fuzz": fuzz,
+		"kind": int(_hash01(salt + 31) * float(KINDS)) % KINDS,
+		"age": _hash01(salt + 577),
+		"shade": 0.92 + 0.14 * _hash01(salt + 1223),
+	}
 
 
 func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[p["id"]]
 	var m: float = p["m"]
-	var blades: Array = p.get("blades", [])
-	if blades.is_empty():
+	var body: Dictionary = p.get("body", {})
+	if body.is_empty():
 		return false
+	var rim: Array = body["rim"]
+	var fuzz: Array = body["fuzz"]
+	var centre: Vector3 = p["pos"]
+	var up: Vector3 = body["up"]
 
-	# Молодая кочка — три ворсинки, взрослая — все тридцать. Растёт и число, и
-	# рост каждой: одним ростом получается раздутая копия младенца.
-	#
-	# ЧИСЛО РАСТЁТ НЕ ЦЕЛЫМИ. Прежде на очередной ступени посреди подушки просто
-	# оказывалась новая ворсинка в полный рост — на глаз это мигание, а не рост.
-	# Теперь у каждой свой отрезок зрелости (`SPROUT_SPAN`), и она вытягивается
-	# по нему от нуля. Первые `BLADES_MIN` есть сразу: у только что севшей кочки
-	# иначе не было бы ничего видно.
-	#
-	# Отрезки размечаем по ДЛИНЕ СПИСКА, а не по `BLADES_MAX`: ворсинок бывает
-	# меньше задуманного — те, что не нашли под собой земли, не родились вовсе, —
-	# и у редкой кочки у кромки обрыва подушка иначе набиралась бы вся разом в
-	# первую четверть жизни.
-	var have: int = blades.size()
-	var spread: float = float(maxi(1, have - BLADES_MIN))
 	var stage_f: float = m * float(STAGES)
 	# Номер ступени как непрерывная величина: середина первой — ровно 1, середина
 	# пятой — ровно 5. Считаем непрерывно, а не по целой ступени, чтобы размер не
 	# подскакивал на переходе — ради этого и участились пересборки.
 	var stage_no: float = clampf(stage_f + 0.5, 1.0, float(STAGES))
-	var tall: float = main.CELL_SPACING * ADULT_SIZE \
-		* (1.0 + SIZE_PER_STAGE * (stage_no - MID_STAGE))
+	var size: float = 1.0 + SIZE_PER_STAGE * (stage_no - MID_STAGE)
+	# Раскладка испечена при самом старшем размере — младшие ступени сжимают её
+	# к середине. И тело, и ворс идут одной и той же долей: растёт кочка целиком.
+	var k: float = size / MAX_FACTOR
+	var high: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * MAX_FACTOR \
+		* BODY_RISE * k
+	var tall: float = main.CELL_SPACING * ADULT_SIZE * size * FUZZ_TALL
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
-	# и умножение на тёмно-зелёный сделало бы пучок чёрным. И оттенок подмешиваем
+	# и умножение на тёмно-зелёный сделало бы кочку чёрной. И оттенок подмешиваем
 	# лишь наполовину — на полную он перекрашивал картинку в свой цвет, стирая
 	# всю проработку, ради которой она и рисовалась.
 	var c: Color = def["color"]
@@ -635,21 +732,119 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var hue := Color(1.0, 1.0, 1.0).lerp(
 		Color(c.r / lum, c.g / lum, c.b / lum), 0.5)
 
-	var count: int = 0
-	for i in range(have):
-		var b: Dictionary = blades[i]
-		# Своя доля роста. Список идёт от середины к краю, поэтому и всходят
-		# ворсинки от середины к краю: подушка ширится, а не густеет изнутри.
+	# =========================================================================
+	#  ТЕЛО: купол из колец
+	# =========================================================================
+	# Сначала считаем ВСЕ точки, потом нормали по соседям, и только потом
+	# выкладываем треугольники. Нормаль, взятая от соседних точек самого меша,
+	# всегда сходится с тем, что видно; выведенная отдельной формулой — рано или
+	# поздно разойдётся с геометрией, и купол засветится не по своей форме.
+	var rings: int = RING_AT.size()
+	var apex: Vector3 = centre + up * (high * (0.95 + 0.10 * float(body["age"])))
+	var pts: Array = []
+	for r in range(rings):
+		var t: float = float(RING_AT[r])
+		var ring: Array = []
+		for s in range(SECTORS):
+			# Обод топим в землю (`RIM_SINK`), иначе по кромке идёт шов: тело
+			# кончается ровно на поверхности, и в стык видно землю на просвет.
+			var lift: float = high * (_ring_prof[r] * float(rim[s]["lump"][r])
+				- _ring_sink[r])
+			ring.append(centre + Vector3(rim[s]["off"]) * (t * k) + up * lift)
+		pts.append(ring)
+
+	# Сторону нормали решаем по точке ВНУТРИ тела: у макушки она смотрит вверх,
+	# у крутого бока — наружу, и одна проверка на высоту тут не годится.
+	var inside: Vector3 = centre + up * (high * 0.35)
+	var nrms: Array = []
+	for r in range(rings):
+		var ring_n: Array = []
+		for s in range(SECTORS):
+			var here: Vector3 = pts[r][s]
+			var nxt: Vector3 = pts[r][(s + 1) % SECTORS]
+			var prv: Vector3 = pts[r][(s + SECTORS - 1) % SECTORS]
+			var inner: Vector3 = apex if r == 0 else pts[r - 1][s]
+			var outer: Vector3 = pts[r + 1][s] if r + 1 < rings \
+				else here + (here - inner)
+			var n: Vector3 = (nxt - prv).cross(outer - inner)
+			if n.length_squared() < 0.0000001:
+				n = up
+			else:
+				n = n.normalized()
+				if n.dot(here - inside) < 0.0:
+					n = -n
+			ring_n.append(n)
+		nrms.append(ring_n)
+
+	# Разрез картинки — тоже вперёд, по кольцу и по сектору: внутри выкладки он
+	# считался бы заново на каждую из сотни вершин.
+	var bk: float = float(int(body["kind"]))
+	var bstage: float = float(clampi(int(stage_f + float(body["age"])), 0, STAGES - 1))
+	var cuts: Array = []
+	for r in range(rings):
+		var vv: float = (bstage + _ring_v[r]) / float(STAGES)
+		var ring_uv: Array = []
+		for s in range(SECTORS):
+			ring_uv.append(Vector2((bk + _sector_u[s]) / float(KINDS), vv))
+		cuts.append(ring_uv)
+	var apex_uv := Vector2((bk + 0.5) / float(KINDS),
+		(bstage + BODY_V_TOP) / float(STAGES))
+
+	st.set_color((hue * float(body["shade"])).srgb_to_linear())
+	for s in range(SECTORS):
+		var s2: int = (s + 1) % SECTORS
+		# Макушка: веер от середины к первому кольцу.
+		st.set_normal(up)
+		st.set_uv(apex_uv)
+		st.add_vertex(apex)
+		st.set_normal(nrms[0][s])
+		st.set_uv(cuts[0][s])
+		st.add_vertex(pts[0][s])
+		st.set_normal(nrms[0][s2])
+		st.set_uv(cuts[0][s2])
+		st.add_vertex(pts[0][s2])
+		# Пояса между кольцами.
+		for r in range(rings - 1):
+			for q in BAND_TRI:
+				var rr: int = r + int(q[0])
+				var ss: int = s2 if int(q[1]) == 1 else s
+				st.set_normal(nrms[rr][ss])
+				st.set_uv(cuts[rr][ss])
+				st.add_vertex(pts[rr][ss])
+
+	# =========================================================================
+	#  ВОРС: картинки, растущие ИЗ ТЕЛА по его нормали
+	# =========================================================================
+	# Направление берём у самого купола: на макушке ворсинка стоит торчком, у
+	# края завалена наружу — ровно так на разрезе у пользователя. Считать это
+	# отдельным правилом не нужно, оно уже есть в форме тела.
+	#
+	# ЧИСЛО РАСТЁТ НЕ ЦЕЛЫМИ: у каждой ворсинки свой отрезок зрелости
+	# (`SPROUT_SPAN`), и она вытягивается по нему от нуля. Возникшая разом
+	# ворсинка в полный рост читается миганием, а не ростом. Первые `FUZZ_MIN`
+	# есть сразу — у только что севшей кочки иначе торчал бы голый купол.
+	var many: int = fuzz.size()
+	var spread: float = float(maxi(1, many - FUZZ_MIN))
+	for i in range(many):
+		var b: Dictionary = fuzz[i]
 		var grow: float = 1.0
-		if i >= BLADES_MIN:
-			var born: float = float(i - BLADES_MIN) / spread * (1.0 - SPROUT_SPAN)
+		if i >= FUZZ_MIN:
+			var born: float = float(i - FUZZ_MIN) / spread * (1.0 - SPROUT_SPAN)
 			grow = (m - born) / SPROUT_SPAN
 			if grow <= 0.0:
 				break          # дальше по списку всходят только позже этой
 			grow = clampf(grow, 0.0, 1.0)
 			grow = grow * grow * (3.0 - 2.0 * grow)     # мягко от нуля и к полному
-		count += 1
-		var stand: Vector3 = b["nrm"]
+		var dir: Vector3 = b["dir"]
+		var reach: float = float(b["reach"]) * k
+		var foot0: Vector3 = centre + dir * (reach * float(b["t"])) \
+			+ up * (high * float(b["prof"]))
+		# Нормаль купола в этой точке — по срезу. Наклон среза здесь и заваливает
+		# ворсинку наружу тем сильнее, чем ближе к ободу.
+		var stand: Vector3 = up * (reach * float(b["dt"])) \
+			- dir * (high * float(b["dprof"]))
+		stand = stand.normalized() if stand.length_squared() > 0.0000001 else up
+
 		var side: Vector3 = stand.cross(Vector3.UP)
 		if side.length_squared() < 0.001:
 			side = stand.cross(Vector3.RIGHT)
@@ -657,20 +852,13 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		var along: Vector3 = stand.cross(side).normalized()
 		var turn: float = float(b["turn"])
 		var face: Vector3 = side * cos(turn) + along * sin(turn)
-
-		# ВЫПУКЛОСТЬ ПОДУШКИ: середина поднята, край лежит на земле. Отсюда и
-		# пышность — силуэт становится куполом, а не блином.
-		var r: float = float(b["r"])
-		var rise: float = (1.0 - r * r) * tall * DOME
-		# Край ЗАВАЛИВАЕТСЯ наружу: подушка расползается кромкой, а не
-		# обрывается стенкой.
-		var lie: float = r * r * 0.8
 		var w: float = tall * float(b["wide"]) * grow
-		var h: float = tall * float(b["high"]) * (1.0 - 0.3 * lie) * grow
-		var up: Vector3 = (stand * (1.0 - lie * 0.7) + Vector3(b["out"]) * lie
-			+ face * (float(b["lean"]) * 0.5)).normalized()
+		var h: float = tall * float(b["high"]) * grow
+		var lean: Vector3 = (stand + face * (float(b["lean"]) * 0.35)).normalized()
 		var half: Vector3 = face * (w * 0.5)
-		var foot: Vector3 = Vector3(b["pos"]) + stand * (rise - h * 0.30)
+		# Корень УТАПЛИВАЕМ в тело: иначе между картинкой и куполом просвечивает
+		# щель, и ворс читается воткнутым, а не выросшим.
+		var foot: Vector3 = foot0 - stand * (h * 0.28)
 
 		var cx: int = int(b["kind"])
 		var stage: int = clampi(int(stage_f + float(b["age"])), 0, STAGES - 1)
@@ -681,63 +869,15 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 
 		st.set_color((hue * float(b["shade"])).srgb_to_linear())
 		var quad := [foot - half, foot + half,
-			foot + half + up * h, foot - half + up * h]
+			foot + half + lean * h, foot - half + lean * h]
 		var uvs := [Vector2(u0, v1), Vector2(u1, v1), Vector2(u1, v0), Vector2(u0, v0)]
 		# Стороны у материала не отсекаются, поэтому порядок обхода не важен.
 		for tri in [[0, 1, 2], [0, 2, 3]]:
-			for k in tri:
+			for j in tri:
 				st.set_normal(stand)
-				st.set_uv(uvs[k])
-				st.add_vertex(quad[k])
-
-	# ШАПКА. Стоячие дощечки видны сверху с ребра, и посреди пучка зияет плешь —
-	# смотришь на кочку сверху, а видишь землю между ворсинками. Кладём поверх
-	# несколько лоскутов ПО ЗЕМЛЕ, по макушке купола: сверху они закрывают
-	# середину, сбоку почти не видны. У мха это ещё и правда: подушка сверху
-	# сплошная.
-	# Последняя шапка ВЫРАСТАЕТ, а не возникает: доля от дробной части. Крупный
-	# лоскут, появившийся разом, виден даже отчётливее новой ворсинки — он лежит
-	# на самой макушке.
-	var caps_f: float = 2.0 + 7.0 * m
-	var caps: int = int(ceil(caps_f))
-	for i in range(caps):
-		var b: Dictionary = blades[(i * 5 + 1) % count]
-		var cw: float = clampf(caps_f - float(i), 0.0, 1.0)
-		cw = cw * cw * (3.0 - 2.0 * cw)
-		var cn: Vector3 = b["nrm"]
-		var cs: Vector3 = cn.cross(Vector3.UP)
-		if cs.length_squared() < 0.001:
-			cs = cn.cross(Vector3.RIGHT)
-		cs = cs.normalized()
-		var cl: Vector3 = cn.cross(cs).normalized()
-		var cr: float = float(b["r"])
-		var turn2: float = float(b["turn"]) * 0.7
-		# Шапки МЕЛКИЕ. Крупная лежачая заплата видна сбоку плоским листом, и
-		# подушка сразу читается наклейкой; мелкие же прячутся между ворсинками
-		# и делают своё дело только сверху.
-		var wide: float = tall * (0.50 + 0.30 * float(b["wide"])) * cw
-		var e1: Vector3 = (cs * cos(turn2) + cl * sin(turn2)) * wide
-		var e2: Vector3 = (cs * -sin(turn2) + cl * cos(turn2)) * (wide * 0.85)
-		# Кладём по макушке купола, а не по земле: иначе шапка торчит из-под
-		# ворсинок юбкой.
-		var c0: Vector3 = Vector3(b["pos"]) \
-			+ cn * ((1.0 - cr * cr) * tall * DOME + tall * 0.20)
-		var cap := [c0 - e1 - e2, c0 + e1 - e2, c0 + e1 + e2, c0 - e1 + e2]
-		# Берём середину клетки — самую густую часть подушки, без её края.
-		var ck: int = int(b["kind"])
-		var stage: int = clampi(int(stage_f + float(b["age"])), 0, STAGES - 1)
-		var mu0: float = (float(ck) + 0.18) / float(KINDS)
-		var mu1: float = (float(ck) + 0.82) / float(KINDS)
-		var mv0: float = (float(stage) + 0.10) / float(STAGES)
-		var mv1: float = (float(stage) + 0.62) / float(STAGES)
-		var cuv := [Vector2(mu0, mv1), Vector2(mu1, mv1), Vector2(mu1, mv0), Vector2(mu0, mv0)]
-		st.set_color((hue * float(b["shade"])).srgb_to_linear())
-		for tri2 in [[0, 1, 2], [0, 2, 3]]:
-			for k in tri2:
-				st.set_normal(cn)
-				st.set_uv(cuv[k])
-				st.add_vertex(cap[k])
-	return count > 0
+				st.set_uv(uvs[j])
+				st.add_vertex(quad[j])
+	return true
 
 
 func _hash01(n: int) -> float:

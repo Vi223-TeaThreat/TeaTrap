@@ -1267,6 +1267,19 @@ func _selftest() -> void:
 		snappedf(gap_sum / maxf(1.0, float(sat)), 0.001), " м, наибольший ",
 		snappedf(gap_max, 0.001), " м")
 
+	# ЧЕМ КОЧКА ОБХОДИТСЯ. Объём у неё теперь настоящий — тело куполом, — и это
+	# та цена, которую надо держать на виду: мох должен выглядеть пушистым, но
+	# заросший остров — это тысячи кочек.
+	var tris := 0
+	for cell in plants.cell_nodes:
+		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
+		for si in range(mesh.get_surface_count()):
+			var indexed: int = mesh.surface_get_array_index_len(si)
+			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
+	print("Кочка: треугольников всего — ", tris, ", на кочку — ",
+		snappedf(float(tris) / maxf(1.0, float(plants.patches.size())), 0.1),
+		", кусков меша — ", plants.cell_nodes.size())
+
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 	var pick := _pick(get_viewport().get_visible_rect().size * 0.5)
