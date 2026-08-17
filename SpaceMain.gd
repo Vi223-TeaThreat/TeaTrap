@@ -1282,6 +1282,9 @@ func _selftest() -> void:
 	var sheet: Vector2i = plants.see_through()
 	print("Разметка тела: просвечивающих точек — ", sheet.x,
 		", самая тесная клетка — ", sheet.y, " точек")
+	var merged: Vector2 = plants.merge_stats()
+	print("Слияние: соседей внахлёст на кочку — ", snappedf(merged.x, 0.1),
+		", обода под чужим куполом — ", snappedf(merged.y * 100.0, 0.1), "%")
 
 	await get_tree().physics_frame
 	await get_tree().physics_frame

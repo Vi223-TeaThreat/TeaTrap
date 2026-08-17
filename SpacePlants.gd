@@ -69,6 +69,8 @@ var _ring_prof := PackedFloat32Array()
 var _ring_sink := PackedFloat32Array()
 var _ring_v := PackedFloat32Array()
 var _sector_u := PackedFloat32Array()
+const PROF_STEPS: int = 32
+var _prof_lut := PackedFloat32Array()
 # Сплошной прямоугольник каждой клетки листа, в долях всей картинки. Ищется по
 # самой картинке при запуске — см. `_scan_solid`.
 var _solid_uv: Array = []
@@ -106,6 +108,9 @@ func setup(main_ref: Node3D) -> void:
 		# Разрез ведём по кругу волной: иначе на всех семи секторах ложится одна
 		# и та же полоса рисунка. Волна замкнутая — на стыке шва нет.
 		_sector_u[s] = 0.12 + 0.76 * absf(sin(TAU * float(s) / float(SECTORS)))
+	_prof_lut.resize(PROF_STEPS + 1)
+	for i in range(PROF_STEPS + 1):
+		_prof_lut[i] = _profile(float(i) / float(PROF_STEPS))
 
 
 # СПЛОШНОЙ ПРЯМОУГОЛЬНИК КАЖДОЙ КЛЕТКИ — ищем ПО САМОЙ КАРТИНКЕ, один раз при
@@ -459,13 +464,46 @@ func _create(spot: Dictionary, id: String, maturity: float) -> int:
 	patches[pid] = {
 		"pos": spot["pos"], "nrm": spot["nrm"], "id": id,
 		"m": maturity, "step": -1, "cell": cell, "salt": salt,
-		"body": body,
+		"body": body, "near": [],
 	}
 	if not by_cell.has(cell):
 		by_cell[cell] = {}
 	by_cell[cell][pid] = true
+	_link_near(pid)
 	_dirty[cell] = true
 	return pid
+
+
+# С КЕМ КОЧКА МОЖЕТ СОМКНУТЬСЯ. Список считается ОДИН РАЗ, при рождении: слияние
+# спрашивает соседей на каждой перестройке, а перебирать ради этого сад — работа
+# в квадрате от числа кочек.
+#
+# Связь двусторонняя: новорождённая записывает соседей себе и себя — им. Список
+# не чистится при гибели: пропавший номер отсеивается при чтении, а чистка стоила
+# бы обхода всех, кто на него ссылался.
+func _link_near(pid: int) -> void:
+	var p: Dictionary = patches[pid]
+	var pos: Vector3 = p["pos"]
+	# Дальше двух взрослых радиусов купола не встретятся никогда.
+	var far: float = _patch_span(1.0) * 2.0
+	var node: Vector3i = main.grid.node_of(int(p["cell"]))
+	var list: Array = []
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var c: int = main.grid.node_seed(node + Vector3i(dx, dy, dz))
+				if c < 0:
+					continue
+				for other in by_cell.get(c, {}):
+					if other == pid or not patches.has(other):
+						continue
+					if pos.distance_to(patches[other]["pos"]) > far:
+						continue
+					list.append(other)
+					var theirs: Array = patches[other]["near"]
+					if not theirs.has(pid):
+						theirs.append(pid)
+	p["near"] = list
 
 
 # Есть ли кто-то вплотную. Смотрим ТОЛЬКО ячейку под точкой и её соседей по
@@ -633,6 +671,7 @@ func surface_changed(cells: Array = []) -> void:
 		p["pos"] = spot["pos"]
 		p["nrm"] = spot["nrm"]
 		p["body"] = again
+		_link_near(pid)          # переехала — соседи у неё могли смениться
 		var now: int = int(spot["cell"])
 		if now != was:
 			if by_cell.has(was):
@@ -728,12 +767,24 @@ const RING_AT := [0.45, 0.78, 1.0]          # где идут кольца, в �
 const BODY_WIDE: float = 1.31               # радиус тела в долях «М»
 const BODY_RISE: float = 0.58               # высота тела в долях его радиуса
 const RIM_SINK: float = 0.10                # на сколько обод утоплен в землю
-# Ворсинок В РАЗЫ МЕНЬШЕ, чем было: пышность теперь держит тело, а ворс только
-# ломает силуэт. Прежние двадцать две поверх готового купола — это оплаченная
-# дважды одна и та же масса.
-const FUZZ_MAX: int = 14
+# ВОРС СТОИТ КОЛЬЦАМИ — по разрезу, нарисованному пользователем. Прежде он
+# сеялся по золотому углу, ровно по площади; на глаз это россыпь, а на разрезе
+# видно другое: ворсинки идут поясами от обода к макушке, и чем ближе к ободу,
+# тем сильнее завалены наружу. Завал считать не нужно — он сам берётся из наклона
+# купола в этом месте.
+#
+# Не меньше пяти-шести на кольцо (решение пользователя): реже — и кольцо
+# перестаёт читаться кольцом, распадаясь на отдельные торчки.
+const FUZZ_RINGS := [0.32, 0.64, 0.90]      # где идут пояса, в долях радиуса
+const FUZZ_PER_RING: int = 6
+const FUZZ_CROWN: int = 3                   # ещё столько на самой макушке
 const FUZZ_MIN: int = 4
+# ДЛИНА ВОРСИНКИ — не короче половины радиуса кочки (решение пользователя).
+# Мерить её в долях «М», как раньше, больше нельзя: кочка с возрастом ширится
+# вдвое с лишним, и ворс, привязанный к «М», на взрослой терялся бы щетинкой.
+# Оба правила оставлены, берётся большее из них.
 const FUZZ_TALL: float = 0.62               # рост ворсинки в долях «М»
+const FUZZ_OF_SPAN: float = 0.5             # ... и в долях радиуса кочки
 # Куда по картинке смотрит тело кочки — в долях СПЛОШНОГО ПРЯМОУГОЛЬНИКА клетки,
 # а не самой клетки.
 #
@@ -787,6 +838,71 @@ const SPROUT_SPAN: float = 0.22
 # пользователя, и так же на снимках живого мха.
 static func _profile(t: float) -> float:
 	return pow(maxf(0.0, 1.0 - pow(t, 3.0)), 0.45)
+
+
+# Тот же срез, но ПО ТАБЛИЦЕ. Слияние с соседями спрашивает высоту чужого купола
+# для каждой точки тела и каждого соседа — это сотня с лишним обращений на кочку
+# за перестройку, а в самом срезе две степени. Таблицу считаем один раз.
+func _profile_fast(t: float) -> float:
+	if t <= 0.0:
+		return 1.0
+	if t >= 1.0:
+		return 0.0
+	var f: float = t * float(PROF_STEPS)
+	var i: int = int(f)
+	return lerpf(_prof_lut[i], _prof_lut[i + 1], f - float(i))
+
+
+# НАСКОЛЬКО КОЧКИ СРОСЛИСЬ: сколько соседей у каждой внахлёст и какая доля обода
+# накрыта чужим куполом. Второе и есть слияние: накрытая точка обода не падает на
+# землю, а садится на бок соседа, и ложбина между кочками пропадает.
+#
+# Только для самопроверки. Единый силуэт виден на кадре, а кадров я не сужу —
+# значит, у него должно быть число.
+func merge_stats() -> Vector2:
+	var pairs := 0.0
+	var covered := 0.0
+	var total := 0.0
+	var bake: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * PATCH_OLD
+	for pid in patches:
+		var p: Dictionary = patches[pid]
+		var body: Dictionary = p["body"]
+		var rim: Array = body["rim"]
+		var centre: Vector3 = p["pos"]
+		var up: Vector3 = body["up"]
+		var span: float = _patch_span(float(p["m"]))
+		var k: float = span / bake
+		var off_t: Array = []
+		var off_r := PackedFloat32Array()
+		for nb in p.get("near", []):
+			if not patches.has(nb):
+				continue
+			var q: Dictionary = patches[nb]
+			var qs: float = _patch_span(float(q["m"]))
+			var off: Vector3 = Vector3(q["pos"]) - centre
+			if off.length() > qs + span:
+				continue
+			pairs += 1.0
+			off_t.append(off - up * off.dot(up))
+			off_r.append(qs)
+		for s in range(rim.size()):
+			var o: Vector3 = Vector3(rim[s]["off"]) * k
+			var ot: Vector3 = o - up * o.dot(up)
+			total += 1.0
+			for i in range(off_t.size()):
+				if (ot - Vector3(off_t[i])).length() < off_r[i]:
+					covered += 1.0
+					break
+	var n: float = maxf(1.0, float(patches.size()))
+	return Vector2(pairs / n, covered / maxf(1.0, total))
+
+
+# РАДИУС КОЧКИ на этой зрелости. Спрашивают двое: своя отрисовка и слияние —
+# соседу надо знать, докуда дотянулся чужой купол.
+func _patch_span(m: float) -> float:
+	var stage_no: float = clampf(m * float(STAGES) + 0.5, 1.0, float(STAGES))
+	return main.CELL_SPACING * ADULT_SIZE * BODY_WIDE \
+		* lerpf(PATCH_YOUNG, PATCH_OLD, (stage_no - 1.0) / float(STAGES - 1))
 
 
 # РАСКЛАДКА КОЧКИ СЧИТАЕТСЯ ОДИН РАЗ, при рождении, и живёт с ней.
@@ -858,10 +974,23 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 	# ВОРС. Место — на теле, а не на земле: доля радиуса и угол, остальное
 	# считается по куполу. Порядок — ОТ СЕРЕДИНЫ К КРАЮ по золотому углу: растущая
 	# кочка добавляет ворсинки с краю, а не втыкает посреди уже готовых.
+	# Порядок поясов — ОТ МАКУШКИ К ОБОДУ: он же порядок всхода, и растущая кочка
+	# добавляет ворс с краю, а не втыкает посреди уже готового.
+	var spots: Array = []
+	for c in range(FUZZ_CROWN):
+		spots.append([0.10, TAU * float(c) / float(FUZZ_CROWN)])
+	for r in range(FUZZ_RINGS.size()):
+		for j in range(FUZZ_PER_RING):
+			# Соседние пояса сдвинуты на полшага, иначе ворсинки выстраиваются
+			# лучами от середины и кочка идёт спицами.
+			spots.append([float(FUZZ_RINGS[r]),
+				TAU * (float(j) + 0.5 * float(r)) / float(FUZZ_PER_RING)])
+
 	var fuzz: Array = []
-	for i in range(FUZZ_MAX):
-		var t: float = sqrt(float(i) / float(FUZZ_MAX - 1))   # равномерно по площади
-		var a: float = float(i) * 2.39996323
+	for i in range(spots.size()):
+		var t: float = float(spots[i][0])
+		# Углы сбиваем на треть промежутка: ровное кольцо читается частоколом.
+		var a: float = float(spots[i][1]) + (_hash01(salt + i * 1013) - 0.5) * 0.7
 		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a)).normalized()
 		# Насколько далеко обод в эту сторону — берём между соседними секторами.
 		var at: float = float(SECTORS) * a / TAU
@@ -924,8 +1053,12 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
 		(stage_no - 1.0) / float(STAGES - 1))
 	var k: float = wide_at / PATCH_OLD
-	var high: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at * BODY_RISE
-	var tall: float = main.CELL_SPACING * ADULT_SIZE * size * FUZZ_TALL
+	var span: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at
+	var high: float = span * BODY_RISE
+	# Ворсинка — большее из двух правил: «М ±5% за ступень» и «не короче половины
+	# радиуса кочки». На молодой берёт верх первое, на взрослой — второе.
+	var tall: float = maxf(main.CELL_SPACING * ADULT_SIZE * size * FUZZ_TALL,
+		span * FUZZ_OF_SPAN)
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
 	# и умножение на тёмно-зелёный сделало бы кочку чёрной. И оттенок подмешиваем
@@ -943,18 +1076,73 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# выкладываем треугольники. Нормаль, взятая от соседних точек самого меша,
 	# всегда сходится с тем, что видно; выведенная отдельной формулой — рано или
 	# поздно разойдётся с геометрией, и купол засветится не по своей форме.
+	# Точку тела держим ДВУМЯ ЧАСТЯМИ: смещение вбок от середины и высота над ней.
+	# Так и задумана кочка, и — главное — так слияние с соседом становится одним
+	# вычитанием вместо пересчёта в чужую систему на каждой вершине.
 	var rings: int = RING_AT.size()
-	var apex: Vector3 = centre + up * (high * (0.95 + 0.10 * float(body["age"])))
-	var pts: Array = []
+	var count: int = rings * SECTORS + 1          # последняя точка — макушка
+	var vt := PackedVector3Array()
+	var vh := PackedFloat32Array()
+	vt.resize(count)
+	vh.resize(count)
 	for r in range(rings):
 		var t: float = float(RING_AT[r])
-		var ring: Array = []
 		for s in range(SECTORS):
+			var o: Vector3 = Vector3(rim[s]["off"]) * (t * k)
+			var oh: float = o.dot(up)
 			# Обод топим в землю (`RIM_SINK`), иначе по кромке идёт шов: тело
 			# кончается ровно на поверхности, и в стык видно землю на просвет.
 			var lift: float = high * (_ring_prof[r] * float(rim[s]["lump"][r])
 				- _ring_sink[r])
-			ring.append(centre + Vector3(rim[s]["off"]) * (t * k) + up * lift)
+			var idx: int = r * SECTORS + s
+			vt[idx] = o - up * oh
+			vh[idx] = oh + lift
+	vt[count - 1] = Vector3.ZERO
+	vh[count - 1] = high * (0.95 + 0.10 * float(body["age"]))
+
+	# =========================================================================
+	#  СЛИЯНИЕ С СОСЕДЯМИ: группа кочек — один силуэт
+	# =========================================================================
+	# Каждую точку тела поднимаем до купола соседа, если тот в этом месте выше.
+	# Это ОБЪЕДИНЕНИЕ двух оболочек: там, где кочки налезли друг на друга, ложбина
+	# между ними исчезает и остаётся седловина — группа читается одной массой с
+	# буграми, а не выводком отдельных шапок.
+	#
+	# По КРАЮ группы соседа нет, и обод там по-прежнему ложится на землю. Потому и
+	# берём поточечный максимум, а не общий подъём: подъём оторвал бы от земли и
+	# крайние кочки.
+	#
+	# Идём СОСЕДЯМИ СНАРУЖИ, точками внутри: всё, что зависит только от соседа,
+	# считается тогда один раз на соседа, а не по разу на каждую из двадцати двух
+	# точек. Высоты меряем вдоль СВОЕЙ нормали — кочки сидят на одном клочке
+	# земли, наклон у них общий с точностью до пары градусов.
+	for nb in p.get("near", []):
+		if not patches.has(nb):
+			continue                     # сосед погиб; список нарочно не чистится
+		var q: Dictionary = patches[nb]
+		var qs: float = _patch_span(float(q["m"]))
+		var off: Vector3 = Vector3(q["pos"]) - centre
+		if off.length_squared() > (qs + span) * (qs + span):
+			continue                     # ещё не дорос до нас
+		var off_h: float = off.dot(up)
+		var off_t: Vector3 = off - up * off_h
+		var qs2: float = qs * qs
+		var rise: float = qs * BODY_RISE
+		for j in range(count):
+			var flat2: float = (vt[j] - off_t).length_squared()
+			if flat2 >= qs2:
+				continue
+			var top: float = off_h + rise * _profile_fast(sqrt(flat2) / qs)
+			if top > vh[j]:
+				vh[j] = top
+
+	var apex: Vector3 = centre + up * vh[count - 1]
+	var pts: Array = []
+	for r in range(rings):
+		var ring: Array = []
+		for s in range(SECTORS):
+			var idx: int = r * SECTORS + s
+			ring.append(centre + vt[idx] + up * vh[idx])
 		pts.append(ring)
 
 	# Сторону нормали решаем по точке ВНУТРИ тела: у макушки она смотрит вверх,
