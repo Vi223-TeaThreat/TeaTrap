@@ -13,7 +13,6 @@
 const SpaceGridScript = preload("res://SpaceGrid.gd")
 const SpacePlantsScript = preload("res://SpacePlants.gd")
 const SpacePropsScript = preload("res://SpaceProps.gd")
-const SpaceBuildingsScript = preload("res://SpaceBuildings.gd")
 const SurfaceScript = preload("res://Surface.gd")
 const PlantsData = preload("res://Plants.gd")
 
@@ -303,18 +302,6 @@ func _fill_world() -> void:
 		_audit_surface()
 
 
-func _occupied(cell: int) -> bool:
-	return cell >= 0 and solid.has(cell)
-
-
-# Земля и скала образуют ландшафт, здание — нет. Дом занимает объём ячейки
-# сам, поэтому под ним не должно вырастать бугра породы.
-func _is_terrain(cell: int) -> bool:
-	if cell < 0 or not solid.has(cell):
-		return false
-	return material_of(cell) != "building"
-
-
 # Погребена ли ячейка целиком в породе. Проверяем ПО СЕМЕНАМ, без вырезания:
 # соседи ячейки заведомо лежат внутри радиуса отсечения, поэтому если там всё
 # заполнено — наружу эта ячейка не выходит ничем. Такие не режем совсем:
@@ -393,19 +380,6 @@ func material_of(cell: int) -> String:
 	return m if m is String else "ground"
 
 
-# Изменилась одна ячейка — пересобрать надо куски, которых это коснулось.
-# Заполнение соседей тоже участвует в её поверхности, поэтому берём кольцо
-# соседей по решётке, а не одну ячейку.
-func _mark_dirty_around(cell: int) -> void:
-	var node: Vector3i = grid.node_of(cell)
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			for dz in range(-1, 2):
-				var j: int = grid.node_seed(node + Vector3i(dx, dy, dz))
-				if j >= 0:
-					_touch_chunks(j)
-
-
 func _flush_chunks() -> void:
 	for ch in _dirty_chunks:
 		_rebuild_chunk(ch)
@@ -453,13 +427,6 @@ func _rebuild_chunk(chunk: Vector3i) -> void:
 	mi.add_child(body)
 	add_child(mi)
 	chunk_nodes[chunk] = mi
-
-
-# Куски не трогаем прямо сейчас — только помечаем. Всё делается один раз за
-# кадр: мазок кистью в три ячейки шириной меняет три десятка ячеек, и
-# пересобирать каждую по отдельности значило бы сделать то же самое подряд.
-func _refresh(cell: int) -> void:
-	_mark_dirty_around(cell)
 
 
 # Постановка — это ЛЕПКА. Один мазок прибавляет земли понемногу, форма
@@ -543,21 +510,6 @@ func _stone_push(amount: float, material: String) -> float:
 		return -1.0
 	var card: Dictionary = PlantsData.ITEMS.get(material, PlantsData.ITEMS["ground"])
 	return float(card.get("stone", 0.0)) * 2.0 - 1.0
-
-
-# --- Кисть -------------------------------------------------------------------
-# Ширина 1 — одна ячейка, 2 и 3 — кустик соседних. Мир не решётчатый, поэтому
-# «2×2» и «3×3» означают не квадрат, а всё, что попало в круг такой ширины.
-func _brush_cells(centre: int) -> Array:
-	if centre < 0:
-		return []
-	if brush <= 1:
-		return [centre]
-	var out: Array = [centre]
-	for j in grid.seeds_near(grid.seeds[centre], CELL_SPACING * float(brush) * 0.5):
-		if j != centre:
-			out.append(j)
-	return out
 
 
 # Мазок ложится ровно туда, куда наведён курсор.
@@ -1114,25 +1066,6 @@ func _hash01(n: int) -> float:
 	return float(x % 10007) / 10007.0
 
 
-func _face_normal(pts: Array, inside: Vector3) -> Vector3:
-	var n := Vector3.ZERO
-	var m := pts.size()
-	for i in range(m):
-		var a: Vector3 = pts[i]
-		var b: Vector3 = pts[(i + 1) % m]
-		n.x += (a.y - b.y) * (a.z + b.z)
-		n.y += (a.z - b.z) * (a.x + b.x)
-		n.z += (a.x - b.x) * (a.y + b.y)
-	if n.length() < 0.000001:
-		return Vector3.UP
-	n = n.normalized()
-	var mid := Vector3.ZERO
-	for p in pts:
-		mid += p
-	mid /= float(m)
-	return -n if n.dot(mid - inside) < 0.0 else n
-
-
 # В Godot лицевая сторона грани — обход ПО ЧАСОВОЙ стрелке снаружи.
 func _emit_polygon(st: SurfaceTool, pts: Array, want: Vector3) -> void:
 	var seq: Array = pts.duplicate()
@@ -1165,37 +1098,6 @@ func _emit_polygon(st: SurfaceTool, pts: Array, want: Vector3) -> void:
 # =============================================================================
 #  Служебные режимы
 # =============================================================================
-# Как далеко на самом деле лежат соседи ячейки. По этому числу выставляется
-# радиус проверки погребённости: меньше — быстрее старт, но появятся дыры.
-func _measure_reach() -> void:
-	var worst := 0.0
-	var bins: Dictionary = {}
-	for cell in solid:
-		if not grid.in_play(cell):
-			continue
-		var here: Vector3 = grid.seeds[cell]
-		for nb in grid.neighbors_of(cell):
-			if nb < 0:
-				continue
-			var d: float = here.distance_to(grid.seeds[nb]) / CELL_SPACING
-			worst = maxf(worst, d)
-			var b: int = int(d * 10.0)
-			bins[b] = int(bins.get(b, 0)) + 1
-	var keys := bins.keys()
-	keys.sort()
-	var total := 0
-	for k in keys:
-		total += bins[k]
-	var seen := 0
-	var p999 := 0.0
-	for k in keys:
-		seen += bins[k]
-		if float(seen) / float(total) >= 0.999 and p999 == 0.0:
-			p999 = float(k) / 10.0
-	print("Соседи: самый дальний ", snappedf(worst, 0.01), " шага, 99.9% ближе ",
-		p999, " шага, всего связей ", total)
-
-
 # Считаем незамкнутые рёбра по всему миру: сколько их и где.
 func _audit_surface() -> void:
 	var edges: Dictionary = {}
@@ -1225,7 +1127,48 @@ func _audit_surface() -> void:
 		"; вывернутых тетраэдров на поверхности — ", int(stats.get("inverted", 0)))
 
 
+# СТОРОЖ НАГРУЗКИ. Все замеры ниже врут, если машина занята чем-то ещё. За одну
+# сессию это случалось трижды: открытый редактор Godot и запущенная из него игра
+# забирали столько, что отклик показывал десять миллисекунд вместо трёх, — и
+# несуществующий регресс чуть не пошли чинить.
+#
+# Мерим НЕ «кто запущен», а сколько машина отдаёт: считаем известный объём
+# работы и сравниваем со временем, за которое он проходит на свободной. Так
+# сторож ловит любую помеху — редактор, браузер, проверку диска, — а не только
+# ту, о которой мы догадались спросить.
+#
+# ЧЕГО ОН НЕ ЛОВИТ. Счёт идёт в одном потоке, а ядер много: один сосед, занявший
+# другое ядро, замедлит его слабо. Проверено — вторая копия игры дала 0.95×.
+# Сторож поднимает голос, когда машина ЗАГРУЖЕНА по-настоящему, а это и был тот
+# случай, ради которого он заведён: редактор с запущенной из него игрой давали
+# втрое. Если надо узнать, КТО именно мешает, это смотрят снаружи:
+#   Get-CimInstance Win32_Process -Filter "Name like '%Godot%'"
+# Сколько эта работа занимает на свободной машине. Замерено 2026-08-13, когда
+# ни редактор, ни игра не были запущены. Число привязано к машине: на другой
+# его надо перемерить, иначе сторож будет врать в обе стороны.
+const LOAD_REFERENCE_USEC: float = 8300.0
+const LOAD_ALARM: float = 1.4
+
+func _load_factor() -> float:
+	var t0 := Time.get_ticks_usec()
+	var acc := 0.0
+	for i in range(200000):
+		acc += sqrt(float(i) + 1.0)
+	var took: float = float(Time.get_ticks_usec() - t0)
+	# Ссылку на `acc` оставляем: без неё цикл может показаться ненужным.
+	if acc < 0.0:
+		return 0.0
+	return took / LOAD_REFERENCE_USEC
+
+
 func _selftest() -> void:
+	var load: float = _load_factor()
+	if load > LOAD_ALARM:
+		print("НАГРУЗКА ", snappedf(load, 0.01), "× — ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ.",
+			" Машина занята чем-то ещё (редактор Godot? запущенная игра?)")
+	else:
+		print("Нагрузка машины: ", snappedf(load, 0.01), "× — замерам можно верить")
+
 	var start: int = grid.cell_at(Vector3(0, 6, 0))
 	# Меряем полный отклик на клик: изменение мира плюс пересборка кусков.
 	var t0 := Time.get_ticks_usec()

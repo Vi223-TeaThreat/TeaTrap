@@ -172,10 +172,6 @@ const ITEMS := {
 }
 
 
-static func is_surface(id: String) -> bool:
-	return kind_of(id) == "surface"
-
-
 static func tier_info(tier: int) -> Dictionary:
 	for t in TIERS:
 		if int(t["key"]) == tier:

@@ -279,19 +279,9 @@ func faces_of(index: int) -> Array:
 	return cell(index)["faces"]
 
 
-func is_valid(index: int) -> bool:
-	return cell(index)["valid"]
-
-
 # Может ли у семени вообще быть ячейка — без вырезания.
 func in_play(index: int) -> bool:
 	return index >= 0 and index < _play.size() and _play[index] == 1
-
-
-# Вырезали ли уже эту ячейку. Спрашивать, чтобы случайно не заставить её
-# вырезаться там, где нужно лишь прибраться за прежней геометрией.
-func is_built(index: int) -> bool:
-	return index >= 0 and index < cells.size() and cells[index] != null
 
 
 func built_count() -> int:
@@ -1111,19 +1101,3 @@ func neighbors_of(index: int) -> Array:
 	for f in faces_of(index):
 		out.append(f["nb"])
 	return out
-
-
-# Считаем только по уже вырезанным — иначе запрос статистики построит весь мир.
-func face_histogram() -> Dictionary:
-	var h: Dictionary = {}
-	for c in cells:
-		if c == null or not c["valid"]:
-			continue
-		var n: int = c["faces"].size()
-		h[n] = int(h.get(n, 0)) + 1
-	var keys := h.keys()
-	keys.sort()
-	var sorted_h: Dictionary = {}
-	for k in keys:
-		sorted_h[k] = h[k]
-	return sorted_h

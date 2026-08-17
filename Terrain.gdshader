@@ -50,11 +50,6 @@ varying vec3 w_pos;
 varying vec3 w_nrm;
 
 
-float hash11(float n) {
-	return fract(sin(n) * 43758.5453123);
-}
-
-
 float hash13(vec3 p) {
 	p = fract(p * vec3(0.1031, 0.1030, 0.0973));
 	p += dot(p, p.yxz + 33.33);
