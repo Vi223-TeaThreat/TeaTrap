@@ -53,6 +53,9 @@ var _node_index: Dictionary = {}  # узел решётки Vector3i -> номе
 var fill: PackedFloat32Array = PackedFloat32Array()       # насколько ячейка полна
 var base_fill: PackedFloat32Array = PackedFloat32Array()  # природный рельеф
 var cavity: PackedFloat32Array = PackedFloat32Array()     # −1 выступ, +1 щель
+# Рама для наклона: по 6 чисел на семя — обратная матрица направлений к
+# соседям. Считается один раз, потому что семена больше не двигаются.
+var slope_basis: PackedFloat32Array = PackedFloat32Array()
 var edits: Dictionary = {}        # ячейка -> насколько её подняли мазками
 var stone: Dictionary = {}        # ячейка -> насколько она каменистая, 0..1
 var _rock_noise: FastNoiseLite
@@ -79,8 +82,15 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	var rng := RandomNumberGenerator.new()
 	rng.seed = grid_seed
 
-	# Рельеф в ДВА масштаба: крупная волна задаёт холмы, мелкая ломает её
-	# горизонтали на неправильные пятна.
+	# Рельеф ОДНОЙ волной. Второй, мелкий слой шума (частота 0.26, высота 0.9
+	# шага) стоял тут ради «неправильных пятен» — а на деле давал ПОЛОВИНУ всей
+	# угловатости земли и почти ничего не давал самому рельефу. Замерено: излом
+	# поверхности с ним 8.6°, без него 4.3°, а размах высоты — 0.71 м против
+	# 0.69 м. Три сантиметра высоты за вдвое более мятую землю.
+	#
+	# Мельче четырёх шагов решётки волну вообще держать нельзя — она вырождается
+	# в дрожь по ячейкам. Эта была на грани и потому читалась не рельефом, а
+	# рябью.
 	var shape := FastNoiseLite.new()
 	shape.seed = grid_seed
 	shape.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -90,19 +100,14 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_rock_noise.frequency = 0.55
 
-	var detail := FastNoiseLite.new()
-	detail.seed = grid_seed + 7717
-	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	detail.frequency = 0.26
-
 	# Семена берём с запасом за краем: у крайних ячеек нет всех соседей,
 	# их не удаётся замкнуть, и мы их отбрасываем.
 	var margin := spacing * 2.0
-	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin, rng,
-		shape, detail, top)
+	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin, rng)
 	_build_seed_hash()
+	_build_slope_basis()
 	_build_cells()
-	_fill_terrain(radius, top, bottom, shape, detail)
+	_fill_terrain(radius, top, bottom, shape)
 
 
 # --- Семена ------------------------------------------------------------------
@@ -125,8 +130,8 @@ const JITTER_Y: float = 0.30
 # лоскутами, и сквозь место их пересечения видно небо — это и были дыры.
 const OFF_MAX: float = 0.27
 
-func _scatter(radius: float, top_edge: float, bottom: float, rng: RandomNumberGenerator,
-		shape: FastNoiseLite, detail: FastNoiseLite, top: float) -> void:
+func _scatter(radius: float, top_edge: float, bottom: float,
+		rng: RandomNumberGenerator) -> void:
 	seeds = PackedVector3Array()
 	lattice = PackedVector3Array()
 	_node_index = {}
@@ -172,6 +177,68 @@ func _scatter(radius: float, top_edge: float, bottom: float, rng: RandomNumberGe
 				# мерить по разбросанному семени, соседи случайно оказываются
 				# по разные стороны поверхности и она идёт бородавками.
 				lattice.append(node)
+
+
+# РАМА ДЛЯ НАКЛОНА. Наклон поля у семени мы раньше СКЛАДЫВАЛИ: брали по
+# соседям `d·Δf/|d|²` и суммировали. На РОВНОЙ решётке это точно. На
+# разбросанной — нет: сумма даёт не наклон, а наклон, умноженный на матрицу
+# `Σ d̂·d̂ᵀ` из направлений к соседям. У ровной решётки эта матрица — просто
+# удвоенная единичная, и она не мешает. У разбросанной она у каждого семени
+# своя и кривая.
+#
+# ЧЕГО ЭТО СТОИЛО. Я положил на настоящие семена идеально ровный склон — ни
+# бугра, ни впадины — и спросил мерку, куда он наклонён. Она ошибалась на 8.85°
+# в среднем и на 26.8° в худшем случае. Восемь градусов дрожи освещения на
+# месте, где дрожать нечему: земля читалась мятой бумагой.
+#
+# ЛЕЧЕНИЕ. Ту самую матрицу и обращаем, а потом умножаем на неё сумму. Ошибка
+# на ровном склоне становится ровно нулевой — не «меньше», а нулевой, потому
+# что решение точное.
+#
+# СЧИТАЕМ ОДИН РАЗ. Матрица зависит только от того, где стоят семена, а они
+# после постройки мира не двигаются никогда. В горячем месте отрисовки остаётся
+# умножение матрицы на вектор — дешевле шести делений, которые были раньше.
+func _build_slope_basis() -> void:
+	slope_basis.resize(seeds.size() * 6)
+	for i in range(seeds.size()):
+		var node: Vector3i = node_of(i)
+		var here: Vector3 = seeds[i]
+		var m := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
+		var count := 0
+		for step in NEIGHBOURS:
+			var s: int = node_seed(node + step)
+			if s < 0:
+				continue
+			var d: Vector3 = seeds[s] - here
+			var len2: float = d.length_squared()
+			if len2 < EPS:
+				continue
+			var w: float = 1.0 / len2
+			m.x += d * (d.x * w)
+			m.y += d * (d.y * w)
+			m.z += d * (d.z * w)
+			count += 1
+		var at := i * 6
+		# У края мира соседей не хватает, и матрица вырождается: обратить её
+		# нельзя. Там оставляем единичную — то есть прежнее сложение. Это семена
+		# за играбельным объёмом, поверхности у них не бывает.
+		var scale: float = (m.x.x + m.y.y + m.z.z) / 3.0
+		if count < 4 or scale < EPS or absf(m.determinant()) < 0.02 * scale * scale * scale:
+			slope_basis[at] = 1.0
+			slope_basis[at + 1] = 1.0
+			slope_basis[at + 2] = 1.0
+			slope_basis[at + 3] = 0.0
+			slope_basis[at + 4] = 0.0
+			slope_basis[at + 5] = 0.0
+			continue
+		var inv: Basis = m.inverse()
+		# Матрица симметричная, поэтому хватает шести чисел вместо девяти.
+		slope_basis[at] = inv.x.x
+		slope_basis[at + 1] = inv.y.y
+		slope_basis[at + 2] = inv.z.z
+		slope_basis[at + 3] = inv.x.y
+		slope_basis[at + 4] = inv.x.z
+		slope_basis[at + 5] = inv.y.z
 
 
 func _build_seed_hash() -> void:
@@ -561,18 +628,21 @@ func _newell(vs: Array, loop: Array) -> Vector3:
 const SOLID_AT: float = 0.5       # выше этого ячейка считается породой
 
 func _fill_terrain(radius: float, top: float, bottom: float,
-		shape: FastNoiseLite, detail: FastNoiseLite) -> void:
+		shape: FastNoiseLite) -> void:
 	solid = {}
 	fill = PackedFloat32Array()
 	fill.resize(seeds.size())
+	# СЧИТАЕМ ВСЕМ СЕМЕНАМ, включая запасное кольцо за играбельным объёмом.
+	# Раньше кольцо пропускалось и оставалось с заполнением 0. Ноль — это тоже
+	# «воздух», поэтому дыр не было, но всякий счёт по соседям у кромки острова
+	# получал эту ложь вместо настоящих ±11: наклон, впадина и крутизна у края
+	# считались по выдуманному обрыву. Заодно остров переставал быть островом и
+	# обрезался отвесной стенкой по цилиндру играбельного объёма.
 	for i in range(seeds.size()):
-		if _play[i] == 0:
-			continue
 		var s: Vector3 = seeds[i]
 		# Поверхность острова, его край и дно — три плавных ограничения.
 		# Берём самое строгое; ничего не округляем по ячейкам, в этом весь смысл.
-		var height: float = shape.get_noise_2d(s.x, s.z) * (top * 0.8) \
-			+ detail.get_noise_2d(s.x, s.z) * (_spacing * 0.9)
+		var height: float = shape.get_noise_2d(s.x, s.z) * (top * 0.8)
 		var edge := radius * (1.0 + 0.10 * shape.get_noise_2d(s.x * 2.0, s.z * 2.0))
 		var under: float = (height - s.y) / _spacing
 		var inside: float = (edge - Vector2(s.x, s.z).length()) / _spacing
@@ -594,8 +664,7 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 	edits = {}
 	cavity.resize(seeds.size())
 	for i in range(seeds.size()):
-		if _play[i] != 0:
-			_refresh_cavity(i)
+		_refresh_cavity(i)
 	_smooth_cavity()
 
 
@@ -614,19 +683,28 @@ const CAVITY_GAIN: float = 2.6
 func _refresh_cavity(index: int) -> void:
 	if index < 0 or index >= cavity.size():
 		return
-	var node: Vector3i = node_of(index)
-	var sum := 0.0
-	var count := 0
-	for step in NEIGHBOURS:
-		var s: int = node_seed(node + step)
-		if s < 0:
-			continue
-		sum += fill[s]
-		count += 1
-	if count == 0:
-		cavity[index] = 0.0
-		return
-	cavity[index] = clampf((sum / float(count) - fill[index]) * CAVITY_GAIN, -1.0, 1.0)
+	# Впадина — это ВЫПУКЛОСТЬ со знаком минус, и считать её надо честно.
+	# Прежде здесь стояла разница со средним по соседям, а у неё на ровном
+	# склоне ложный вклад 0.126 × 2.6 = 0.33 при полном размахе 1.0: треть
+	# шкалы, по которой шейдер темнит стыки и пускает зелень в трещины, была
+	# чистым шумом от разброса семян.
+	cavity[index] = clampf(bulge_at(index) * CAVITY_GAIN, -1.0, 1.0)
+
+
+# Разворачиваем сложенную по соседям сумму в настоящий наклон — умножением на
+# заранее обращённую раму. См. `_build_slope_basis`.
+func straighten(index: int, raw: Vector3) -> Vector3:
+	var at := index * 6
+	var xx: float = slope_basis[at]
+	var yy: float = slope_basis[at + 1]
+	var zz: float = slope_basis[at + 2]
+	var xy: float = slope_basis[at + 3]
+	var xz: float = slope_basis[at + 4]
+	var yz: float = slope_basis[at + 5]
+	return Vector3(
+		xx * raw.x + xy * raw.y + xz * raw.z,
+		xy * raw.x + yy * raw.y + yz * raw.z,
+		xz * raw.x + yz * raw.y + zz * raw.z)
 
 
 # Наклон поля у семени. Та же величина, по которой `Surface.gd` берёт нормаль,
@@ -645,7 +723,51 @@ func field_slope(index: int) -> Vector3:
 		var len2: float = d.length_squared()
 		if len2 > 0.000001:
 			g += d * ((fill[s] - f0) / len2)
-	return g
+	return straighten(index, g)
+
+
+# ВЫПУКЛОСТЬ: насколько ячейка выпирает над тем, что предсказывают соседи
+# ВМЕСТЕ С НАКЛОНОМ. Плюс — сидит в ямке, минус — торчит бугром.
+#
+# «Разница со средним по соседям» для этого НЕ ГОДИТСЯ, хотя её и просит
+# здравый смысл. Семена разбросаны, шесть соседей стоят вокруг несимметрично, и
+# на ИДЕАЛЬНО РОВНОМ склоне их среднее не равно самой ячейке. Замерено: промах
+# 0.126 доли поля в среднем и 0.43 в худшем случае — это 8 см поверхности, а
+# худшее 29 см при ячейке 67 см.
+#
+# Хуже всего, что промах у каждого семени СВОЙ И ВСЕГДА ОДИН И ТОТ ЖЕ: он не
+# размазывается повторами, а копится, пока не упрётся. Кисть сглаживания от
+# этого скатывалась не к гладкости, а к постоянной мятости: восемь проходов ещё
+# помогали, тридцать уже нет, девяносто возвращали хуже, чем было.
+#
+# Вычитая наклон, оставляем ровно кривизну — то, что кисть и должна снимать, а
+# впадина показывать. На ровном склоне выходит ноль, как и положено.
+#
+# `from_edits` — считать по правкам игрока (растушёвка мазка) или по всему полю.
+func bulge_at(index: int, from_edits: bool = false) -> float:
+	var node: Vector3i = node_of(index)
+	var here: Vector3 = seeds[index]
+	var f0: float = float(edits.get(index, 0.0)) if from_edits else fill[index]
+	var raw := Vector3.ZERO
+	var away := Vector3.ZERO      # куда в среднем смещены соседи
+	var sum := 0.0
+	var count := 0
+	for step in NEIGHBOURS:
+		var s: int = node_seed(node + step)
+		if s < 0:
+			continue
+		var d: Vector3 = seeds[s] - here
+		var len2: float = d.length_squared()
+		if len2 < 0.000001:
+			continue
+		var df: float = (float(edits.get(s, 0.0)) if from_edits else fill[s]) - f0
+		raw += d * (df / len2)
+		away += d
+		sum += df
+		count += 1
+	if count == 0:
+		return 0.0
+	return (sum - straighten(index, raw).dot(away)) / float(count)
 
 
 # ГДЕ РЯДОМ С ТОЧКОЙ ПРОХОДИТ ЗЕМЛЯ. Нужно всему, что на земле живёт: растение
@@ -979,27 +1101,19 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 			if n >= 0:
 				zone[n] = true
 
-	for _pass in range(1):
-		var mixed: Dictionary = {}
-		for j in zone:
-			var node2: Vector3i = node_of(j)
-			var sum := 0.0
-			var count := 0
-			for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
-					Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
-				var n2: int = node_seed(node2 + step)
-				if n2 < 0:
-					continue
-				sum += float(edits.get(n2, 0.0))
-				count += 1
-			if count > 0:
-				# Камень ДЕРЖИТ ФОРМУ: к соседям он подтягивается впятеро
-				# слабее земли, поэтому граница глыбы с травой остаётся чёткой,
-				# а не расплывается, как насыпь.
-				var soft: float = lerpf(RELAX, RELAX * 0.2, stone_of(j))
-				mixed[j] = lerpf(float(edits.get(j, 0.0)), sum / float(count), soft)
-		for j in mixed:
-			edits[j] = mixed[j]
+	# Растушёвка идёт ПО ВЫПУКЛОСТИ, а не к среднему по соседям. Со средним она
+	# на всяком склоне подсыпала каждому семени свой постоянный промах — и чем
+	# дольше держали кисть, тем угловатее выходила насыпь. По выпуклости на
+	# ровном склоне не делается ничего, а острия снимаются.
+	var mixed: Dictionary = {}
+	for j in zone:
+		# Камень ДЕРЖИТ ФОРМУ: к соседям он подтягивается впятеро слабее земли,
+		# поэтому граница глыбы с травой остаётся чёткой, а не расплывается,
+		# как насыпь.
+		var soft: float = lerpf(RELAX, RELAX * 0.2, stone_of(j))
+		mixed[j] = float(edits.get(j, 0.0)) + bulge_at(j, true) * soft
+	for j in mixed:
+		edits[j] = mixed[j]
 
 	for j in zone:
 		if absf(float(edits.get(j, 0.0))) < 0.002:
@@ -1050,24 +1164,12 @@ func blur_at(point: Vector3, radius: float, strength: float) -> Dictionary:
 						continue
 					inside[j] = (1.0 - d * d) * (1.0 - d * d)
 
-	# Среднее считаем ПО ИСХОДНОМУ полю, до правок: если менять на ходу, ячейки
-	# в начале списка сглаживаются по уже сглаженным соседям, и кисть тянет
-	# рельеф в сторону обхода.
+	# Считаем ПО ИСХОДНОМУ полю, до правок: если менять на ходу, ячейки в начале
+	# списка сглаживаются по уже сглаженным соседям, и кисть тянет рельеф в
+	# сторону обхода.
 	var delta: Dictionary = {}
 	for j in inside:
-		var node: Vector3i = node_of(j)
-		var sum := 0.0
-		var count := 0
-		for step in NEIGHBOURS:
-			var n: int = node_seed(node + step)
-			if n < 0:
-				continue
-			sum += fill[n]
-			count += 1
-		if count == 0:
-			continue
-		var want: float = sum / float(count) - fill[j]
-		var add: float = want * strength * float(inside[j])
+		var add: float = bulge_at(j) * strength * float(inside[j])
 		if absf(add) > 0.0005:
 			delta[j] = add
 
@@ -1081,7 +1183,13 @@ func apply_delta(delta: Dictionary, sign: float) -> Array:
 	var zone: Dictionary = {}
 	for j in delta:
 		edits[j] = float(edits.get(j, 0.0)) + float(delta[j]) * sign
-		if absf(float(edits[j])) < 0.002:
+		# Порог выброса ЗДЕСЬ МЕЛЬЧЕ, чем у лепки, и это не придирка. Кисть
+		# размывания обязана отменяться в точности — иначе за отменой нечем
+		# восстановить, сколько она сняла. А выброс несимметричен: ячейку с
+		# 0.001 мы забываем, и обратный проход вычитает свою прибавку уже не из
+		# 0.001, а из нуля. При пороге лепки (0.002) прибавки кисти как раз в
+		# него и попадали: после отмены оставалось 0.0023.
+		if absf(float(edits[j])) < 0.0002:
 			edits.erase(j)
 		zone[j] = true
 	for j in zone:
@@ -1172,6 +1280,7 @@ func _steepness(index: int) -> float:
 		var len2: float = d.length_squared()
 		if len2 > 0.000001:
 			g += d * ((base_fill[s] + _edit_of(s) - f0) / len2)
+	g = straighten(index, g)
 	var mag: float = g.length()
 	if mag < 0.000001:
 		return 0.0

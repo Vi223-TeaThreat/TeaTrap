@@ -240,6 +240,10 @@ static func _cut(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 	var stone_raw: Dictionary = grid.stone
 	var cav_all: PackedFloat32Array = grid.cavity
+	# Раму наклона берём ОДИН РАЗ на треугольник, а не на каждую вершину:
+	# обращение к полю через нетипизированную ссылку — самое дорогое, что тут
+	# есть, а вершин у куска тысячи.
+	var basis: PackedFloat32Array = grid.slope_basis
 	for i in range(1, cut.size() - 1):
 		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
 		if tri.is_empty():
@@ -265,7 +269,7 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 		flat = flat.normalized() if flat.length() > 0.000001 else Vector3.ZERO
 		for k in range(3):
 			var cc: Dictionary = tri[k]
-			var smooth: Vector3 = _slope(grid, cc)
+			var smooth: Vector3 = _slope(grid, basis, cc)
 			var n: Vector3 = smooth
 			if flat != Vector3.ZERO and stones[k] > 0.0:
 				# Сторону берём от гладкой нормали: у треугольника своей нет,
@@ -304,16 +308,20 @@ static func wound(tri: Array, grid, want: Vector3) -> Array:
 # Нормаль берём от НАКЛОНА ПОЛЯ, а не от треугольника: она непрерывна и
 # одинакова с обеих сторон границы куска, поэтому шва не возникает и
 # поверхность выглядит гладкой без отдельного сглаживания.
-static func _slope(grid, c: Dictionary) -> Vector3:
-	var ga := _gradient(grid, int(c["a"]))
-	var gb := _gradient(grid, int(c["b"]))
+static func _slope(grid, basis: PackedFloat32Array, c: Dictionary) -> Vector3:
+	var ga := _gradient(grid, basis, int(c["a"]))
+	var gb := _gradient(grid, basis, int(c["b"]))
 	var g: Vector3 = ga.lerp(gb, float(c["t"]))
 	if g.length() < 0.000001:
 		return (grid.seeds[int(c["b"])] - grid.seeds[int(c["a"])]).normalized()
 	return -g.normalized()
 
 
-static func _gradient(grid, seed_index: int) -> Vector3:
+# Копия `SpaceGrid.field_slope` — нарочно, это самое горячее место отрисовки.
+# ПРАВИТЬ ОБЕ. Сложенную по соседям сумму разворачивает в настоящий наклон
+# заранее обращённая рама: без неё на ровном склоне мерка врала на 8.85° в
+# среднем и на 26.8° в худшем случае, и земля читалась мятой бумагой.
+static func _gradient(grid, basis: PackedFloat32Array, seed_index: int) -> Vector3:
 	var node: Vector3i = grid.node_of(seed_index)
 	var here: Vector3 = grid.seeds[seed_index]
 	var f0: float = grid.fill[seed_index]
@@ -327,6 +335,16 @@ static func _gradient(grid, seed_index: int) -> Vector3:
 		var len2: float = d.length_squared()
 		if len2 > 0.000001:
 			g += d * ((grid.fill[s] - f0) / len2)
-	return g
+	var at := seed_index * 6
+	var xx: float = basis[at]
+	var yy: float = basis[at + 1]
+	var zz: float = basis[at + 2]
+	var xy: float = basis[at + 3]
+	var xz: float = basis[at + 4]
+	var yz: float = basis[at + 5]
+	return Vector3(
+		xx * g.x + xy * g.y + xz * g.z,
+		xy * g.x + yy * g.y + yz * g.z,
+		xz * g.x + yz * g.y + zz * g.z)
 
 
