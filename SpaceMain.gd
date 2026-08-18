@@ -432,14 +432,40 @@ func _rebuild_chunk(chunk: Vector3i) -> void:
 # Постановка — это ЛЕПКА. Один мазок прибавляет земли понемногу, форма
 # набирается несколькими; поверхность идёт по уровню половинного заполнения,
 # поэтому прибавка выходит плавным наплывом, а не глыбой с углами.
-const STROKE: float = 0.75        # сколько добавляет один мазок
+const STROKE: float = 0.75        # сколько добавляет один мазок узкой кистью
+
+
+# СИЛА МАЗКА ОБРАТНА ШИРИНЕ КИСТИ. Широкая кисть за один мазок и так трогает
+# в восемь раз больше земли; прибавляй она при этом столько же по высоте,
+# середина упиралась бы в предел правок за те же полсекунды, что и узкая, — а
+# у предела насыпь набирает угловатость. Замерено на широкой кисти при 140
+# мазках в одно место: полная сила — излом 10.2°, шесть десятых — 8.5°,
+# четыре десятых — 7.3°.
+#
+# Считаем от узкой кисти: ей достаётся полная сила, широким — тем меньше, чем
+# они шире. Узкая осталась ровно такой, какой была.
+func _stroke_amount() -> float:
+	return STROKE * (CELL_SPACING * 2.4) / _brush_radius()
 # Насколько один проход кисти размывания подтягивает ячейку к соседям. Держим
 # небольшим: размывание должно набираться повторами, как и лепка, — иначе один
 # щелчок слизывает форму начисто и вернуть её можно только отменой.
 const BLUR: float = 0.34
 
+# ШИРИНА КИСТИ СЧИТАЕТСЯ В ЯЧЕЙКАХ, и это главное число во всей лепке.
+#
+# Было 1.35 / 1.9 / 2.45 ячейки. Любая форма такой кистью выходит шириной в
+# пять граней — многогранник по построению, и никакое сглаживание этого не
+# исправит: сглаживать нечего, поле-то гладкое. Замерено на одном и том же
+# холме: 2.45 ячейки — излом 19.9°, 3.9 — 9.9°, 4.9 — 7.3°, 6.1 — 5.6°
+# (нетронутая земля 3.9°).
+#
+# Набор РАСТЯНУТ, а не сдвинут: узкая кисть осталась быстрой, для мелочей, а
+# широкая стала настоящей широкой. Цена мазка растёт почти как куб радиуса,
+# поэтому платить за неё должен тот, кто сам выбрал широкую.
+#
+# 2.4 / 3.65 / 4.9 ячейки.
 func _brush_radius() -> float:
-	return CELL_SPACING * (0.8 + 0.55 * float(brush))
+	return CELL_SPACING * (1.15 + 1.25 * float(brush))
 
 
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
@@ -470,13 +496,13 @@ func _after_field_change(touched: Array) -> void:
 func _place(cell: int, material: String = "ground", record: bool = true) -> void:
 	if cell < 0 or not grid.in_play(cell):
 		return
-	_dab(grid.seeds[cell], STROKE, material, record)
+	_dab(grid.seeds[cell], _stroke_amount(), material, record)
 
 
 func _remove(cell: int, record: bool = true) -> void:
 	if cell < 0 or not grid.in_play(cell):
 		return
-	_dab(grid.seeds[cell], -STROKE, "", record)
+	_dab(grid.seeds[cell], -_stroke_amount(), "", record)
 
 
 # Один мазок в точке: и постановка, и снятие, и отмена ходят через него.
@@ -515,12 +541,12 @@ func _stone_push(amount: float, material: String) -> float:
 # Мазок ложится ровно туда, куда наведён курсор.
 func _paint(pick: Dictionary, material: String) -> void:
 	if pick.has("pos"):
-		_dab(pick["pos"], STROKE, material)
+		_dab(pick["pos"], _stroke_amount(), material)
 
 
 func _erase(pick: Dictionary) -> void:
 	if pick.has("pos"):
-		_dab(pick["pos"], -STROKE, "")
+		_dab(pick["pos"], -_stroke_amount(), "")
 
 
 # Отменяем ВСЁ ОДНО ПРОВЕДЕНИЕ кистью, а не последний мазок. Пока кнопка
@@ -630,7 +656,9 @@ func _update_frame() -> void:
 	# Точка прицела ходит непрерывно, поэтому её передаём каждый кадр, а вот
 	# накладку по форме земли пересобираем только при смене ячейки — иначе
 	# считали бы её по шестьдесят раз в секунду впустую.
-	var rad: float = CELL_SPACING * (0.75 + 0.55 * float(brush))
+	# Подсветка чуть уже самого мазка — чтобы контур не заезжал за то, что
+	# кисть на самом деле тронет. Ходит вместе с шириной кисти.
+	var rad: float = _brush_radius() * 0.94
 	frame_mat.set_shader_parameter("spot", pick["pos"])
 	frame_mat.set_shader_parameter("reach", rad)
 	frame_mat.set_shader_parameter("tone", DIG_TONE)
@@ -641,7 +669,9 @@ func _update_frame() -> void:
 		return
 	frame_id = id
 	var node: Vector3i = grid.node_of(target)
-	var span := 1 + brush
+	# Накладка должна вмещать весь круг подсветки, иначе контур обрезается
+	# квадратом. Считаем от настоящего радиуса, а не от номера кисти.
+	var span := int(ceil(_brush_radius() / CELL_SPACING)) + 1
 	var edge := Vector3i(span, span, span)
 	frame_node.mesh = SurfaceScript.build(grid, node - edge, node + edge)
 	if frame_node.mesh == null:
@@ -972,6 +1002,18 @@ func _setup_hint() -> void:
 const HOLD_FIRST: float = 0.22
 const HOLD_STEP: float = 0.07
 
+
+# ЧЕМ ШИРЕ КИСТЬ, ТЕМ РЕЖЕ ПОВТОР. Цена мазка растёт почти как куб радиуса:
+# узкая стоит 5.9 мс, широкая — 36.6. Повторяй широкая четырнадцать раз в
+# секунду, как узкая, — половину времени игра проводила бы в лепке, и камера
+# начала бы дёргаться. Реже она и не нужна: за один мазок широкая трогает
+# земли в восемь раз больше.
+#
+# Считаем от узкой: ей прежние 0.07 с, широким — во столько раз реже, во
+# сколько они шире.
+func _hold_step() -> float:
+	return HOLD_STEP * _brush_radius() / (CELL_SPACING * 2.4)
+
 var held: bool = false
 var held_erase: bool = false
 var _hold_wait: float = 0.0
@@ -1013,7 +1055,7 @@ func _hold_tick(delta: float) -> void:
 	_hold_wait -= delta
 	if _hold_wait > 0.0:
 		return
-	_hold_wait = HOLD_STEP
+	_hold_wait = _hold_step()
 	_apply_at(get_viewport().get_mouse_position(), held_erase)
 
 
@@ -1195,7 +1237,7 @@ func _selftest() -> void:
 		var warm := 0.0
 		for pass_i in range(2):
 			var t_brush := Time.get_ticks_usec()
-			_dab(grid.seeds[grid.cell_at(Vector3(0, 6, 0))], STROKE, "ground")
+			_dab(grid.seeds[grid.cell_at(Vector3(0, 6, 0))], _stroke_amount(), "ground")
 			_flush_chunks()
 			var ms := (Time.get_ticks_usec() - t_brush) / 1000.0
 			if pass_i == 0:
@@ -1325,7 +1367,7 @@ func _blur_report() -> void:
 	brush = 3
 	# Сначала лепим уступ: ровное место размывать бессмысленно, там и так гладко.
 	for _i in range(3):
-		_dab(at, STROKE, "ground")
+		_dab(at, _stroke_amount(), "ground")
 	_flush_chunks()
 
 	var near: Array = grid.seeds_near(at, CELL_SPACING * 2.5)
@@ -1335,7 +1377,7 @@ func _blur_report() -> void:
 	var rough_before: float = _roughness(near)
 
 	var t0 := Time.get_ticks_usec()
-	_dab(at, STROKE, "smooth")
+	_dab(at, _stroke_amount(), "smooth")
 	_flush_chunks()
 	var ms := (Time.get_ticks_usec() - t0) / 1000.0
 	var rough_after: float = _roughness(near)
@@ -1390,7 +1432,7 @@ func _stone_report() -> void:
 		before_stone[c] = float(grid.stone.get(c, 0.0))
 
 	for _i in range(3):
-		_dab(at, STROKE, "cliff")
+		_dab(at, _stroke_amount(), "cliff")
 	_flush_chunks()
 
 	var stone_max := 0.0
@@ -1475,8 +1517,8 @@ func _seed_structures() -> void:
 					break
 				head = grid.seeds[up_cell]
 				for _again in range(3):
-					_stroke(head, _brush_radius(), STROKE, kind,
-						_stone_push(STROKE, kind))
+					_stroke(head, _brush_radius(), _stroke_amount(), kind,
+						_stone_push(_stroke_amount(), kind))
 		if kind == "cliff":
 			_cliff_focus = s + Vector3(0, CELL_SPACING * 1.2, 0)
 		placed += 1

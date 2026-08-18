@@ -53,6 +53,11 @@ var _node_index: Dictionary = {}  # узел решётки Vector3i -> номе
 var fill: PackedFloat32Array = PackedFloat32Array()       # насколько ячейка полна
 var base_fill: PackedFloat32Array = PackedFloat32Array()  # природный рельеф
 var cavity: PackedFloat32Array = PackedFloat32Array()     # −1 выступ, +1 щель
+# ПОЛЕ ДЛЯ СВЕТА — то же заполнение, но с разглаженной кривизной. Нормаль
+# берётся ОТСЮДА, а сама поверхность режется по `fill`: форма не двигается, а
+# свет по ней течёт мягче. Свет читается раньше силуэта, и это самая дешёвая
+# правка из возможных — считается тем же проходом, что и впадина.
+var fill_soft: PackedFloat32Array = PackedFloat32Array()
 # Рама для наклона: по 6 чисел на семя — обратная матрица направлений к
 # соседям. Считается один раз, потому что семена больше не двигаются.
 var slope_basis: PackedFloat32Array = PackedFloat32Array()
@@ -677,6 +682,7 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 	base_fill = fill.duplicate()
 	edits = {}
 	cavity.resize(seeds.size())
+	fill_soft.resize(seeds.size())
 	for i in range(seeds.size()):
 		_refresh_cavity(i)
 	_smooth_cavity()
@@ -694,6 +700,11 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 # умножалась на ноль.
 const CAVITY_GAIN: float = 2.6
 
+# Насколько поле для света отходит от настоящего. Единица — вся кривизна снята
+# начисто; тогда свет на вылепленном холме успокаивается сильнее всего, а форму
+# это не трогает вовсе, потому что режется поверхность по-прежнему по `fill`.
+const SHADE_SOFT: float = 1.0
+
 func _refresh_cavity(index: int) -> void:
 	if index < 0 or index >= cavity.size():
 		return
@@ -702,7 +713,12 @@ func _refresh_cavity(index: int) -> void:
 	# склоне ложный вклад 0.126 × 2.6 = 0.33 при полном размахе 1.0: треть
 	# шкалы, по которой шейдер темнит стыки и пускает зелень в трещины, была
 	# чистым шумом от разброса семян.
-	cavity[index] = clampf(bulge_at(index) * CAVITY_GAIN, -1.0, 1.0)
+	#
+	# Выпуклость считаем ОДИН раз на два дела: по ней же разглаживается поле
+	# для света. Второй проход стоил бы ровно столько же, сколько первый.
+	var bulge: float = bulge_at(index)
+	cavity[index] = clampf(bulge * CAVITY_GAIN, -1.0, 1.0)
+	fill_soft[index] = fill[index] + bulge * SHADE_SOFT
 
 
 # Разворачиваем сложенную по соседям сумму в настоящий наклон — умножением на
