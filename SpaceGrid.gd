@@ -56,6 +56,11 @@ var cavity: PackedFloat32Array = PackedFloat32Array()     # −1 выступ, +
 # Рама для наклона: по 6 чисел на семя — обратная матрица направлений к
 # соседям. Считается один раз, потому что семена больше не двигаются.
 var slope_basis: PackedFloat32Array = PackedFloat32Array()
+# ТАБЛИЦА СОСЕДЕЙ: по 6 номеров на семя, −1 если соседа нет. Всё, что считается
+# по округе, ходило за соседом через словарь узлов, а ключ там — Vector3i, и
+# каждое обращение стоит хеширования трёх целых. На один мазок таких обращений
+# десятки тысяч. Соседи не меняются никогда — значит, их место в массиве.
+var nb_table: PackedInt32Array = PackedInt32Array()
 var edits: Dictionary = {}        # ячейка -> насколько её подняли мазками
 var stone: Dictionary = {}        # ячейка -> насколько она каменистая, 0..1
 var _rock_noise: FastNoiseLite
@@ -105,6 +110,7 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	var margin := spacing * 2.0
 	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin, rng)
 	_build_seed_hash()
+	_build_neighbours()
 	_build_slope_basis()
 	_build_cells()
 	_fill_terrain(radius, top, bottom, shape)
@@ -179,6 +185,15 @@ func _scatter(radius: float, top_edge: float, bottom: float,
 				lattice.append(node)
 
 
+# Соседи раз и навсегда — см. `nb_table`.
+func _build_neighbours() -> void:
+	nb_table.resize(seeds.size() * 6)
+	for i in range(seeds.size()):
+		var node: Vector3i = node_of(i)
+		for k in range(6):
+			nb_table[i * 6 + k] = int(_node_index.get(node + NEIGHBOURS[k], -1))
+
+
 # РАМА ДЛЯ НАКЛОНА. Наклон поля у семени мы раньше СКЛАДЫВАЛИ: брали по
 # соседям `d·Δf/|d|²` и суммировали. На РОВНОЙ решётке это точно. На
 # разбросанной — нет: сумма даёт не наклон, а наклон, умноженный на матрицу
@@ -201,12 +216,11 @@ func _scatter(radius: float, top_edge: float, bottom: float,
 func _build_slope_basis() -> void:
 	slope_basis.resize(seeds.size() * 6)
 	for i in range(seeds.size()):
-		var node: Vector3i = node_of(i)
 		var here: Vector3 = seeds[i]
 		var m := Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)
 		var count := 0
-		for step in NEIGHBOURS:
-			var s: int = node_seed(node + step)
+		for k in range(6):
+			var s: int = nb_table[i * 6 + k]
 			if s < 0:
 				continue
 			var d: Vector3 = seeds[s] - here
@@ -711,12 +725,12 @@ func straighten(index: int, raw: Vector3) -> Vector3:
 # — там она посчитана своей копией нарочно: это самое горячее место отрисовки,
 # и вызов через ссылку стоил бы кадра. ПРАВИТЬ ОБЕ.
 func field_slope(index: int) -> Vector3:
-	var node: Vector3i = node_of(index)
 	var here: Vector3 = seeds[index]
 	var f0: float = fill[index]
 	var g := Vector3.ZERO
-	for step in NEIGHBOURS:
-		var s: int = node_seed(node + step)
+	var at := index * 6
+	for k in range(6):
+		var s: int = nb_table[at + k]
 		if s < 0:
 			continue
 		var d: Vector3 = seeds[s] - here
@@ -745,15 +759,15 @@ func field_slope(index: int) -> Vector3:
 #
 # `from_edits` — считать по правкам игрока (растушёвка мазка) или по всему полю.
 func bulge_at(index: int, from_edits: bool = false) -> float:
-	var node: Vector3i = node_of(index)
 	var here: Vector3 = seeds[index]
 	var f0: float = float(edits.get(index, 0.0)) if from_edits else fill[index]
 	var raw := Vector3.ZERO
 	var away := Vector3.ZERO      # куда в среднем смещены соседи
 	var sum := 0.0
 	var count := 0
-	for step in NEIGHBOURS:
-		var s: int = node_seed(node + step)
+	var at := index * 6
+	for k in range(6):
+		var s: int = nb_table[at + k]
 		if s < 0:
 			continue
 		var d: Vector3 = seeds[s] - here
@@ -944,11 +958,10 @@ func _smooth_cavity(cells: Array = []) -> void:
 	soft.resize(which.size())
 	var at := 0
 	for i in which:
-		var node: Vector3i = node_of(i)
 		var sum: float = cavity[i]
 		var count := 1
-		for step in NEIGHBOURS:
-			var s: int = node_seed(node + step)
+		for k in range(6):
+			var s: int = nb_table[i * 6 + k]
 			if s < 0:
 				continue
 			sum += cavity[s]
@@ -1094,10 +1107,8 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 	# диффузия расползалась заметно дальше мазка и подъедала соседние формы.
 	var zone: Dictionary = touched.duplicate()
 	for j in touched:
-		var node: Vector3i = node_of(j)
-		for step in [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
-				Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]:
-			var n: int = node_seed(node + step)
+		for k in range(6):
+			var n: int = nb_table[int(j) * 6 + k]
 			if n >= 0:
 				zone[n] = true
 
@@ -1128,9 +1139,8 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 	# ячейки за её краем не поменяли ни породы, ни вида, только затенение стыка.
 	var seen: Dictionary = zone.duplicate()
 	for j in zone:
-		var node3: Vector3i = node_of(j)
-		for step in NEIGHBOURS:
-			var n3: int = node_seed(node3 + step)
+		for k in range(6):
+			var n3: int = nb_table[int(j) * 6 + k]
 			if n3 >= 0:
 				seen[n3] = true
 	for j in seen:
@@ -1196,9 +1206,8 @@ func apply_delta(delta: Dictionary, sign: float) -> Array:
 		fill[j] = base_fill[j] + _edit_of(j) + _facet(j)
 	var seen: Dictionary = zone.duplicate()
 	for j in zone:
-		var node: Vector3i = node_of(j)
-		for step in NEIGHBOURS:
-			var n: int = node_seed(node + step)
+		for k in range(6):
+			var n: int = nb_table[int(j) * 6 + k]
 			if n >= 0:
 				seen[n] = true
 	for j in seen:
@@ -1268,12 +1277,12 @@ func _facet(index: int) -> float:
 # сама себя — где она задрала склон, наклон становится круче, огранка ещё
 # сильнее, и камень идёт шипами.
 func _steepness(index: int) -> float:
-	var node: Vector3i = node_of(index)
 	var here: Vector3 = seeds[index]
 	var f0: float = base_fill[index] + _edit_of(index)
 	var g := Vector3.ZERO
-	for step in NEIGHBOURS:
-		var s: int = node_seed(node + step)
+	var at := index * 6
+	for k in range(6):
+		var s: int = nb_table[at + k]
 		if s < 0:
 			continue
 		var d: Vector3 = seeds[s] - here
