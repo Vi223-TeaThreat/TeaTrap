@@ -955,8 +955,19 @@ func _neighbours(p: Dictionary, centre: Vector3, up: Vector3, span: float) -> Ar
 		var qs: float = _patch_span(float(q["m"]), float(q["bulk"]))
 		var off: Vector3 = Vector3(q["pos"]) - centre
 		var flat: Vector3 = off - up * off.dot(up)
-		if flat.length() > qs + span:
+		var side_len: float = flat.length()
+		if side_len > qs + span:
 			continue                     # ещё не дорос до нас
+		# СОСЕД ЗА ПЕРЕГИБОМ — НЕ СОСЕД. Поле считается в своей касательной
+		# плоскости, и кочка с другой стороны гребня проецируется в неё близко,
+		# хотя по земле до неё далеко. Сливаясь с такой, кочка тянулась поперёк
+		# перегиба и отрывалась от склона. Две проверки: земля под соседом должна
+		# смотреть примерно туда же, и настоящее расстояние не должно быть много
+		# больше проекции.
+		if Vector3(q["nrm"]).dot(up) < GROUND_TURN:
+			continue
+		if side_len < 0.0001 or off.length() > side_len * 1.6:
+			continue
 		kin_t.append(flat)
 		kin_r.append(qs)
 		# Пухлость у соседа СВОЯ, и её надо знать: поле складывается из чужих
@@ -1101,6 +1112,36 @@ func _child_bulk(parent: float) -> float:
 # Не нашлось земли под ободом — кочки НЕ БУДЕТ вовсе. У пучка можно было
 # обронить отдельную ворсинку, у сплошного тела дыра в ободе — это рваная
 # оболочка. Зато у обрыва мох теперь не свесится: ему просто негде лечь.
+# ГДЕ ЗЕМЛЯ В ЭТУ СТОРОНУ НА ТАКОМ УДАЛЕНИИ. Смещение от середины кочки, либо
+# ноль, если земли там нет.
+#
+# ПРОВЕРКИ ЖЁСТКИЕ, и это главное. `surface_near` ищет землю в полутора ячейках
+# вокруг точки, то есть может вернуть место почти за три метра; прежний допуск
+# пускал внутрь всё, что ближе ДВУХ задуманных радиусов, и с нормалью, отвёрнутой
+# почти на прямой угол. На ровном месте это не мешало, а на изломе склона обод
+# уезжал вдвое дальше своей мерки и заворачивался за перегиб — кочку растягивало
+# в плоское полотнище, торчащее из склона. Ровно это и было видно на кадре.
+#
+# Теперь место должно быть ТАМ, КУДА ЦЕЛИЛИСЬ (четверть допуска на длину) и на
+# СВОЕЙ СТОРОНЕ рельефа (нормаль не круче ~57° к своей).
+const GROUND_LONG: float = 1.25             # насколько дальше цели допустимо
+const GROUND_SHORT: float = 0.55            # ... и насколько ближе
+const GROUND_TURN: float = 0.55             # и как круто может завернуться земля
+const MID_RING: float = 0.58                # где щупаем середину бока
+
+func _ground_at(centre: Vector3, nrm: Vector3, dir: Vector3, want: float) -> Vector3:
+	var on: Dictionary = main.grid.surface_near(centre + dir * want)
+	if on.is_empty():
+		return Vector3.ZERO
+	var off: Vector3 = Vector3(on["pos"]) - centre
+	var d: float = off.length()
+	if d > want * GROUND_LONG or d < want * GROUND_SHORT:
+		return Vector3.ZERO
+	if Vector3(on["nrm"]).dot(nrm) < GROUND_TURN:
+		return Vector3.ZERO
+	return off
+
+
 func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 		bulk: float) -> Dictionary:
 	var centre: Vector3 = spot["pos"]
@@ -1136,6 +1177,9 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 	var reach: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * PATCH_OLD * bulk
 	var rings: int = RING_AT.size()
 	var rim: Array = []
+	var holds := 0
+	var sum_len := 0.0
+	var sum_lift := 0.0
 	for s in range(SECTORS):
 		var a: float = TAU * float(s) / float(SECTORS)
 		# Радиус у каждого сектора свой — отсюда неправильный многоугольник
@@ -1143,29 +1187,49 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 		var wob: float = 0.78 + 0.42 * _hash01(salt + s * 7717)
 		var dir: Vector3 = (side * (cos(a) * creep) + along * sin(a)).normalized()
 		var far: float = reach * wob
-		var pos := Vector3.ZERO
-		var got := false
 		# Не нашлось на полном радиусе — подбираем сектор ближе к середине. Кочка
 		# у кромки выйдет кривобокой, но целой.
-		for k in [1.0, 0.62, 0.3]:
-			var on: Dictionary = main.grid.surface_near(centre + dir * (far * k))
-			if on.is_empty():
-				continue
-			if on["pos"].distance_to(centre) > far * k * 1.9 or on["nrm"].dot(nrm) < 0.2:
-				continue
-			pos = on["pos"]
-			got = true
-			break
-		if not got:
-			return {}
-		# Бугорки на макушке: каждое кольцо каждого сектора чуть выше или ниже
-		# ровного среза. Без них купол гладкий, как надувной, а мховая подушка
-		# сложена из сросшихся холмиков.
+		var off := Vector3.ZERO
+		var used: float = far
+		for k in [1.0, 0.75, 0.5]:
+			off = _ground_at(centre, nrm, dir, far * k)
+			if off != Vector3.ZERO:
+				used = far * k
+				break
+		# СЕРЕДИНУ БОКА ЩУПАЕМ ОТДЕЛЬНО. По одному ободу тело идёт от середины к
+		# краю ПО ХОРДЕ, а хорда на перегибе уходит и в землю, и в воздух: на
+		# гребне кочка выгибалась горбом, в ложбине повисала. Двух точек на луч
+		# хватает, чтобы бок повторил склон.
+		var mid := Vector3.ZERO
+		if off != Vector3.ZERO:
+			mid = _ground_at(centre, nrm, dir, used * MID_RING)
+			if mid == Vector3.ZERO:
+				mid = off * MID_RING
+			holds += 1
+			sum_len += used
+			sum_lift += off.dot(nrm)
 		var lump := PackedFloat32Array()
 		lump.resize(rings)
 		for r in range(rings):
 			lump[r] = 0.90 + 0.20 * _hash01(salt + s * 131 + r * 977)
-		rim.append({"off": pos - centre, "lump": lump})
+		rim.append({"off": off, "mid": mid, "dir": dir, "lump": lump})
+
+	# Ни одного сектора не нашло земли — кочке негде лежать.
+	if holds == 0:
+		return {}
+	# ПРОВАЛИВШИЕСЯ СЕКТОРЫ ДОБИРАЕМ ПО СОСЕДЯМ, а не бросаем кочку целиком: у
+	# сплошного тела дыра в ободе — это рваная оболочка. Берём среднюю длину и
+	# среднюю высоту удавшихся: получается сектор той же мерки, лежащий в общей
+	# плоскости обода, — на глаз он неотличим, а тело остаётся целым.
+	if holds < SECTORS:
+		var len_avg: float = sum_len / float(holds)
+		var lift_avg: float = sum_lift / float(holds)
+		for s in range(SECTORS):
+			if rim[s]["off"] != Vector3.ZERO:
+				continue
+			var patch: Vector3 = Vector3(rim[s]["dir"]) * len_avg + nrm * lift_avg
+			rim[s]["off"] = patch
+			rim[s]["mid"] = patch * MID_RING
 
 	return {
 		"up": nrm, "rim": rim,
@@ -1319,7 +1383,15 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		var ring: Array = []
 		for s in range(SECTORS):
 			var keep: float = cut[s]
-			var o: Vector3 = Vector3(rim[s]["off"]) * (t * k * keep)
+			# Идём от середины к ободу ПО ЗЕМЛЕ, через прощупанную середину бока,
+			# а не по прямой хорде: на перегибе хорда уходит в землю или в воздух.
+			var tt: float = t * k * keep
+			var o: Vector3
+			if tt <= MID_RING:
+				o = Vector3(rim[s]["mid"]) * (tt / MID_RING)
+			else:
+				o = Vector3(rim[s]["mid"]).lerp(Vector3(rim[s]["off"]),
+					(tt - MID_RING) / (1.0 - MID_RING))
 			var oh: float = o.dot(up)
 			var xt: Vector3 = o - up * oh
 			# ПОЛЕ — ЭТО ТОЛЩИНА МХА НАД ЗЕМЛЁЙ, а не высота над серединой кочки.
