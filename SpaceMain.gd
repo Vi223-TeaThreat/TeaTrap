@@ -1211,7 +1211,7 @@ func _selftest() -> void:
 	else:
 		print("Нагрузка машины: ", snappedf(load, 0.01), "× — замерам можно верить")
 
-	var start: int = grid.cell_at(Vector3(0, 6, 0))
+	var start: int = grid.cell_at(_test_spot())
 	# Меряем полный отклик на клик: изменение мира плюс пересборка кусков.
 	var t0 := Time.get_ticks_usec()
 	_place(start)
@@ -1237,7 +1237,7 @@ func _selftest() -> void:
 		var warm := 0.0
 		for pass_i in range(2):
 			var t_brush := Time.get_ticks_usec()
-			_dab(grid.seeds[grid.cell_at(Vector3(0, 6, 0))], _stroke_amount(), "ground")
+			_dab(_test_spot(), _stroke_amount(), "ground")
 			_flush_chunks()
 			var ms := (Time.get_ticks_usec() - t_brush) / 1000.0
 			if pass_i == 0:
@@ -1358,11 +1358,35 @@ func _selftest() -> void:
 	print("Самопроверка: прицел — ", "мимо" if pick.is_empty() else str(pick["hit"]))
 
 
+# МЕСТО ДЛЯ ПРОВЕРОК — НА ЗЕМЛЕ, а не в воздухе над островом.
+#
+# Все проверки лепили в точке (0, 6, 0). Вершина острова — 2.5 м, то есть мазок
+# ложился в пустоту метрах в трёх над землёй. Оттуда и «0 ячеек» у кисти в
+# отчёте: мазок в воздухе не рождает породы, потому что до половинного уровня
+# ему не хватает. И оттуда же огранка камня с верхним пределом ровно ноль:
+# прибавлять породу можно только там, где она уже есть, и в воздухе от неё
+# оставалась одна выемка. Проверка камня ни разу не смотрела на глыбу.
+func _test_spot() -> Vector3:
+	var best := INF
+	var at := Vector3.ZERO
+	for i in range(grid.seeds.size()):
+		if not grid.in_play(i) or absf(grid.fill_of(i) - 0.5) > 0.08:
+			continue
+		var p: Vector3 = grid.seeds[i]
+		if p.y < 0.0:
+			continue
+		var d: float = Vector2(p.x, p.z).length()
+		if d < best:
+			best = d
+			at = p
+	return at
+
+
 # РАЗМЫВАНИЕ ГЛАЗАМИ ЧИСЕЛ. Кисть обязана делать ровно две вещи: уменьшать
 # перепад между соседями и отменяться начисто. Первое меряем разбросом поля по
 # округе до и после, второе — сравнением с тем, что было.
 func _blur_report() -> void:
-	var at: Vector3 = grid.seeds[grid.cell_at(Vector3(0, 6, 0))]
+	var at: Vector3 = _test_spot()
 	var was_brush := brush
 	brush = 3
 	# Сначала лепим уступ: ровное место размывать бессмысленно, там и так гладко.
@@ -1419,7 +1443,7 @@ func _roughness(cells: Array) -> float:
 # мало ли положено массы, слаба ли огранка, съела ли её пологость. Меряем всё
 # по отдельности — и заодно проверяем, что отмена уносит и камень тоже.
 func _stone_report() -> void:
-	var at: Vector3 = grid.seeds[grid.cell_at(Vector3(0, 6, 0))]
+	var at: Vector3 = _test_spot()
 	var was_brush := brush
 	brush = 3
 	# Что было ДО мазков: место уже потоптано прежними проверками, и сравнивать
