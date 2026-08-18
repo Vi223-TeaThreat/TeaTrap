@@ -1282,6 +1282,10 @@ func _selftest() -> void:
 	var sheet: Vector2i = plants.see_through()
 	print("Разметка тела: просвечивающих точек — ", sheet.x,
 		", самая тесная клетка — ", sheet.y, " точек")
+	var sizes: Vector3 = plants.size_stats()
+	print("Размер кочек: от ", snappedf(sizes.x, 0.01), " до ",
+		snappedf(sizes.y, 0.01), ", у соседей разнится на ",
+		snappedf(sizes.z, 0.01))
 	var merged: Vector2 = plants.merge_stats()
 	print("Срастание: соседей у кочки — ", snappedf(merged.x, 0.1),
 		", перемычка до ближнего — ", snappedf(merged.y * 100.0, 0.1),

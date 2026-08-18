@@ -44,12 +44,30 @@ const STEPS: int = 24
 const STAGE_COST := [1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0]
 
 # Насколько далеко от себя растение даёт отросток, в долях шага решётки.
-const SPREAD_NEAR: float = 0.13
-const SPREAD_FAR: float = 0.34
-# Ближе этого друг к другу не садимся: иначе пятно сгущается в одну точку и
-# кочки лезут одна из другой. Подушки должны СМЫКАТЬСЯ краями, поэтому зазор
-# чуть меньше их поперечника.
-const CROWD: float = 0.15
+const SPREAD_NEAR: float = 0.12
+const SPREAD_FAR: float = 0.30
+# Ближе этого друг к другу не садимся — в долях СУММЫ ВЗРОСЛЫХ РАДИУСОВ пары.
+#
+# Раньше зазор был один на всех, и заросль выходила ровной, как клёпки: у всех
+# кочек одна мерка, значит и мест для них — правильная упаковка. Теперь у каждой
+# кочки свой размер, и место она требует по себе: рядом с крупной просторно,
+# среди мелких тесно. Расстановка от этого перестаёт быть решёткой сама собой,
+# без единого лишнего случайного числа.
+#
+# Половина суммы радиусов — это гарантированное СМЫКАНИЕ: взрослые соседи
+# перекрываются, а не только касаются. Без перекрытия срастаться нечему.
+const SIT_APART: float = 0.50
+
+# РАЗМЕР КОЧКИ — СВОЙ У КАЖДОЙ, до четверти в обе стороны (решение пользователя).
+# Наследуется, а не бросается заново: отросток берёт размер родителя, чуть
+# убавленный и сбитый разбросом. Оттого вокруг самой крупной сидят крупные,
+# вокруг тех — средние, а местами разброс перебивает убывание, и среди мелочи
+# вырастает крупная. Просто случайный размер такого узора не даёт — выходит
+# равномерная рябь, то есть те же клёпки, только разного калибра.
+const BULK_MIN: float = 0.75
+const BULK_MAX: float = 1.25
+const BULK_FADE: float = 0.05               # насколько поколение мельчает
+const BULK_DRIFT: float = 0.10              # и насколько разброс это перебивает
 
 var main: Node3D
 var patches: Dictionary = {}      # номер -> {pos, nrm, id, m, step, cell, salt}
@@ -420,9 +438,12 @@ func plant_at(pos: Vector3, id: String) -> int:
 		return -1
 	if not _fits_surface(spot["nrm"], PlantsData.ITEMS[id]):
 		return -1
-	if _crowded(spot["pos"], CROWD * main.CELL_SPACING):
+	# Посаженная игроком — САМАЯ КРУПНАЯ в своём пятне: от неё размер и убывает
+	# к краю. Не ровно предельная, чтобы два пятна рядом различались.
+	var bulk: float = _rng.randf_range(BULK_MAX - 0.2, BULK_MAX)
+	if _crowded(spot["pos"], bulk):
 		return -1
-	return _create(spot, id, 0.15)
+	return _create(spot, id, 0.15, bulk)
 
 
 func remove_at(pid: int) -> void:
@@ -448,12 +469,12 @@ func nearest_to(pos: Vector3, radius: float) -> int:
 	return best
 
 
-func _create(spot: Dictionary, id: String, maturity: float) -> int:
+func _create(spot: Dictionary, id: String, maturity: float, bulk: float) -> int:
 	var cell: int = int(spot["cell"])
 	var salt: int = _next * 7919 + int(absf(spot["pos"].x) * 131)
 	# Тело считаем ДО рождения: не нашлось земли под ободом — кочки не будет
 	# вовсе, и номер зря не расходуется.
-	var body: Dictionary = _make_cushion(spot, PlantsData.ITEMS[id], salt)
+	var body: Dictionary = _make_cushion(spot, PlantsData.ITEMS[id], salt, bulk)
 	if body.is_empty():
 		return -1
 	var pid := _next
@@ -461,7 +482,7 @@ func _create(spot: Dictionary, id: String, maturity: float) -> int:
 	patches[pid] = {
 		"pos": spot["pos"], "nrm": spot["nrm"], "id": id,
 		"m": maturity, "step": -1, "cell": cell, "salt": salt,
-		"body": body, "near": [],
+		"bulk": bulk, "body": body, "near": [],
 	}
 	if not by_cell.has(cell):
 		by_cell[cell] = {}
@@ -482,7 +503,7 @@ func _link_near(pid: int) -> void:
 	var p: Dictionary = patches[pid]
 	var pos: Vector3 = p["pos"]
 	# Дальше двух взрослых радиусов купола не встретятся никогда.
-	var far: float = _patch_span(1.0) * 2.0
+	var far: float = _patch_span(1.0, BULK_MAX) * 2.0
 	var node: Vector3i = main.grid.node_of(int(p["cell"]))
 	var list: Array = []
 	for dx in range(-1, 2):
@@ -506,11 +527,14 @@ func _link_near(pid: int) -> void:
 # Есть ли кто-то вплотную. Смотрим ТОЛЬКО ячейку под точкой и её соседей по
 # решётке: перебор всего сада на каждый отросток — это работа в квадрате от
 # числа кочек, и заросшая карта встала бы колом.
-func _crowded(pos: Vector3, gap: float) -> bool:
+func _crowded(pos: Vector3, bulk: float) -> bool:
 	var home: int = main.grid.cell_at(pos)
 	if home < 0:
 		return false
-	var g2: float = gap * gap
+	# Место требуется ПО СЕБЕ И ПО СОСЕДУ: у крупной кочки локоть шире. Меряем по
+	# взрослым радиусам, а не по нынешним, — иначе на молодняке заросль сбивалась
+	# бы в кучу, а к старости кочки лезли бы одна из другой.
+	var mine: float = _patch_span(1.0, bulk)
 	var node: Vector3i = main.grid.node_of(home)
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
@@ -519,7 +543,9 @@ func _crowded(pos: Vector3, gap: float) -> bool:
 				if c < 0:
 					continue
 				for pid in by_cell.get(c, {}):
-					if pos.distance_squared_to(patches[pid]["pos"]) < g2:
+					var room: float = SIT_APART * (mine
+						+ _patch_span(1.0, float(patches[pid]["bulk"])))
+					if pos.distance_squared_to(patches[pid]["pos"]) < room * room:
 						return true
 	return false
 
@@ -544,11 +570,11 @@ func _tick(dt: float) -> void:
 		if p["m"] >= def["spread_at"] and _rng.randf() < def["spread_rate"] * dt:
 			var target := _sprout_from(p, def)
 			if not target.is_empty():
-				sprouts.append([target, p["id"]])
+				sprouts.append([target, p["id"], _child_bulk(float(p["bulk"]))])
 
 	for s in sprouts:
-		if not _crowded(s[0]["pos"], CROWD * main.CELL_SPACING):
-			_create(s[0], s[1], 0.05)
+		if not _crowded(s[0]["pos"], float(s[2])):
+			_create(s[0], s[1], 0.05, float(s[2]))
 	_flush()
 
 
@@ -660,7 +686,7 @@ func surface_changed(cells: Array = []) -> void:
 		# висеть по старому рельефу. Не нашлось нового места ободу — растение
 		# гибнет: рваного тела быть не должно.
 		var again: Dictionary = _make_cushion(spot, PlantsData.ITEMS[p["id"]],
-			int(p["salt"]))
+			int(p["salt"]), float(p["bulk"]))
 		if again.is_empty():
 			doomed.append(pid)
 			continue
@@ -817,14 +843,16 @@ const ADULT_SIZE: float = 0.105 * 0.75      # «М» — доля шага ре�
 const SIZE_PER_STAGE: float = 0.05
 const MID_STAGE: float = 5.0                # ступень, на которой размер ровно М
 
-# ШИРИНА КУРТИНЫ РАСТЁТ САМА, много круче размера ворсинки (решение пользователя
-# 2026-08-17). Молодая кочка — отдельный бугорок уже своей мерки, взрослые же
-# должны СОМКНУТЬСЯ В СПЛОШНОЙ МАССИВ: садиться ближе 0.27 м друг к другу им
-# нельзя, значит к старости радиус должен этот зазор перекрыть.
+# ЗА ЖИЗНЬ КУРТИНА ШИРИТСЯ НА ЧЕТВЕРТЬ (решение пользователя 2026-08-17).
 #
-# Ворсинка при этом держится прежнего правила «М ±5% за ступень». Так и у живого
-# мха: подушка ширится числом побегов, а не тем, что каждый побег толстеет.
-const PATCH_YOUNG: float = 0.65             # радиус на первой ступени, в долях М
+# Было вдвое с лишним — от 0.65 до 1.45. Это и мешало срастанию: молодая кочка
+# не доставала до соседей вовсе, а мест для роста ей отводили по взрослой мерке,
+# и заросль долго стояла россыпью отдельных нашлёпок. Теперь кочка почти сразу
+# своей ширины, а разницу между соседями даёт не возраст, а собственный размер
+# (`BULK_MIN`…`BULK_MAX`).
+#
+# Взрослеет мох, стало быть, рисунком и толщиной, а не размахом.
+const PATCH_YOUNG: float = 1.16             # радиус на первой ступени, в долях М
 const PATCH_OLD: float = 1.45               # ... и на девятой; по ней и печём
 
 # Какую долю зрелости ворсинка тянется от нуля до полного роста. Отрезки
@@ -902,18 +930,22 @@ func _seam_cut(rim: Array, up: Vector3, k: float, kin_t: Array,
 func _neighbours(p: Dictionary, centre: Vector3, up: Vector3, span: float) -> Array:
 	var kin_t: Array = []
 	var kin_r := PackedFloat32Array()
+	var kin_top := PackedFloat32Array()
 	for nb in p.get("near", []):
 		if not patches.has(nb):
 			continue                     # сосед погиб; список нарочно не чистится
 		var q: Dictionary = patches[nb]
-		var qs: float = _patch_span(float(q["m"]))
+		var qs: float = _patch_span(float(q["m"]), float(q["bulk"]))
 		var off: Vector3 = Vector3(q["pos"]) - centre
 		var flat: Vector3 = off - up * off.dot(up)
 		if flat.length() > qs + span:
 			continue                     # ещё не дорос до нас
 		kin_t.append(flat)
 		kin_r.append(qs)
-	return [kin_t, kin_r]
+		# Пухлость у соседа СВОЯ, и её надо знать: поле складывается из чужих
+		# бугров, а не из своего, натянутого на чужой радиус.
+		kin_top.append(qs * BODY_RISE * float(q["body"]["rise"]))
+	return [kin_t, kin_r, kin_top]
 
 
 # МЯГКИЙ МАКСИМУМ. Обычный даёт на стыке двух бугров острую складку — след от
@@ -922,6 +954,31 @@ func _neighbours(p: Dictionary, centre: Vector3, up: Vector3, span: float) -> Ar
 static func _smax(a: float, b: float, k: float) -> float:
 	var h: float = clampf(0.5 + 0.5 * (a - b) / k, 0.0, 1.0)
 	return lerpf(b, a, h) + k * h * (1.0 - h)
+
+
+# РАЗБРОС РАЗМЕРОВ: наименьший, наибольший и насколько в среднем разнятся СОСЕДИ.
+#
+# Третье число и проверяет правило «рядом с крупной сидят крупные». Размер
+# наследуется, значит у соседей он должен различаться заметно меньше, чем размах
+# по всей заросли; будь он случайным, разница соседей вышла бы примерно в треть
+# размаха. Только для самопроверки.
+func size_stats() -> Vector3:
+	var low := 9.0
+	var high := 0.0
+	var apart := 0.0
+	var pairs := 0.0
+	for pid in patches:
+		var mine: float = float(patches[pid]["bulk"])
+		low = minf(low, mine)
+		high = maxf(high, mine)
+		for nb in patches[pid].get("near", []):
+			if not patches.has(nb):
+				continue
+			apart += absf(mine - float(patches[nb]["bulk"]))
+			pairs += 1.0
+	if patches.is_empty():
+		return Vector3.ZERO
+	return Vector3(low, high, apart / maxf(1.0, pairs))
 
 
 # НАСКОЛЬКО КОЧКИ СРОСЛИСЬ: какая доля боков упёрлась в соседа и насколько высоко
@@ -939,11 +996,12 @@ func merge_stats() -> Vector2:
 		var body: Dictionary = p["body"]
 		var centre: Vector3 = p["pos"]
 		var up: Vector3 = body["up"]
-		var span: float = _patch_span(float(p["m"]))
-		var high: float = span * BODY_RISE
+		var span: float = _patch_span(float(p["m"]), float(p["bulk"]))
+		var high: float = span * BODY_RISE * float(body["rise"])
 		var kin: Array = _neighbours(p, centre, up, span)
 		var kin_t: Array = kin[0]
 		var kin_r: PackedFloat32Array = kin[1]
+		var kin_top: PackedFloat32Array = kin[2]
 		var best := 0.0
 		for i in range(kin_t.size()):
 			pairs += 1.0
@@ -954,11 +1012,10 @@ func merge_stats() -> Vector2:
 			var mid: Vector3 = Vector3(kin_t[i]) * 0.5
 			var own: float = high * _profile_fast(minf(mid.length() / span, 1.0))
 			var d: float = (mid - Vector3(kin_t[i])).length() / kin_r[i]
-			var his: float = kin_r[i] * BODY_RISE \
-				* (_profile_fast(d) if d < 1.0 else 0.0)
+			var his: float = kin_top[i] * (_profile_fast(d) if d < 1.0 else 0.0)
 			# В долях НИЗШЕЙ из двух макушек: сотня значит, что провала между
 			# кочками нет вовсе, ноль — что они сошлись у самой земли.
-			var lowest: float = maxf(0.0001, minf(high, kin_r[i] * BODY_RISE))
+			var lowest: float = maxf(0.0001, minf(high, kin_top[i]))
 			best = maxf(best, _smax(own, his, high * FIELD_BLEND) / lowest)
 		if not kin_t.is_empty():
 			joined += 1.0
@@ -969,10 +1026,18 @@ func merge_stats() -> Vector2:
 
 # РАДИУС КОЧКИ на этой зрелости. Спрашивают двое: своя отрисовка и слияние —
 # соседу надо знать, докуда дотянулся чужой купол.
-func _patch_span(m: float) -> float:
+func _patch_span(m: float, bulk: float) -> float:
 	var stage_no: float = clampf(m * float(STAGES) + 0.5, 1.0, float(STAGES))
-	return main.CELL_SPACING * ADULT_SIZE * BODY_WIDE \
+	return main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * bulk \
 		* lerpf(PATCH_YOUNG, PATCH_OLD, (stage_no - 1.0) / float(STAGES - 1))
+
+
+# Размер отростка. Родительский, чуть убавленный и сбитый разбросом — см.
+# `BULK_MIN`: убавление ведёт мельчание от крупной кочки к краю пятна, разброс
+# местами его перебивает, и порядок не читается порядком.
+func _child_bulk(parent: float) -> float:
+	return clampf(parent - BULK_FADE
+		+ _rng.randf_range(-BULK_DRIFT, BULK_DRIFT * 1.4), BULK_MIN, BULK_MAX)
 
 
 # РАСКЛАДКА КОЧКИ СЧИТАЕТСЯ ОДИН РАЗ, при рождении, и живёт с ней.
@@ -988,7 +1053,8 @@ func _patch_span(m: float) -> float:
 # Не нашлось земли под ободом — кочки НЕ БУДЕТ вовсе. У пучка можно было
 # обронить отдельную ворсинку, у сплошного тела дыра в ободе — это рваная
 # оболочка. Зато у обрыва мох теперь не свесится: ему просто негде лечь.
-func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
+func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
+		bulk: float) -> Dictionary:
 	var centre: Vector3 = spot["pos"]
 	var nrm: Vector3 = spot["nrm"]
 	var side: Vector3 = nrm.cross(Vector3.UP)
@@ -1007,7 +1073,7 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 			along = nrm.cross(side).normalized()
 		creep = 1.5
 
-	var reach: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * PATCH_OLD
+	var reach: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * PATCH_OLD * bulk
 	var rings: int = RING_AT.size()
 	var rim: Array = []
 	for s in range(SECTORS):
@@ -1045,6 +1111,9 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 		"up": nrm, "rim": rim,
 		"age": _hash01(salt + 577),
 		"shade": 0.92 + 0.14 * _hash01(salt + 1223),
+		# Пухлость своя у каждой: при одной на всех кочки одного размера выходят
+		# слепками друг друга, и разброс размера этого не спасает.
+		"rise": 0.85 + 0.30 * _hash01(salt + 1777),
 	}
 
 
@@ -1130,8 +1199,9 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
 		(stage_no - 1.0) / float(STAGES - 1))
 	var k: float = wide_at / PATCH_OLD
-	var span: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at
-	var high: float = span * BODY_RISE
+	var span: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at \
+		* float(p["bulk"])
+	var high: float = span * BODY_RISE * float(body["rise"])
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
 	# и умножение на тёмно-зелёный сделало бы кочку чёрной. И оттенок подмешиваем
@@ -1169,6 +1239,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var kin: Array = _neighbours(p, centre, up, span)
 	var kin_t: Array = kin[0]
 	var kin_r: PackedFloat32Array = kin[1]
+	var kin_top: PackedFloat32Array = kin[2]
 	var cut: PackedFloat32Array = _seam_cut(rim, up, k, kin_t, kin_r, span)
 	var blend: float = high * FIELD_BLEND
 
@@ -1199,7 +1270,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 				var d: float = (xt - Vector3(kin_t[i])).length() / kin_r[i]
 				if d >= 1.0:
 					continue
-				bump = _smax(bump, kin_r[i] * BODY_RISE * _profile_fast(d), blend)
+				bump = _smax(bump, kin_top[i] * _profile_fast(d), blend)
 			# Утапливаем в землю только ТАМ, ГДЕ ОБОД И ПРАВДА ЛЁГ на землю: где
 			# его поднял сосед, топить нечего — иначе в перемычке прорежется щель.
 			bump -= _ring_sink[r] * high * clampf(1.0 - bump / (0.25 * high), 0.0, 1.0)
@@ -1211,7 +1282,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	for i in range(kin_t.size()):
 		var d: float = Vector3(kin_t[i]).length() / kin_r[i]
 		if d < 1.0:
-			top = _smax(top, kin_r[i] * BODY_RISE * _profile_fast(d), blend)
+			top = _smax(top, kin_top[i] * _profile_fast(d), blend)
 	var apex: Vector3 = centre + up * top
 
 	# Сторону нормали решаем по точке ВНУТРИ тела: у макушки она смотрит вверх,
