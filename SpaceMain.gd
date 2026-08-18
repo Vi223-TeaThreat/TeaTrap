@@ -1255,8 +1255,21 @@ func _selftest() -> void:
 	var gap_max := 0.0
 	var gap_sum := 0.0
 	var lost := 0
+	# И ОТДЕЛЬНО — ПО КРАЮ. Середина кочки садится на землю поиском, а край
+	# набирается из своих точек, и висеть над склоном может именно он: середина
+	# при этом сидит как влитая, и по ней ничего не видно.
+	var edge_max := 0.0
+	var edge_lost := 0
 	for pid in plants.patches:
 		var gap: float = grid.surface_gap(plants.patches[pid]["pos"])
+		var rim: Array = plants.patches[pid]["body"]["rim"]
+		for s in range(rim.size()):
+			var out: float = grid.surface_gap(Vector3(plants.patches[pid]["pos"])
+				+ Vector3(rim[s]["off"]))
+			if out < 0.0:
+				edge_lost += 1
+			else:
+				edge_max = maxf(edge_max, out)
 		if gap < 0.0:
 			lost += 1
 			continue
@@ -1266,6 +1279,9 @@ func _selftest() -> void:
 	print("Мох на земле: оторвалось — ", lost, ", промах в среднем ",
 		snappedf(gap_sum / maxf(1.0, float(sat)), 0.001), " м, наибольший ",
 		snappedf(gap_max, 0.001), " м")
+	print("Край кочки: над землёй до ", snappedf(edge_max, 0.001),
+		" м, повисших краёв — ", edge_lost, ", поджато секторов — ",
+		plants.stub_count())
 
 	# ЧЕМ КОЧКА ОБХОДИТСЯ. Объём у неё теперь настоящий — тело куполом, — и это
 	# та цена, которую надо держать на виду: мох должен выглядеть пушистым, но

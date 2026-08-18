@@ -44,8 +44,8 @@ const STEPS: int = 24
 const STAGE_COST := [1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 3.0, 4.0, 5.0]
 
 # Насколько далеко от себя растение даёт отросток, в долях шага решётки.
-const SPREAD_NEAR: float = 0.12
-const SPREAD_FAR: float = 0.30
+const SPREAD_NEAR: float = 0.09
+const SPREAD_FAR: float = 0.22
 # Ближе этого друг к другу не садимся — в долях СУММЫ ВЗРОСЛЫХ РАДИУСОВ пары.
 #
 # Раньше зазор был один на всех, и заросль выходила ровной, как клёпки: у всех
@@ -96,6 +96,9 @@ var _prof_lut := PackedFloat32Array()
 var _solid_uv: Array = []
 var _solid_holes: int = 0
 var _solid_least: int = 0         # самая тесная клетка, в точках
+# Сколько секторов за всё время не нашли под собой земли и были поджаты внутрь.
+# Именно этот путь и давал повисшие над обрывом края, поэтому его надо видеть.
+var _stub_sectors: int = 0
 
 
 func setup(main_ref: Node3D) -> void:
@@ -216,6 +219,12 @@ func _dense_box(img: Image, ox: int, oy: int, cw: int, ch: int) -> Rect2i:
 # кадре: дыра в центре молодой кочки и одноцветное тело.
 func see_through() -> Vector2i:
 	return Vector2i(_solid_holes, _solid_least)
+
+
+# Сколько секторов не нашли земли и были поджаты внутрь. Ноль значит, что путь
+# добора в этом мире вообще не задействован, и мерить по нему нечего.
+func stub_count() -> int:
+	return _stub_sectors
 
 
 # ЛИСТ С КУРТИНКАМИ МХА — рисуем прямо в коде, без файла с картинкой.
@@ -791,8 +800,11 @@ func _rebuild_cell(cell: int) -> void:
 # пучка с шапками, а поиск земли — ВТРОЕ ДЕШЕВЛЕ: раньше на землю сажали каждую
 # ворсинку по отдельности, теперь только обод и середину, а всё внутри
 # достраивается между ними.
-const SECTORS: int = 12                     # углов у кочки, если смотреть сверху
-const RING_AT := [0.32, 0.58, 0.80, 1.0]    # где идут кольца, в долях радиуса
+const SECTORS: int = 10                     # углов у кочки, если смотреть сверху
+const RING_AT := [0.42, 0.75, 1.0]          # где идут кольца, в долях радиуса
+# Насколько сектор может быть длиннее соседнего. Ступенька больше этой даёт
+# вытянутый лоскут, и кочка читается порванной.
+const RIM_STEP: float = 1.35
 # Насколько широкая перемычка получается там, где сходятся два бугра, в долях
 # высоты кочки. Ноль — острая складка на стыке, много — кочки расплываются в
 # общее одеяло и перестают читаться поодиночке.
@@ -802,7 +814,10 @@ const FIELD_BLEND: float = 0.35
 # каждый сам по себе; дальше их влияние набирается к девятой. Так у заросли
 # появляется возраст, который видно: молодая — россыпь бугорков, старая — сплошь.
 const MERGE_FROM: float = 4.0 / 9.0
-const BODY_WIDE: float = 1.31               # радиус тела в долях «М»
+# Кочка МЕЛЬЧЕ прежнего в полтора раза (решение пользователя 2026-08-17). Зазор
+# между соседями считается в долях их радиусов, поэтому кочки заодно сели ВДВОЕ
+# ГУЩЕ — расстояние ужалось вместе с размером, а густота идёт от него в квадрате.
+const BODY_WIDE: float = 0.92               # радиус тела в долях «М»
 const BODY_RISE: float = 0.58               # высота тела в долях его радиуса
 const RIM_SINK: float = 0.10                # на сколько обод утоплен в землю
 # ВОРС СТОИТ КОЛЬЦАМИ — по разрезу, нарисованному пользователем. Прежде он
@@ -1178,7 +1193,7 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 	var rings: int = RING_AT.size()
 	var rim: Array = []
 	var holds := 0
-	var sum_len := 0.0
+	var short_len := INF
 	var sum_lift := 0.0
 	for s in range(SECTORS):
 		var a: float = TAU * float(s) / float(SECTORS)
@@ -1191,7 +1206,9 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 		# у кромки выйдет кривобокой, но целой.
 		var off := Vector3.ZERO
 		var used: float = far
-		for k in [1.0, 0.75, 0.5]:
+		# Лесенка подбора частая: у кромки обрыва земля кончается где-то посередине
+		# луча, и чем мельче шаг, тем ближе к настоящему краю сядет обод.
+		for k in [1.0, 0.82, 0.66, 0.52, 0.40, 0.30]:
 			off = _ground_at(centre, nrm, dir, far * k)
 			if off != Vector3.ZERO:
 				used = far * k
@@ -1206,7 +1223,7 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 			if mid == Vector3.ZERO:
 				mid = off * MID_RING
 			holds += 1
-			sum_len += used
+			short_len = minf(short_len, off.length())
 			sum_lift += off.dot(nrm)
 		var lump := PackedFloat32Array()
 		lump.resize(rings)
@@ -1217,19 +1234,46 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 	# Ни одного сектора не нашло земли — кочке негде лежать.
 	if holds == 0:
 		return {}
-	# ПРОВАЛИВШИЕСЯ СЕКТОРЫ ДОБИРАЕМ ПО СОСЕДЯМ, а не бросаем кочку целиком: у
-	# сплошного тела дыра в ободе — это рваная оболочка. Берём среднюю длину и
-	# среднюю высоту удавшихся: получается сектор той же мерки, лежащий в общей
-	# плоскости обода, — на глаз он неотличим, а тело остаётся целым.
+	# ПРОВАЛИВШИЙСЯ СЕКТОР ПОДЖИМАЕМ ВНУТРЬ, а не достраиваем наружу.
+	#
+	# ГРАБЛИ, свои же: сперва такой сектор дотягивался до СРЕДНЕЙ длины удавшихся
+	# и клался в касательную плоскость. А проваливается сектор ровно там, где
+	# земля уходит из-под него — на кромке обрыва. Средняя длина в касательной
+	# плоскости — это точка В ВОЗДУХЕ за кромкой: кочки повисали над склоном, а
+	# рядом с длинным сектором оказывался короткий, и треугольник между ними
+	# растягивало в полотнище.
+	#
+	# Теперь наоборот: берём САМЫЙ КОРОТКИЙ из удавшихся, ещё поджатый. Дальше
+	# земли, которую нашли, кочка не вылезет ни при каких обстоятельствах.
 	if holds < SECTORS:
-		var len_avg: float = sum_len / float(holds)
+		_stub_sectors += SECTORS - holds
+		var stub: float = short_len * 0.8
 		var lift_avg: float = sum_lift / float(holds)
 		for s in range(SECTORS):
 			if rim[s]["off"] != Vector3.ZERO:
 				continue
-			var patch: Vector3 = Vector3(rim[s]["dir"]) * len_avg + nrm * lift_avg
+			var patch: Vector3 = Vector3(rim[s]["dir"]) * stub \
+				+ nrm * (lift_avg * stub / maxf(short_len, 0.0001))
 			rim[s]["off"] = patch
 			rim[s]["mid"] = patch * MID_RING
+
+	# ОБОД РАЗГЛАЖИВАЕМ ПО КРУГУ. Сосед сектора не должен быть вдвое длиннее:
+	# такая ступенька и даёт вытянутые лоскуты, которые на кадре читаются
+	# искажением. Только укорачиваем — удлинять нельзя, за длиной стоит найденная
+	# земля, а за укорочением ничего не стоит.
+	for _pass in range(2):
+		var was := PackedFloat32Array()
+		was.resize(SECTORS)
+		for s in range(SECTORS):
+			was[s] = Vector3(rim[s]["off"]).length()
+		for s in range(SECTORS):
+			var lo: float = minf(was[(s + SECTORS - 1) % SECTORS],
+				was[(s + 1) % SECTORS])
+			var cap: float = lo * RIM_STEP
+			if was[s] > cap and was[s] > 0.0001:
+				var squeeze: float = cap / was[s]
+				rim[s]["off"] = Vector3(rim[s]["off"]) * squeeze
+				rim[s]["mid"] = Vector3(rim[s]["mid"]) * squeeze
 
 	return {
 		"up": nrm, "rim": rim,
