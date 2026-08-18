@@ -240,16 +240,14 @@ static func _cut(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 	var stone_raw: Dictionary = grid.stone
 	var cav_all: PackedFloat32Array = grid.cavity
-	# Раму наклона берём ОДИН РАЗ на треугольник, а не на каждую вершину:
-	# обращение к полю через нетипизированную ссылку — самое дорогое, что тут
-	# есть, а вершин у куска тысячи.
-	var basis: PackedFloat32Array = grid.slope_basis
-	var nbs: PackedInt32Array = grid.nb_table
-	# Нормаль берём от ПОЛЯ ДЛЯ СВЕТА, а срез — от настоящего. Форма остаётся
+	# Наклоны берём ОДИН РАЗ на треугольник, а не на каждую вершину: обращение
+	# к полю через нетипизированную ссылку — самое дорогое, что тут есть, а
+	# вершин у куска тысячи.
+	#
+	# Они посчитаны по ПОЛЮ ДЛЯ СВЕТА, а срез идёт по настоящему. Форма остаётся
 	# ровно там, где была, а свет по ней течёт мягче: у решётки в 0.67 м любая
-	# вылепленная форма набрана из считаных граней, и резкий свет по ним
-	# выдаёт каждую.
-	var soft: PackedFloat32Array = grid.fill_soft
+	# вылепленная форма набрана из считаных граней, и резкий свет выдаёт каждую.
+	var slopes: PackedVector3Array = grid.shade_slope
 	for i in range(1, cut.size() - 1):
 		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
 		if tri.is_empty():
@@ -275,7 +273,7 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 		flat = flat.normalized() if flat.length() > 0.000001 else Vector3.ZERO
 		for k in range(3):
 			var cc: Dictionary = tri[k]
-			var smooth: Vector3 = _slope(grid, basis, nbs, soft, cc)
+			var smooth: Vector3 = _slope(grid, slopes, cc)
 			var n: Vector3 = smooth
 			if flat != Vector3.ZERO and stones[k] > 0.0:
 				# Сторону берём от гладкой нормали: у треугольника своей нет,
@@ -314,43 +312,14 @@ static func wound(tri: Array, grid, want: Vector3) -> Array:
 # Нормаль берём от НАКЛОНА ПОЛЯ, а не от треугольника: она непрерывна и
 # одинакова с обеих сторон границы куска, поэтому шва не возникает и
 # поверхность выглядит гладкой без отдельного сглаживания.
-static func _slope(grid, basis: PackedFloat32Array, nbs: PackedInt32Array,
-		soft: PackedFloat32Array, c: Dictionary) -> Vector3:
-	var ga := _gradient(grid, basis, nbs, soft, int(c["a"]))
-	var gb := _gradient(grid, basis, nbs, soft, int(c["b"]))
-	var g: Vector3 = ga.lerp(gb, float(c["t"]))
+# Наклон БЕРЁТСЯ ГОТОВЫМ, а не считается здесь. Он принадлежит семени, а не
+# вершине: одно семя попадает в десяток вершин, и обход шестерых соседей ради
+# него повторялся десять раз подряд. Замерено — на этом уходило две трети всей
+# пересборки куска.
+static func _slope(grid, slopes: PackedVector3Array, c: Dictionary) -> Vector3:
+	var g: Vector3 = slopes[int(c["a"])].lerp(slopes[int(c["b"])], float(c["t"]))
 	if g.length() < 0.000001:
 		return (grid.seeds[int(c["b"])] - grid.seeds[int(c["a"])]).normalized()
 	return -g.normalized()
-
-
-# Копия `SpaceGrid.field_slope` — нарочно, это самое горячее место отрисовки.
-# ПРАВИТЬ ОБЕ. Сложенную по соседям сумму разворачивает в настоящий наклон
-# заранее обращённая рама: без неё на ровном склоне мерка врала на 8.85° в
-# среднем и на 26.8° в худшем случае, и земля читалась мятой бумагой.
-static func _gradient(grid, basis: PackedFloat32Array, nbs: PackedInt32Array,
-		soft: PackedFloat32Array, seed_index: int) -> Vector3:
-	var here: Vector3 = grid.seeds[seed_index]
-	var f0: float = soft[seed_index]
-	var g := Vector3.ZERO
-	var at := seed_index * 6
-	for k in range(6):
-		var s: int = nbs[at + k]
-		if s < 0:
-			continue
-		var d: Vector3 = grid.seeds[s] - here
-		var len2: float = d.length_squared()
-		if len2 > 0.000001:
-			g += d * ((soft[s] - f0) / len2)
-	var xx: float = basis[at]
-	var yy: float = basis[at + 1]
-	var zz: float = basis[at + 2]
-	var xy: float = basis[at + 3]
-	var xz: float = basis[at + 4]
-	var yz: float = basis[at + 5]
-	return Vector3(
-		xx * g.x + xy * g.y + xz * g.z,
-		xy * g.x + yy * g.y + yz * g.z,
-		xz * g.x + yz * g.y + zz * g.z)
 
 
