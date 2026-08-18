@@ -1282,6 +1282,9 @@ func _selftest() -> void:
 	var sheet: Vector2i = plants.see_through()
 	print("Разметка тела: просвечивающих точек — ", sheet.x,
 		", самая тесная клетка — ", sheet.y, " точек")
+	var tilt: Vector2 = plants.tilt_stats()
+	print("Наклон кочки: ось до ", snappedf(tilt.x, 0.1), "°, земля под ней до ",
+		snappedf(tilt.y, 0.1), "° — числа должны совпадать")
 	var sizes: Vector3 = plants.size_stats()
 	print("Размер кочек: от ", snappedf(sizes.x, 0.01), " до ",
 		snappedf(sizes.y, 0.01), ", у соседей разнится на ",
