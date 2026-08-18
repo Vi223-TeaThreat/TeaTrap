@@ -65,7 +65,6 @@ var _blade_mat: ShaderMaterial
 # картинки по кольцам и по секторам. Считается один раз при запуске. Внутри
 # перестройки это были бы `pow` и `sin` на каждую вершину — сотня на кочку,
 # сотни кочек, двадцать четыре перестройки за жизнь каждой.
-var _ring_prof := PackedFloat32Array()
 var _ring_sink := PackedFloat32Array()
 var _ring_v := PackedFloat32Array()
 var _sector_u := PackedFloat32Array()
@@ -95,12 +94,10 @@ func setup(main_ref: Node3D) -> void:
 	_scan_solid(sheet)
 
 	var rings: int = RING_AT.size()
-	_ring_prof.resize(rings)
 	_ring_sink.resize(rings)
 	_ring_v.resize(rings)
 	for r in range(rings):
 		var t: float = float(RING_AT[r])
-		_ring_prof[r] = _profile(t)
 		_ring_sink[r] = RIM_SINK * t * t
 		_ring_v[r] = lerpf(BODY_V_TOP, BODY_V_RIM, t)
 	_sector_u.resize(SECTORS)
@@ -762,8 +759,12 @@ func _rebuild_cell(cell: int) -> void:
 # пучка с шапками, а поиск земли — ВТРОЕ ДЕШЕВЛЕ: раньше на землю сажали каждую
 # ворсинку по отдельности, теперь только обод и середину, а всё внутри
 # достраивается между ними.
-const SECTORS: int = 7                      # углов у кочки, если смотреть сверху
-const RING_AT := [0.45, 0.78, 1.0]          # где идут кольца, в долях радиуса
+const SECTORS: int = 12                     # углов у кочки, если смотреть сверху
+const RING_AT := [0.32, 0.58, 0.80, 1.0]    # где идут кольца, в долях радиуса
+# Насколько широкая перемычка получается там, где сходятся два бугра, в долях
+# высоты кочки. Ноль — острая складка на стыке, много — кочки расплываются в
+# общее одеяло и перестают читаться поодиночке.
+const FIELD_BLEND: float = 0.35
 const BODY_WIDE: float = 1.31               # радиус тела в долях «М»
 const BODY_RISE: float = 0.58               # высота тела в долях его радиуса
 const RIM_SINK: float = 0.10                # на сколько обод утоплен в землю
@@ -864,11 +865,43 @@ func _profile_fast(t: float) -> float:
 #
 # ЕДИНСТВЕННОЕ место, где решается срастание: и отрисовка, и самопроверка ходят
 # сюда. Отдельная копия для замера рано или поздно разошлась бы с рисуемым.
-func _seam_cut(p: Dictionary, centre: Vector3, up: Vector3, span: float,
-		k: float, rim: Array) -> Array:
-	var nb_dir: Array = []
-	var nb_seam := PackedFloat32Array()
-	var nb_high := PackedFloat32Array()
+func _seam_cut(rim: Array, up: Vector3, k: float, kin_t: Array,
+		kin_r: PackedFloat32Array, span: float) -> PackedFloat32Array:
+	var cut := PackedFloat32Array()
+	cut.resize(rim.size())
+	for s in range(rim.size()):
+		var o: Vector3 = Vector3(rim[s]["off"]) * k
+		var flat: Vector3 = o - up * o.dot(up)
+		var reach: float = flat.length()
+		var keep: float = 1.0
+		if reach > 0.0001:
+			var d: Vector3 = flat / reach
+			for i in range(kin_t.size()):
+				var to: Vector3 = Vector3(kin_t[i])
+				var gap: float = to.length()
+				if gap < 0.0001:
+					continue
+				var lean: float = d.dot(to / gap)
+				if lean <= 0.05:
+					continue             # граница в стороне, сектор не задет
+				var lim: float = (gap * span / (span + kin_r[i])) / lean
+				if lim < reach * keep:
+					keep = lim / reach
+		# Совсем в точку сектор не сжимаем: у слишком близкой пары граница прошла
+		# бы у самой середины, и от кочки остались бы вырожденные лоскуты.
+		cut[s] = maxf(keep, 0.25)
+	return cut
+
+
+# СОСЕДИ, ПРИВЕДЁННЫЕ К СВОЕЙ СИСТЕМЕ: смещение вбок и радиус. Считается один раз
+# на кочку, а спрашивается на каждой её вершине.
+#
+# Высота земли под соседом сюда НЕ ВХОДИТ нарочно: поле — это толщина мха над
+# землёй, а не высота над чьей-то серединой. Иначе на склоне сосед сверху дарил
+# бы нижней кочке полсклона высоты, и мох всплывал бы над рельефом.
+func _neighbours(p: Dictionary, centre: Vector3, up: Vector3, span: float) -> Array:
+	var kin_t: Array = []
+	var kin_r := PackedFloat32Array()
 	for nb in p.get("near", []):
 		if not patches.has(nb):
 			continue                     # сосед погиб; список нарочно не чистится
@@ -876,43 +909,19 @@ func _seam_cut(p: Dictionary, centre: Vector3, up: Vector3, span: float,
 		var qs: float = _patch_span(float(q["m"]))
 		var off: Vector3 = Vector3(q["pos"]) - centre
 		var flat: Vector3 = off - up * off.dot(up)
-		var gap: float = flat.length()
-		if gap < 0.0001 or gap > qs + span:
+		if flat.length() > qs + span:
 			continue                     # ещё не дорос до нас
-		nb_dir.append(flat / gap)
-		nb_seam.append(gap * span / (span + qs))
-		# ВЫСОТУ ШВА ОБА СЧИТАЮТ ОДИНАКОВО: доля расстояния до шва у них общая
-		# (`gap / (span + qs)`), а из двух радиусов берётся больший. Иначе у кочек
-		# разного роста шов оказался бы на разной высоте, и вместо срастания
-		# вышла бы ступенька.
-		nb_high.append(maxf(span, qs) * BODY_RISE
-			* _profile_fast(gap / (span + qs)))
+		kin_t.append(flat)
+		kin_r.append(qs)
+	return [kin_t, kin_r]
 
-	var cut := PackedFloat32Array()
-	var seam := PackedFloat32Array()
-	cut.resize(rim.size())
-	seam.resize(rim.size())
-	for s in range(rim.size()):
-		var o: Vector3 = Vector3(rim[s]["off"]) * k
-		var flat: Vector3 = o - up * o.dot(up)
-		var reach: float = flat.length()
-		var keep: float = 1.0
-		var top: float = 0.0
-		if reach > 0.0001:
-			var d: Vector3 = flat / reach
-			for i in range(nb_dir.size()):
-				var lean: float = d.dot(Vector3(nb_dir[i]))
-				if lean <= 0.05:
-					continue             # шов в стороне, этот сектор не задет
-				var lim: float = nb_seam[i] / lean
-				if lim < reach * keep:
-					keep = lim / reach
-					top = nb_high[i]
-		# Совсем в точку сектор не сжимаем: у слишком близкой пары шов прошёл бы
-		# у самой середины, и от кочки остались бы вырожденные лоскуты.
-		cut[s] = maxf(keep, 0.25)
-		seam[s] = top
-	return [cut, seam]
+
+# МЯГКИЙ МАКСИМУМ. Обычный даёт на стыке двух бугров острую складку — след от
+# того, что тут кончился один и начался другой. Мягкий скругляет её перемычкой
+# шириной `k`: две сошедшиеся кочки сливаются так же, как сливаются две лужи.
+static func _smax(a: float, b: float, k: float) -> float:
+	var h: float = clampf(0.5 + 0.5 * (a - b) / k, 0.0, 1.0)
+	return lerpf(b, a, h) + k * h * (1.0 - h)
 
 
 # НАСКОЛЬКО КОЧКИ СРОСЛИСЬ: какая доля боков упёрлась в соседа и насколько высоко
@@ -922,24 +931,40 @@ func _seam_cut(p: Dictionary, centre: Vector3, up: Vector3, span: float,
 # Только для самопроверки. Единый силуэт виден на кадре, а кадров я не сужу —
 # значит, у него должно быть число.
 func merge_stats() -> Vector2:
-	var trimmed := 0.0
-	var total := 0.0
-	var lift := 0.0
-	var bake: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * PATCH_OLD
+	var joined := 0.0
+	var pairs := 0.0
+	var saddle := 0.0
 	for pid in patches:
 		var p: Dictionary = patches[pid]
 		var body: Dictionary = p["body"]
-		var rim: Array = body["rim"]
+		var centre: Vector3 = p["pos"]
+		var up: Vector3 = body["up"]
 		var span: float = _patch_span(float(p["m"]))
-		var trim: Array = _seam_cut(p, p["pos"], body["up"], span, span / bake, rim)
-		var cut: PackedFloat32Array = trim[0]
-		var seam: PackedFloat32Array = trim[1]
-		for s in range(rim.size()):
-			total += 1.0
-			if cut[s] < 0.999:
-				trimmed += 1.0
-				lift += seam[s] / maxf(span * BODY_RISE, 0.0001)
-	return Vector2(trimmed / maxf(1.0, total), lift / maxf(1.0, trimmed))
+		var high: float = span * BODY_RISE
+		var kin: Array = _neighbours(p, centre, up, span)
+		var kin_t: Array = kin[0]
+		var kin_r: PackedFloat32Array = kin[1]
+		var best := 0.0
+		for i in range(kin_t.size()):
+			pairs += 1.0
+			# Перемычка меряется НА ПОЛПУТИ до соседа: там поле ниже всего, и
+			# только там видно, слились кочки или лишь коснулись. Землю из-под
+			# перемычки вычитаем — иначе на склоне уклон пошёл бы в зачёт
+			# срастания, и число врало бы в свою пользу.
+			var mid: Vector3 = Vector3(kin_t[i]) * 0.5
+			var own: float = high * _profile_fast(minf(mid.length() / span, 1.0))
+			var d: float = (mid - Vector3(kin_t[i])).length() / kin_r[i]
+			var his: float = kin_r[i] * BODY_RISE \
+				* (_profile_fast(d) if d < 1.0 else 0.0)
+			# В долях НИЗШЕЙ из двух макушек: сотня значит, что провала между
+			# кочками нет вовсе, ноль — что они сошлись у самой земли.
+			var lowest: float = maxf(0.0001, minf(high, kin_r[i] * BODY_RISE))
+			best = maxf(best, _smax(own, his, high * FIELD_BLEND) / lowest)
+		if not kin_t.is_empty():
+			joined += 1.0
+			saddle += best
+	return Vector2(pairs / maxf(1.0, float(patches.size())),
+		saddle / maxf(1.0, joined))
 
 
 # РАДИУС КОЧКИ на этой зрелости. Спрашивают двое: своя отрисовка и слияние —
@@ -1016,9 +1041,23 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 			lump[r] = 0.90 + 0.20 * _hash01(salt + s * 131 + r * 977)
 		rim.append({"off": pos - centre, "lump": lump})
 
-	# ВОРС. Место — на теле, а не на земле: доля радиуса и угол, остальное
-	# считается по куполу. Порядок — ОТ СЕРЕДИНЫ К КРАЮ по золотому углу: растущая
-	# кочка добавляет ворсинки с краю, а не втыкает посреди уже готовых.
+	return {
+		"up": nrm, "rim": rim,
+		"age": _hash01(salt + 577),
+		"shade": 0.92 + 0.14 * _hash01(salt + 1223),
+	}
+
+
+# ВОРС — раскладка торчащих картинок. Место на теле: доля радиуса и угол,
+# остальное считается по куполу.
+#
+# ЖДЁТ ПОДКЛЮЧЕНИЯ. Ворс СНЯТ по решению пользователя 2026-08-17: на кадре он
+# читался россыпью мелких царапин поверх кочки, а не пушистым краем, и мешал
+# смотреть на саму форму. Ни раскладка, ни отрисовка не зовутся; лист с
+# картинками остаётся на месте — телу он всё равно нужен, и ворс к нему вернётся,
+# когда будет решено, как он должен выглядеть.
+func _make_fuzz(rim: Array, side: Vector3, along: Vector3, creep: float,
+		salt: int) -> Array:
 	# Порядок поясов — ОТ МАКУШКИ К ОБОДУ: он же порядок всхода, и растущая кочка
 	# добавляет ворс с краю, а не втыкает посреди уже готового.
 	var spots: Array = []
@@ -1069,12 +1108,7 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 			# перетекает плавно.
 			"age": _hash01(salt + i * 9931),
 		})
-
-	return {
-		"up": nrm, "rim": rim, "fuzz": fuzz,
-		"age": _hash01(salt + 577),
-		"shade": 0.92 + 0.14 * _hash01(salt + 1223),
-	}
+	return fuzz
 
 
 func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
@@ -1084,7 +1118,6 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	if body.is_empty():
 		return false
 	var rim: Array = body["rim"]
-	var fuzz: Array = body["fuzz"]
 	var centre: Vector3 = p["pos"]
 	var up: Vector3 = body["up"]
 
@@ -1093,18 +1126,12 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# пятой — ровно 5. Считаем непрерывно, а не по целой ступени, чтобы размер не
 	# подскакивал на переходе — ради этого и участились пересборки.
 	var stage_no: float = clampf(stage_f + 0.5, 1.0, float(STAGES))
-	# Ворсинка — по правилу «М ±5% за ступень», куртина — по своему, куда круче.
 	# Раскладка испечена при самом широком возрасте, младшие сжимают её к середине.
-	var size: float = 1.0 + SIZE_PER_STAGE * (stage_no - MID_STAGE)
 	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
 		(stage_no - 1.0) / float(STAGES - 1))
 	var k: float = wide_at / PATCH_OLD
 	var span: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at
 	var high: float = span * BODY_RISE
-	# Ворсинка — большее из двух правил: «М ±5% за ступень» и «не короче половины
-	# радиуса кочки». На молодой берёт верх первое, на взрослой — второе.
-	var tall: float = maxf(main.CELL_SPACING * ADULT_SIZE * size * FUZZ_TALL,
-		span * FUZZ_OF_SPAN)
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
 	# и умножение на тёмно-зелёный сделало бы кочку чёрной. И оттенок подмешиваем
@@ -1122,31 +1149,31 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# выкладываем треугольники. Нормаль, взятая от соседних точек самого меша,
 	# всегда сходится с тем, что видно; выведенная отдельной формулой — рано или
 	# поздно разойдётся с геометрией, и купол засветится не по своей форме.
-	# Точку тела держим ДВУМЯ ЧАСТЯМИ: смещение вбок от середины и высота над ней.
-	# Так и задумана кочка, и — главное — так слияние с соседом становится одним
-	# вычитанием вместо пересчёта в чужую систему на каждой вершине.
-	# =========================================================================
-	#  СРАСТАНИЕ: где кочка УПИРАЕТСЯ в соседа
-	# =========================================================================
-	# Первая попытка была неверной: точки тела поднимались до чужого купола, если
-	# тот выше. Это объединение двух оболочек ТОЛЬКО НА БУМАГЕ — на трёх кольцах
-	# по семи секторам передать линию их пересечения нечем, и на кадре кочки
-	# просто входили одна в другую, а седловины не возникало вовсе.
 	#
-	# Теперь кочка НЕ ЛЕЗЕТ В СОСЕДА. Между двумя серединами проводится шов —
-	# плоскость, делящая расстояние в отношении радиусов, — и бок кочки на нём
-	# кончается. Сосед со своей стороны кончается на том же шве, а высоту шва оба
-	# считают по одной формуле от общих величин, поэтому сходятся на нём вплотную.
-	# Внизу пусто, вверху обе стенки растут к своим макушкам: это и есть седловина.
+	# ВЫСОТУ БЕРЁМ НЕ У СВОЕГО КУПОЛА, А У ОБЩЕГО ПОЛЯ. Это и есть срастание, и
+	# двух прежних попыток тут не хватило: ни подъёма точек до чужого купола (на
+	# редкой сетке линию пересечения передать нечем — кочки просто входили одна в
+	# другую), ни шва-плоскости (кочки от него отодвигались друг от друга и
+	# касались в одной точке сектора).
 	#
-	# По сути кочки делят землю между собой, как делят её соседние города: у
-	# каждой остаётся своя область, а не круг, который налезает на чужой.
-	var trim: Array = _seam_cut(p, centre, up, span, k, rim)
-	var cut: PackedFloat32Array = trim[0]        # докуда дожил сектор, в долях
-	var seam: PackedFloat32Array = trim[1]       # и на какой высоте он кончился
+	# Теперь у каждой кочки есть свой бугор, а поверхность — МЯГКИЙ МАКСИМУМ всех
+	# бугров вокруг. Мягкий, а не обычный: обычный даёт острую складку на стыке,
+	# мягкий — плавную перемычку, и две сошедшиеся кочки сливаются, как сливаются
+	# две лужи. Отсюда и форма разлитой воды: плоская середина, круглый край,
+	# перетяжки между слипшимися каплями.
+	#
+	# Своей области кочка при этом всё равно держится (`_seam_cut`): рисует поле
+	# только там, где она сама главная. Соседи делают то же со своей стороны, а на
+	# границе оба считают ОДНО И ТО ЖЕ значение поля — потому куски сходятся
+	# вплотную и ничто ни во что не входит.
+	var kin: Array = _neighbours(p, centre, up, span)
+	var kin_t: Array = kin[0]
+	var kin_r: PackedFloat32Array = kin[1]
+	var cut: PackedFloat32Array = _seam_cut(rim, up, k, kin_t, kin_r, span)
+	var blend: float = high * FIELD_BLEND
 
 	# =========================================================================
-	#  ТЕЛО: купол из колец
+	#  ТЕЛО: поверхность поля по кольцам
 	# =========================================================================
 	var rings: int = RING_AT.size()
 	var pts: Array = []
@@ -1155,23 +1182,37 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		var ring: Array = []
 		for s in range(SECTORS):
 			var keep: float = cut[s]
-			var lump: float = float(rim[s]["lump"][r])
-			var lift: float
-			if keep >= 0.999:
-				# Сектор свободен: обычный купол, обод утоплен в землю
-				# (`RIM_SINK`) — иначе по кромке видно землю на просвет.
-				lift = high * (_ring_prof[r] * lump - _ring_sink[r])
-			else:
-				# Сектор упёрся в соседа: тот же купол, обрезанный раньше, и
-				# сдвинутый так, чтобы на самом шве прийти ровно в его высоту.
-				# Сдвиг тает к макушке — она остаётся своей.
-				var own: float = high * (_profile_fast(t * keep) * lump - _ring_sink[r])
-				var own_rim: float = high * (_profile_fast(keep) * lump - RIM_SINK)
-				lift = own + (seam[s] - own_rim) * t
 			var o: Vector3 = Vector3(rim[s]["off"]) * (t * k * keep)
-			ring.append(centre + o + up * lift)
+			var oh: float = o.dot(up)
+			var xt: Vector3 = o - up * oh
+			# ПОЛЕ — ЭТО ТОЛЩИНА МХА НАД ЗЕМЛЁЙ, а не высота над серединой кочки.
+			# Разница видна на склоне: считай мы вклад соседа от ЕГО земли, кочка
+			# ниже по склону получала бы от него добавку в полсклона и всплывала
+			# бы над рельефом. Мох же лежит по земле — как и разлитая вода.
+			#
+			# Бугристость (`lump`) идёт только в свой бугор: у соседей она своя, и
+			# подглядывать в неё незачем.
+			var far: float = xt.length() / span
+			var bump: float = high * float(rim[s]["lump"][r]) \
+				* (_profile_fast(far) if far < 1.0 else 0.0)
+			for i in range(kin_t.size()):
+				var d: float = (xt - Vector3(kin_t[i])).length() / kin_r[i]
+				if d >= 1.0:
+					continue
+				bump = _smax(bump, kin_r[i] * BODY_RISE * _profile_fast(d), blend)
+			# Утапливаем в землю только ТАМ, ГДЕ ОБОД И ПРАВДА ЛЁГ на землю: где
+			# его поднял сосед, топить нечего — иначе в перемычке прорежется щель.
+			bump -= _ring_sink[r] * high * clampf(1.0 - bump / (0.25 * high), 0.0, 1.0)
+			ring.append(centre + xt + up * (oh + bump))
 		pts.append(ring)
-	var apex: Vector3 = centre + up * (high * (0.95 + 0.10 * float(body["age"])))
+	# Макушка — тоже по полю: рядом может стоять кочка крупнее, и тогда середина
+	# этой уходит под её склон, а не торчит из него бугорком.
+	var top: float = high * (0.95 + 0.10 * float(body["age"]))
+	for i in range(kin_t.size()):
+		var d: float = Vector3(kin_t[i]).length() / kin_r[i]
+		if d < 1.0:
+			top = _smax(top, kin_r[i] * BODY_RISE * _profile_fast(d), blend)
+	var apex: Vector3 = centre + up * top
 
 	# Сторону нормали решаем по точке ВНУТРИ тела: у макушки она смотрит вверх,
 	# у крутого бока — наружу, и одна проверка на высоту тут не годится.
@@ -1235,17 +1276,32 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 				st.set_uv(cuts[rr][ss])
 				st.add_vertex(pts[rr][ss])
 
-	# =========================================================================
-	#  ВОРС: картинки, растущие ИЗ ТЕЛА по его нормали
-	# =========================================================================
-	# Направление берём у самого купола: на макушке ворсинка стоит торчком, у
-	# края завалена наружу — ровно так на разрезе у пользователя. Считать это
-	# отдельным правилом не нужно, оно уже есть в форме тела.
-	#
-	# ЧИСЛО РАСТЁТ НЕ ЦЕЛЫМИ: у каждой ворсинки свой отрезок зрелости
-	# (`SPROUT_SPAN`), и она вытягивается по нему от нуля. Возникшая разом
-	# ворсинка в полный рост читается миганием, а не ростом. Первые `FUZZ_MIN`
-	# есть сразу — у только что севшей кочки иначе торчал бы голый купол.
+	return true
+
+
+# ВОРС: картинки, растущие ИЗ ТЕЛА по его нормали. Направление берётся у самого
+# купола — на макушке ворсинка стоит торчком, у края завалена наружу; отдельного
+# правила для этого не нужно, оно уже есть в форме тела.
+#
+# ЧИСЛО РАСТЁТ НЕ ЦЕЛЫМИ: у каждой ворсинки свой отрезок зрелости
+# (`SPROUT_SPAN`), и она вытягивается по нему от нуля. Возникшая разом ворсинка
+# в полный рост читается миганием, а не ростом.
+#
+# ЖДЁТ ПОДКЛЮЧЕНИЯ. Снят вместе с `_make_fuzz` — см. там же, почему. Когда
+# вернётся, высоту под ворсинкой надо будет брать НЕ у своего купола, а у общего
+# поля (`_field_at`): тело теперь стоит по нему, и ворс обязан сесть на ту же
+# поверхность, иначе повиснет над ней или утонет.
+func _emit_fuzz(st: SurfaceTool, fuzz: Array, m: float, centre: Vector3,
+		up: Vector3, k: float, high: float, span: float,
+		cut: PackedFloat32Array, hue: Color, stage_f: float) -> void:
+	# Длина ворсинки — большее из двух правил: «М ±5% за ступень» (решение
+	# пользователя о размере) и «не короче половины радиуса кочки». На молодой
+	# верх берёт первое, на взрослой второе: кочка ширится вдвое с лишним, и ворс,
+	# привязанный только к «М», на взрослой терялся бы щетинкой.
+	var stage_no: float = clampf(m * float(STAGES) + 0.5, 1.0, float(STAGES))
+	var size: float = 1.0 + SIZE_PER_STAGE * (stage_no - MID_STAGE)
+	var tall: float = maxf(main.CELL_SPACING * ADULT_SIZE * size * FUZZ_TALL,
+		span * FUZZ_OF_SPAN)
 	var many: int = fuzz.size()
 	var spread: float = float(maxi(1, many - FUZZ_MIN))
 	for i in range(many):
@@ -1264,7 +1320,6 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		# как и вылет обода.
 		var mix: float = float(b["mix"])
 		var keep: float = lerpf(cut[int(b["s0"])], cut[int(b["s1"])], mix)
-		var top: float = lerpf(seam[int(b["s0"])], seam[int(b["s1"])], mix)
 		var reach: float = float(b["reach"]) * k * keep
 		var t: float = float(b["t"])
 		var t2: float = minf(1.0, t + 0.08)
@@ -1274,10 +1329,8 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 			base_h = high * float(b["prof"])          # сектор свободен, срез испечён
 			dh = high * float(b["dprof"])
 		else:
-			# Упёрлась в соседа: купол здесь обрезан и сдвинут к высоте шва.
-			var shift: float = top - high * _profile_fast(keep)
-			base_h = high * _profile_fast(t * keep) + shift * t
-			dh = high * _profile_fast(t2 * keep) + shift * t2 - base_h
+			base_h = high * _profile_fast(t * keep)
+			dh = high * _profile_fast(t2 * keep) - base_h
 		var foot0: Vector3 = centre + dir * (reach * t) + up * base_h
 		# Нормаль купола в этой точке — по срезу, численно. Наклон среза здесь и
 		# заваливает ворсинку наружу тем сильнее, чем ближе к ободу; на шве с
@@ -1317,7 +1370,6 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 				st.set_normal(stand)
 				st.set_uv(uvs[j])
 				st.add_vertex(quad[j])
-	return true
 
 
 func _hash01(n: int) -> float:
