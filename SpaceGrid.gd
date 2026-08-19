@@ -75,6 +75,7 @@ var nb_table: PackedInt32Array = PackedInt32Array()
 var edits: Dictionary = {}        # ячейка -> насколько её подняли мазками
 var stone: Dictionary = {}        # ячейка -> насколько она каменистая, 0..1
 var _rock_noise: FastNoiseLite
+var _ledge_warp: FastNoiseLite
 var _play: PackedByteArray = PackedByteArray()    # семя внутри играбельного объёма
 var _built: PackedByteArray = PackedByteArray()   # ячейку уже вырезали
 const NO_CELL := {"faces": [], "valid": false}
@@ -117,6 +118,12 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	# Доли камня: 1/0.16 = 6.25 м, это 9.4 ячейки. См. `_facet` — там же вторая,
 	# средняя доля. Мельче четырёх ячеек решётка не держит ничего.
 	_rock_noise.frequency = 0.16
+	# Волна, которой ведут уровни слоёв, — 11.8 м, крупнее любой глыбы. Без неё
+	# полки одинаковы во всём мире и читаются разлиновкой.
+	_ledge_warp = FastNoiseLite.new()
+	_ledge_warp.seed = grid_seed + 909
+	_ledge_warp.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_ledge_warp.frequency = 0.085
 
 	# Семена берём с запасом за краем: у крайних ячеек нет всех соседей,
 	# их не удаётся замкнуть, и мы их отбрасываем.
@@ -1334,6 +1341,7 @@ func _facet(index: int) -> float:
 	# ловит впадина, и по ним же садится зелень.
 	var steep: float = _steepness(index)
 	var out: float = n * s * s * (0.55 + 0.75 * high) * (0.6 + 0.6 * steep) * FACET_AMP
+	out += _ledge(p, s)
 	if out > 0.0:
 		# ПРИБАВЛЯТЬ ПОРОДУ МОЖНО ТОЛЬКО ТАМ, ГДЕ ОНА УЖЕ ЕСТЬ. Огранка — это
 		# прибавка к полю, и в пустом месте рядом с глыбой она поднимает его
@@ -1344,6 +1352,39 @@ func _facet(index: int) -> float:
 		var body: float = base_fill[index] + _edit_of(index)
 		out *= clampf((body - (SOLID_AT - 1.0)) / 0.9, 0.0, 1.0)
 	return out
+
+
+# СЛОИСТОСТЬ. Порода лежит пластами, и поверхность камня тянется к
+# горизонтальным уровням через каждые `LEDGE_STEP`: сверху выходят полки, на
+# отвесе — поперечные уступы.
+#
+# ПОЧЕМУ ЭТО РАБОТАЕТ, А СТУПЕНЬКИ ПО ШУМУ НЕ РАБОТАЛИ. Уровень — это
+# ПЛОСКОСТЬ, а плоскость решётка держит ТОЧНО при любом разбросе семян: внутри
+# тетраэдра поле линейно, и у линейного поля срез идеально плоский. Ступеньки
+# же тянули к плато сам ШУМ, а плато в поле не даёт плоскости на поверхности —
+# срез идёт по уровню половины, и важно не плато, а наклон возле него.
+#
+# ЧИСЛА ПО ЗАМЕРУ, не на глаз. Доля площади, севшей у полок, против мятости:
+#   сила 0     — 39.6% у полок, излом 8.2°, шипов 2, худший угол 94°
+#   сила 0.25  — 42.9%,         излом 7.8°, шипов 0, худший 83°
+#   сила 0.40  — 47.3%,         излом 8.3°, шипов 0, худший 73°
+#   сила 0.55  — 52.3%,         излом 9.2°, шипов 1, худший 93°
+# На 0.40 колено: слои набраны, а мятости не прибавилось вовсе — поверхность
+# даже чище исходной. Дальше начинает платить.
+const LEDGE_STEP: float = 3.3     # высота пласта, м — 4.9 ячейки
+const LEDGE_AMP: float = 0.40     # насколько тянет к пласту
+
+func _ledge(p: Vector3, s: float) -> float:
+	if _ledge_warp == null:
+		return 0.0
+	var lift: float = _ledge_warp.get_noise_2d(p.x, p.z) * LEDGE_STEP * 0.35
+	var q: float = (p.y + lift) / LEDGE_STEP
+	var base: float = floor(q)
+	var frac: float = q - base
+	# Переход между полками занимает 40% высоты пласта — это около двух ячеек.
+	# Уже — и поле не успеет повернуть, поверхность сорвётся в складку.
+	var stair: float = base + smoothstep(0.30, 0.70, frac)
+	return (stair * LEDGE_STEP - lift - p.y) / _spacing * LEDGE_AMP * s * s
 
 
 # Насколько круто стоит поверхность у этой ячейки: 0 — плоско, 1 — отвесно.
