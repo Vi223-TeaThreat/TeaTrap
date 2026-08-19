@@ -64,6 +64,14 @@ var fill_soft: PackedFloat32Array = PackedFloat32Array()
 # шестерых соседей. Замерено: на этом уходило две трети всей пересборки куска,
 # и хранение наклона у семени ускоряет её в 2.16 раза.
 var shade_slope: PackedVector3Array = PackedVector3Array()
+# СКОЛЬКО ПОД ТОЧКОЙ ЗЕМЛИ: 0 — под ней пусто, 1 — сплошная толща.
+#
+# Без этого числа облик врал в двух местах сразу. «Глыба местами тонет в
+# дёрне» и «нижние глыбы зарастают целиком» — правила верные, но обе смотрели
+# только на ВЫСОТУ. Стоит выкопать яму, и низко перестаёт значить «у земли»:
+# нависающий край, потолок пещеры и стенка ямы получали дёрн и утопание
+# наравне с валуном, лежащим на лугу.
+var under: PackedFloat32Array = PackedFloat32Array()
 # Рама для наклона: по 6 чисел на семя — обратная матрица направлений к
 # соседям. Считается один раз, потому что семена больше не двигаются.
 var slope_basis: PackedFloat32Array = PackedFloat32Array()
@@ -699,11 +707,13 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 	cavity.resize(seeds.size())
 	fill_soft.resize(seeds.size())
 	shade_slope.resize(seeds.size())
+	under.resize(seeds.size())
 	for i in range(seeds.size()):
 		_refresh_cavity(i)
 	_smooth_cavity()
 	for i in range(seeds.size()):
 		_refresh_shade(i)
+		_refresh_under(i)
 
 
 # ВПАДИНА. Насколько ячейка сидит в складке: −1 на голом выступе, 0 на ровном,
@@ -765,6 +775,39 @@ func _refresh_shade_round(seen: Dictionary) -> void:
 				wide[n] = true
 	for j in wide:
 		_refresh_shade(j)
+
+
+# На сколько ячеек вниз смотрим. Четыре — это 2.7 м: тоньше слой камня над
+# пустотой уже не «стоит на земле», а нависает.
+const GROUND_DEEP: int = 4
+
+func _refresh_under(index: int) -> void:
+	if index < 0 or index >= under.size():
+		return
+	var got := 0
+	var at: int = index
+	for _step in range(GROUND_DEEP):
+		at = nb_table[at * 6 + 3]        # сосед снизу
+		if at < 0:
+			break                        # за краем мира земли нет
+		if fill[at] > SOLID_AT:
+			got += 1
+	under[index] = float(got) / float(GROUND_DEEP)
+
+
+# Обновляем ВЫШЕ изменённого: под точкой смотрят вниз, значит правка внизу
+# меняет число у всех, кто над ней в пределах глубины взгляда.
+func _refresh_under_round(seen: Dictionary) -> void:
+	var wide: Dictionary = seen.duplicate()
+	for j in seen:
+		var at: int = int(j)
+		for _step in range(GROUND_DEEP):
+			at = nb_table[at * 6 + 2]    # сосед сверху
+			if at < 0:
+				break
+			wide[at] = true
+	for j in wide:
+		_refresh_under(j)
 
 
 func _refresh_shade(index: int) -> void:
@@ -1227,6 +1270,7 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 		_refresh_cavity(j)
 	_smooth_cavity(seen.keys())
 	_refresh_shade_round(seen)
+	_refresh_under_round(seen)
 	return zone.keys()
 
 
@@ -1295,6 +1339,7 @@ func apply_delta(delta: Dictionary, sign: float) -> Array:
 		_refresh_cavity(j)
 	_smooth_cavity(seen.keys())
 	_refresh_shade_round(seen)
+	_refresh_under_round(seen)
 	return zone.keys()
 
 

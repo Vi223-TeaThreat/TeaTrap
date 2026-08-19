@@ -248,6 +248,7 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 	# ровно там, где была, а свет по ней течёт мягче: у решётки в 0.67 м любая
 	# вылепленная форма набрана из считаных граней, и резкий свет выдаёт каждую.
 	var slopes: PackedVector3Array = grid.shade_slope
+	var rest: PackedFloat32Array = grid.under
 	for i in range(1, cut.size() - 1):
 		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
 		if tri.is_empty():
@@ -281,6 +282,12 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 				var faced: Vector3 = flat if flat.dot(smooth) > 0.0 else -flat
 				n = smooth.lerp(faced, minf(stones[k], 1.0) * FACE_LIGHT).normalized()
 			st.set_uv(Vector2(stones[k], cavs[k]))
+			# Вторым набором — сколько под точкой земли. По нему шейдер решает,
+			# может ли тут что-то осесть: на потолке пещеры и на нависающем
+			# краю оседать нечему.
+			var cc2: Dictionary = tri[k]
+			st.set_uv2(Vector2(lerpf(rest[int(cc2["a"])], rest[int(cc2["b"])],
+				float(cc2["t"])), 0.0))
 			st.set_normal(n)
 			st.add_vertex(cc["p"])
 
