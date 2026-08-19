@@ -1423,6 +1423,95 @@ func _selftest() -> void:
 	print("Самопроверка: прицел — ", "мимо" if pick.is_empty() else str(pick["hit"]))
 
 
+# ЦЕЛА ЛИ ПОВЕРХНОСТЬ ТАМ, ГДЕ ЛЕЖИТ КАМЕНЬ.
+#
+# Общая проверка целостности идёт по нетронутому миру, сразу после постройки. А
+# у камня своя добавка к полю — доли и слои, — и её она не видела НИ РАЗУ:
+# пользователь показала на кадре ножевые рёбра там, где числа молчали.
+#
+# Считаем ровно тем же прибором, но по кусочку вокруг глыбы. Незамкнутые рёбра
+# тут не годятся: у любой вырезанной области край даёт их тысячами. Годятся
+# ВЫВЕРНУТЫЕ — они от границы области не зависят. И отдельно самое острое ребро:
+# за 90° — это уже шип, а не грань.
+func _stone_surface_check(at: Vector3) -> void:
+	var node: Vector3i = grid.node_of(grid.cell_at(at))
+	var span := int(ceil(_brush_radius() * 2.0 / CELL_SPACING)) + 2
+	var edge := Vector3i(span, span, span)
+	var edges: Dictionary = {}
+	var stats: Dictionary = {}
+	SurfaceScript.audit(grid, node - edge, node + edge, edges, stats)
+	var twice := 0
+	for k in edges:
+		if int(edges[k]) > 1:
+			twice += 1
+	var sharp := _sharpest(node - edge, node + edge)
+	print("Поверхность камня: вывернутых рёбер ", twice, ", вывернутых тетраэдров ",
+		int(stats.get("inverted", 0)), ", самое острое ребро ",
+		snappedf(sharp, 0.1), "° (за 90° — шип)")
+
+
+# Самый острый угол между соседними гранями в области. Считаем только там, где
+# есть порода: у земли своя мерка, а тут спрашиваем про камень.
+func _sharpest(lo: Vector3i, hi: Vector3i) -> float:
+	var faces: Dictionary = {}
+	var idx := PackedInt32Array()
+	idx.resize(8)
+	var val := PackedFloat32Array()
+	val.resize(8)
+	for i in range(lo.x, hi.x):
+		for j in range(lo.y, hi.y):
+			for k in range(lo.z, hi.z):
+				var here := Vector3i(i, j, k)
+				var ok := true
+				var below := 0
+				for c in range(8):
+					var s: int = grid.node_seed(here + SurfaceScript.CORNER[c])
+					if s < 0:
+						ok = false
+						break
+					idx[c] = s
+					val[c] = grid.fill_of(s)
+					if val[c] <= 0.5:
+						below += 1
+				if not ok or below == 0 or below == 8 or grid.stone_of(idx[0]) <= 0.02:
+					continue
+				for t in SurfaceScript.TETS:
+					var poly: Array = SurfaceScript.tet_polygon(grid, idx, val, t)
+					if poly.is_empty():
+						continue
+					# РАЗВОРАЧИВАЕМ ЛИЦОМ НАРУЖУ, как это делает отрисовка. Без
+					# этого у соседних треугольников обход случайный, нормали
+					# смотрят врозь, и ровное место показывает 180°.
+					var want: Vector3 = SurfaceScript._outward(grid, idx, val, t)
+					for f in range(1, poly.size() - 1):
+						var tri: Array = SurfaceScript.wound(
+							[poly[0], poly[f], poly[f + 1]], grid, want)
+						if tri.is_empty():
+							continue
+						var n: Vector3 = (tri[1]["p"] - tri[0]["p"]).cross(
+							tri[2]["p"] - tri[0]["p"])
+						if n.length() < 0.0000001:
+							continue
+						n = n.normalized()
+						for pair in [[0, 1], [1, 2], [2, 0]]:
+							var a: int = mini(int(tri[pair[0]]["a"]), int(tri[pair[0]]["b"]))
+							var b: int = maxi(int(tri[pair[0]]["a"]), int(tri[pair[0]]["b"]))
+							var c2: int = mini(int(tri[pair[1]]["a"]), int(tri[pair[1]]["b"]))
+							var d: int = maxi(int(tri[pair[1]]["a"]), int(tri[pair[1]]["b"]))
+							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
+								maxi(a, c2), maxi(b, d)]
+							if faces.has(key):
+								faces[key].append(n)
+							else:
+								faces[key] = [n]
+	var worst := 0.0
+	for key in faces:
+		var list: Array = faces[key]
+		if list.size() == 2:
+			worst = maxf(worst, rad_to_deg(list[0].angle_to(list[1])))
+	return worst
+
+
 # МЕСТО ДЛЯ ПРОВЕРОК — НА ЗЕМЛЕ, а не в воздухе над островом.
 #
 # Все проверки лепили в точке (0, 6, 0). Вершина острова — 2.5 м, то есть мазок
@@ -1544,6 +1633,7 @@ func _stone_report() -> void:
 		snappedf(stone_max, 0.01), ", подъём поля до ", snappedf(lift_max, 0.01),
 		", огранка ", snappedf(facet_lo, 0.01), "…", snappedf(facet_hi, 0.01),
 		", крутизна до ", snappedf(steep_max, 0.01))
+	_stone_surface_check(at)
 
 	for _i in range(3):
 		_undo()
