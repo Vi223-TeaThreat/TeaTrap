@@ -1401,7 +1401,7 @@ func apply_delta(delta: Dictionary, sign: float) -> Array:
 # На 1.5 и 0.26 худшее ребро становится ДАЖЕ МЯГЧЕ, чем у голой массы: огранка
 # перестаёт добавлять лезвия и только лепит форму. Если слои читаются слабо,
 # следующая ступень вверх — 1.8 и 0.32, её числа тоже известны.
-const FACET_AMP: float = 1.5
+const FACET_AMP: float = 2.4
 
 func _facet(index: int) -> float:
 	var s: float = stone_of(index)
@@ -1460,7 +1460,7 @@ func _facet(index: int) -> float:
 # На 0.40 колено: слои набраны, а мятости не прибавилось вовсе — поверхность
 # даже чище исходной. Дальше начинает платить.
 const LEDGE_STEP: float = 3.3     # высота пласта, м — 4.9 ячейки
-const LEDGE_AMP: float = 0.26     # насколько тянет к пласту
+const LEDGE_AMP: float = 0.40     # насколько тянет к пласту
 
 func _ledge(p: Vector3, s: float) -> float:
 	if _ledge_warp == null:
