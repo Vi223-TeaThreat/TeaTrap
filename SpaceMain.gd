@@ -60,6 +60,7 @@ var edge_faces: Dictionary = {}   # ребро -> какие грани его �
 var _buried_cache: Dictionary = {}
 var paint: Dictionary = {}        # ячейка -> каким материалом её мазали
 var brush: int = 1                # ширина кисти в ячейках: 1, 2 или 3
+var erase_brush: int = 1          # ... и своя ширина у снятия
 const FILL_BUDGET: int = 24       # мс на достройку мира за кадр
 var fill_done: float = 0.0        # насколько мир достроен
 var plants: Node3D
@@ -76,6 +77,7 @@ var group_boxes: Dictionary = {}
 var tool_buttons: Dictionary = {}
 var speed_buttons: Array = []
 var brush_buttons: Array = []
+var erase_buttons: Array = []
 var time_scale: float = 1.0
 
 const BRUSHES := [
@@ -444,8 +446,8 @@ const STROKE: float = 0.75        # сколько добавляет один �
 #
 # Считаем от узкой кисти: ей достаётся полная сила, широким — тем меньше, чем
 # они шире. Узкая осталась ровно такой, какой была.
-func _stroke_amount() -> float:
-	return STROKE * (CELL_SPACING * 2.4) / _brush_radius()
+func _stroke_amount(erase: bool = false) -> float:
+	return STROKE * (CELL_SPACING * 2.4) / _brush_radius(erase)
 # Насколько один проход кисти размывания подтягивает ячейку к соседям. Держим
 # небольшим: размывание должно набираться повторами, как и лепка, — иначе один
 # щелчок слизывает форму начисто и вернуть её можно только отменой.
@@ -464,8 +466,16 @@ const BLUR: float = 0.34
 # поэтому платить за неё должен тот, кто сам выбрал широкую.
 #
 # 2.4 / 3.65 / 4.9 ячейки.
-func _brush_radius() -> float:
-	return CELL_SPACING * (1.15 + 1.25 * float(brush))
+# У СНЯТИЯ СВОЯ ШИРИНА. Насыпают и снимают по-разному: холм набирают широкой
+# кистью, а выедают в нём ложбину или подравнивают край — узкой. Пока ширина
+# была одна на оба дела, её приходилось переключать туда-обратно на каждом
+# шаге лепки.
+func _active_brush(erase: bool) -> int:
+	return erase_brush if erase else brush
+
+
+func _brush_radius(erase: bool = false) -> float:
+	return CELL_SPACING * (1.15 + 1.25 * float(_active_brush(erase)))
 
 
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
@@ -502,7 +512,7 @@ func _place(cell: int, material: String = "ground", record: bool = true) -> void
 func _remove(cell: int, record: bool = true) -> void:
 	if cell < 0 or not grid.in_play(cell):
 		return
-	_dab(grid.seeds[cell], -_stroke_amount(), "", record)
+	_dab(grid.seeds[cell], -_stroke_amount(true), "", record)
 
 
 # Один мазок в точке: и постановка, и снятие, и отмена ходят через него.
@@ -522,7 +532,8 @@ func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> 
 	# Камень кладём ТЕСНЕЕ земли: глыба должна быть плотным телом, а не
 	# расплывшейся насыпью того же охвата.
 	var tight: float = 0.78 if material == "cliff" else 1.0
-	var rad := _brush_radius() * tight
+	# Снятие узнаём по знаку: у него своя ширина кисти.
+	var rad := _brush_radius(amount < 0.0) * tight
 	_stroke(at, rad, amount, material, _stone_push(amount, material))
 	if record:
 		history.append({"at": at, "rad": rad, "amount": amount, "mat": material,
@@ -546,7 +557,7 @@ func _paint(pick: Dictionary, material: String) -> void:
 
 func _erase(pick: Dictionary) -> void:
 	if pick.has("pos"):
-		_dab(pick["pos"], -_stroke_amount(), "")
+		_dab(pick["pos"], -_stroke_amount(true), "")
 
 
 # Отменяем ВСЁ ОДНО ПРОВЕДЕНИЕ кистью, а не последний мазок. Пока кнопка
@@ -656,22 +667,26 @@ func _update_frame() -> void:
 	# Точка прицела ходит непрерывно, поэтому её передаём каждый кадр, а вот
 	# накладку по форме земли пересобираем только при смене ячейки — иначе
 	# считали бы её по шестьдесят раз в секунду впустую.
+	# Показываем ТУ кисть, которой сейчас будут работать: у снятия она своя.
+	# Пока кнопка не нажата, о намерении говорит только Shift — у боковой
+	# кнопки состояния «наведено» не бывает.
+	var erasing: bool = held_erase if held else Input.is_key_pressed(KEY_SHIFT)
 	# Подсветка чуть уже самого мазка — чтобы контур не заезжал за то, что
 	# кисть на самом деле тронет. Ходит вместе с шириной кисти.
-	var rad: float = _brush_radius() * 0.94
+	var rad: float = _brush_radius(erasing) * 0.94
 	frame_mat.set_shader_parameter("spot", pick["pos"])
 	frame_mat.set_shader_parameter("reach", rad)
 	frame_mat.set_shader_parameter("tone", DIG_TONE)
 	frame_mat.set_shader_parameter("strength", 0.55)
 
-	var id := "%d:%d" % [target, brush]
+	var id := "%d:%d" % [target, _active_brush(erasing)]
 	if id == frame_id:
 		return
 	frame_id = id
 	var node: Vector3i = grid.node_of(target)
 	# Накладка должна вмещать весь круг подсветки, иначе контур обрезается
 	# квадратом. Считаем от настоящего радиуса, а не от номера кисти.
-	var span := int(ceil(_brush_radius() / CELL_SPACING)) + 1
+	var span := int(ceil(_brush_radius(erasing) / CELL_SPACING)) + 1
 	var edge := Vector3i(span, span, span)
 	frame_node.mesh = SurfaceScript.build(grid, node - edge, node + edge)
 	if frame_node.mesh == null:
@@ -847,6 +862,23 @@ func _setup_toolbar() -> void:
 		brush_row.add_child(bb)
 		brush_buttons.append(bb)
 
+	# У СНЯТИЯ СВОЯ СТРОКА. Насыпают и снимают по-разному: холм набирают
+	# широкой кистью, а выедают ложбину или подравнивают край — узкой. С одной
+	# шириной на оба дела её приходилось переключать на каждом шаге лепки.
+	var erase_row := HBoxContainer.new()
+	erase_row.add_theme_constant_override("separation", 0)
+	column.add_child(erase_row)
+	var erase_title := Label.new()
+	erase_title.text = "снять "
+	erase_title.modulate = Color(1, 1, 1, 0.5)
+	erase_title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	erase_row.add_child(erase_title)
+	for w in BRUSHES:
+		var eb := _list_button(UI_FONT_SMALL)
+		eb.pressed.connect(_set_erase_brush.bind(int(w["width"])))
+		erase_row.add_child(eb)
+		erase_buttons.append(eb)
+
 	_setup_time_panel(layer)
 	_refresh_toolbar()
 
@@ -914,6 +946,12 @@ func _set_brush(width: int) -> void:
 	_refresh_toolbar()
 
 
+func _set_erase_brush(width: int) -> void:
+	erase_brush = width
+	frame_id = ""
+	_refresh_toolbar()
+
+
 func _refresh_toolbar() -> void:
 	for i in range(SPEEDS.size()):
 		var chosen: bool = is_equal_approx(time_scale, SPEEDS[i]["value"])
@@ -923,6 +961,9 @@ func _refresh_toolbar() -> void:
 		var picked: bool = brush == int(BRUSHES[i]["width"])
 		brush_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if picked else " %s " % BRUSHES[i]["label"]
 		brush_buttons[i].modulate = Color(1, 1, 1, 1.0 if picked else 0.5)
+		var taken: bool = erase_brush == int(BRUSHES[i]["width"])
+		erase_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if taken else " %s " % BRUSHES[i]["label"]
+		erase_buttons[i].modulate = Color(1, 1, 1, 1.0 if taken else 0.5)
 	# Отступы задаём НЕ пробелами, а самой строкой из знака и названия: пробелы
 	# считаются по ширине шрифта и на мелком кегле разъезжаются.
 	for group in PlantsData.GROUPS:
@@ -979,7 +1020,7 @@ func _setup_hint() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	var label := Label.new()
-	label.text = "ЛКМ — поставить · Shift + ЛКМ — убрать · 2-я боковая — убрать\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · ширина кисти — в панели слева"
+	label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · ширина кисти и снятия — в панели слева"
 	label.position = Vector2(16, 16)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.add_theme_color_override("font_outline_color", Color.BLACK)
@@ -1011,11 +1052,30 @@ const HOLD_STEP: float = 0.07
 #
 # Считаем от узкой: ей прежние 0.07 с, широким — во столько раз реже, во
 # сколько они шире.
+# Начало и конец проведения кистью, общее для всех кнопок, которыми её ведут.
+#
+# Держим В ПАМЯТИ, КАКАЯ кнопка ведёт. Иначе отпускание боковой обрывало бы
+# проведение, начатое левой, и наоборот: у обеих одно и то же `held`.
+func _hold_start(button: int, event: InputEventMouseButton, erase: bool) -> void:
+	if event.pressed:
+		_hold_button = button
+		held = true
+		held_erase = erase
+		_open_group()
+		_apply_at(event.position, erase)
+		_hold_wait = HOLD_FIRST
+	elif _hold_button == button:
+		_hold_button = -1
+		held = false
+		_close_group()
+
+
 func _hold_step() -> float:
-	return HOLD_STEP * _brush_radius() / (CELL_SPACING * 2.4)
+	return HOLD_STEP * _brush_radius(held_erase) / (CELL_SPACING * 2.4)
 
 var held: bool = false
 var held_erase: bool = false
+var _hold_button: int = -1     # какая кнопка сейчас ведёт кисть
 var _hold_wait: float = 0.0
 var _group: int = 0            # каким числом помечены мазки одного проведения
 var _group_next: int = 1
@@ -1069,20 +1129,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Кисть ведут НАЖАТИЕМ И УДЕРЖАНИЕМ. Пока кнопка держится, мазок
 			# повторяется сам — иначе насыпать холм значит долбить по кнопке
 			# три десятка раз, и рука устаёт раньше, чем появляется форма.
-			held = event.pressed
-			held_erase = event.shift_pressed
-			if event.pressed:
-				_open_group()
-				_apply_at(event.position, event.shift_pressed)
-				_hold_wait = HOLD_FIRST
-			else:
-				_close_group()
+			_hold_start(MOUSE_BUTTON_LEFT, event, event.shift_pressed)
 		elif event.button_index == MOUSE_BUTTON_XBUTTON1 and event.pressed:
 			_undo()                                    # 1-я боковая — отмена
-		elif event.button_index == MOUSE_BUTTON_XBUTTON2 and event.pressed:
-			var kill := _pick(event.position)          # 2-я боковая — удалить
-			if not kill.is_empty():
-				_erase(kill)
+		elif event.button_index == MOUSE_BUTTON_XBUTTON2:
+			# 2-я боковая — СНЯТИЕ, и тоже удержанием. Прежде она была одиночным
+			# щелчком: насыпать можно было ведя кисть, а выедать — только
+			# долбя по кнопке. Работа одна и та же, значит и рука должна
+			# работать одинаково.
+			_hold_start(MOUSE_BUTTON_XBUTTON2, event, true)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
 			target_zoom = clampf(target_zoom * 0.9, 0.8, 140.0)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
