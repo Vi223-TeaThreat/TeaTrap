@@ -61,6 +61,10 @@ var _buried_cache: Dictionary = {}
 var paint: Dictionary = {}        # ячейка -> каким материалом её мазали
 var brush: int = 1                # ширина кисти в ячейках: 1, 2 или 3
 var erase_brush: int = 1          # ... и своя ширина у снятия
+# РЕЖИМ СНЯТИЯ как состояние, а не как зажатая клавиша. На телефоне нет ни
+# Shift, ни боковых кнопок — там снятие нечем позвать, кроме переключателя.
+# На мыши он не мешает: Shift по-прежнему снимает поверх любого режима.
+var erase_mode: bool = false
 const FILL_BUDGET: int = 24       # мс на достройку мира за кадр
 var fill_done: float = 0.0        # насколько мир достроен
 var plants: Node3D
@@ -78,12 +82,18 @@ var tool_buttons: Dictionary = {}
 var speed_buttons: Array = []
 var brush_buttons: Array = []
 var erase_buttons: Array = []
+var mode_buttons: Array = []
 var time_scale: float = 1.0
 
 const BRUSHES := [
 	{"width": 1, "label": "1"},
 	{"width": 2, "label": "2×2"},
 	{"width": 3, "label": "3×3"},
+]
+
+const MODES := [
+	{"erase": false, "label": "класть"},
+	{"erase": true, "label": "снять"},
 ]
 
 const SPEEDS := [
@@ -695,7 +705,7 @@ func _update_frame() -> void:
 	# Показываем ТУ кисть, которой сейчас будут работать: у снятия она своя.
 	# Пока кнопка не нажата, о намерении говорит только Shift — у боковой
 	# кнопки состояния «наведено» не бывает.
-	var erasing: bool = held_erase if held else Input.is_key_pressed(KEY_SHIFT)
+	var erasing: bool = held_erase if held else (erase_mode or Input.is_key_pressed(KEY_SHIFT))
 	# Подсветка чуть уже самого мазка — чтобы контур не заезжал за то, что
 	# кисть на самом деле тронет. Ходит вместе с шириной кисти.
 	var rad: float = _brush_radius(erasing) * 0.94
@@ -871,6 +881,22 @@ func _setup_toolbar() -> void:
 	gap.custom_minimum_size = Vector2(0, 6)
 	column.add_child(gap)
 
+	# Режим — над шириной: он решает, что вообще делает мазок, а ширина лишь
+	# уточняет размах. С пальца иначе никак — Shift на стекле не нажмёшь.
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 0)
+	column.add_child(mode_row)
+	var mode_title := Label.new()
+	mode_title.text = "режим "
+	mode_title.modulate = Color(1, 1, 1, 0.5)
+	mode_title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	mode_row.add_child(mode_title)
+	for m in MODES:
+		var mb := _list_button(UI_FONT_SMALL)
+		mb.pressed.connect(_set_erase_mode.bind(bool(m["erase"])))
+		mode_row.add_child(mb)
+		mode_buttons.append(mb)
+
 	# Ширина кисти — внизу, одной строкой: она относится к выбранному, а не
 	# наоборот, и наверху отталкивала список от глаза.
 	var brush_row := HBoxContainer.new()
@@ -977,6 +1003,12 @@ func _set_erase_brush(width: int) -> void:
 	_refresh_toolbar()
 
 
+func _set_erase_mode(on: bool) -> void:
+	erase_mode = on
+	frame_id = ""            # подсветка показывает ту кисть, которой сейчас работают
+	_refresh_toolbar()
+
+
 func _refresh_toolbar() -> void:
 	for i in range(SPEEDS.size()):
 		var chosen: bool = is_equal_approx(time_scale, SPEEDS[i]["value"])
@@ -989,6 +1021,10 @@ func _refresh_toolbar() -> void:
 		var taken: bool = erase_brush == int(BRUSHES[i]["width"])
 		erase_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if taken else " %s " % BRUSHES[i]["label"]
 		erase_buttons[i].modulate = Color(1, 1, 1, 1.0 if taken else 0.5)
+	for i in range(MODES.size()):
+		var now: bool = erase_mode == bool(MODES[i]["erase"])
+		mode_buttons[i].text = "[%s]" % MODES[i]["label"] if now else " %s " % MODES[i]["label"]
+		mode_buttons[i].modulate = Color(1, 1, 1, 1.0 if now else 0.5)
 	# Отступы задаём НЕ пробелами, а самой строкой из знака и названия: пробелы
 	# считаются по ширине шрифта и на мелком кегле разъезжаются.
 	for group in PlantsData.GROUPS:
@@ -1045,7 +1081,7 @@ func _setup_hint() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	var label := Label.new()
-	label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · ширина кисти и снятия — в панели слева"
+	label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева\nС пальца: один ведёт кисть · два — щипок приближает, перенос двигает, поворот вращает"
 	label.position = Vector2(16, 16)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.add_theme_color_override("font_outline_color", Color.BLACK)
@@ -1154,7 +1190,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Кисть ведут НАЖАТИЕМ И УДЕРЖАНИЕМ. Пока кнопка держится, мазок
 			# повторяется сам — иначе насыпать холм значит долбить по кнопке
 			# три десятка раз, и рука устаёт раньше, чем появляется форма.
-			_hold_start(MOUSE_BUTTON_LEFT, event, event.shift_pressed)
+			_hold_start(MOUSE_BUTTON_LEFT, event, event.shift_pressed or erase_mode)
 		elif event.button_index == MOUSE_BUTTON_XBUTTON1 and event.pressed:
 			_undo()                                    # 1-я боковая — отмена
 		elif event.button_index == MOUSE_BUTTON_XBUTTON2:
@@ -1175,11 +1211,120 @@ func _unhandled_input(event: InputEvent) -> void:
 			var flat := _camera_flat_axes()
 			var scale := cur_zoom * MOUSE_PAN
 			target_pivot += (-flat.right * event.relative.x + flat.forward * event.relative.y) * scale
+	elif event is InputEventScreenTouch or event is InputEventScreenDrag:
+		_touch_input(event)
 	elif event is InputEventKey and event.pressed:
 		if event.keycode == KEY_Z and event.ctrl_pressed:
 			_undo()
 		elif event.keycode >= KEY_1 and event.keycode <= KEY_3:
 			_toggle_group(event.keycode - KEY_1 + 1)
+
+
+# --- Сенсорный экран ---------------------------------------------------------
+#
+# Демо открывают и с телефона, а там нет ни колеса, ни правой кнопки, ни Shift.
+# Жесты разведены ПО ЧИСЛУ ПАЛЬЦЕВ: один ведёт кисть, два двигают камеру.
+#
+# Godot сам подставляет мышь под первое касание, и это НЕ отключено намеренно:
+# на подставной мыши держатся и одиночный мазок, и нажатия по списку слева —
+# без неё панель на телефоне перестала бы отзываться. Сюда приходит лишь то,
+# чего мышью не изобразить: второй палец и всё, что он приносит.
+const TOUCH_PAN: float = 0.0022    # палец грубее мыши — шаг панорамы крупнее
+const TWIST_DEAD: float = 0.35     # градусы: дрожание пальцев — ещё не поворот
+
+var _touches: Dictionary = {}      # палец -> где он сейчас
+var _gesture_on: bool = false
+var _pinch_span: float = 0.0       # расстояние между пальцами
+var _pinch_mid: Vector2 = Vector2.ZERO
+var _pinch_turn: float = 0.0       # наклон линии между пальцами, радианы
+
+
+func _touch_input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			_touches[event.index] = event.position
+			if _touches.size() == 2:
+				# Второй палец означает «я двигаю камеру, а не леплю».
+				# Мазок, успевший лечь под первым пальцем, снимаем: щипок,
+				# оставляющий за собой бугор, — это ловушка, а не управление.
+				_cancel_stroke()
+				_gesture_begin()
+		else:
+			_touches.erase(event.index)
+			if _touches.size() >= 2:
+				_gesture_begin()   # пальцев ещё хватает — мерим заново
+			else:
+				_gesture_on = false
+	elif event is InputEventScreenDrag:
+		_touches[event.index] = event.position
+		if _gesture_on and _touches.size() >= 2:
+			_gesture_update()
+
+
+# Считаем по ДВУМ ПЕРВЫМ пальцам. Третий и дальше игнорируем: ладонь, легшая
+# на край стекла, иначе уводила бы вид рывком.
+func _touch_pair() -> Array:
+	var keys: Array = _touches.keys()
+	keys.sort()
+	return [_touches[keys[0]], _touches[keys[1]]]
+
+
+func _gesture_begin() -> void:
+	if _touches.size() < 2:
+		return
+	var p := _touch_pair()
+	var a: Vector2 = p[0]
+	var b: Vector2 = p[1]
+	_pinch_span = maxf(a.distance_to(b), 1.0)
+	_pinch_mid = (a + b) * 0.5
+	_pinch_turn = (b - a).angle()
+	_gesture_on = true
+
+
+func _gesture_update() -> void:
+	var p := _touch_pair()
+	var a: Vector2 = p[0]
+	var b: Vector2 = p[1]
+	var span: float = maxf(a.distance_to(b), 1.0)
+	var mid: Vector2 = (a + b) * 0.5
+	var turn: float = (b - a).angle()
+
+	# Щипок — приближение. Берём ОТНОШЕНИЕ, а не разность: иначе у самого лица
+	# и на общем плане одно и то же движение пальцев меняло бы вид по-разному.
+	target_zoom = clampf(target_zoom * (_pinch_span / span), 0.8, 140.0)
+
+	# Перенос пары — панорама, тем же законом, что и средняя кнопка мыши:
+	# земля идёт ЗА пальцами, а не против них.
+	var shift: Vector2 = mid - _pinch_mid
+	var flat := _camera_flat_axes()
+	var scale: float = cur_zoom * TOUCH_PAN
+	target_pivot += (-flat.right * shift.x + flat.forward * shift.y) * scale
+
+	# Скручивание пары — поворот вокруг вертикали. Мёртвая зона тут не
+	# придирка: при панораме пальцы всегда чуть перекашиваются, и без неё
+	# вид расползался бы вбок на каждом движении.
+	var twist: float = rad_to_deg(wrapf(turn - _pinch_turn, -PI, PI))
+	if absf(twist) > TWIST_DEAD:
+		target_yaw += twist
+
+	_pinch_span = span
+	_pinch_mid = mid
+	_pinch_turn = turn
+
+
+# Оборвать начатое проведение, не оставив следа. Отменяем ТОЛЬКО если этот
+# мазок успел попасть в историю: иначе палец, опущенный мимо земли, стирал бы
+# предыдущее проведение — чужую работу.
+func _cancel_stroke() -> void:
+	if not held:
+		return
+	var mark: int = _group
+	_hold_button = -1
+	held = false
+	_close_group()
+	if mark != 0 and not history.is_empty() \
+			and int(history[history.size() - 1].get("group", 0)) == mark:
+		_undo()
 
 
 # --- Геометрия ---------------------------------------------------------------
