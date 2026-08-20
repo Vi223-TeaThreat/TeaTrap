@@ -114,6 +114,9 @@ var grass_mat: ShaderMaterial
 
 
 func _ready() -> void:
+	# Решаем ОДИН раз и до всякой вёрстки: и подсказка, и панель строятся по
+	# этому числу, а перестроить их на ходу нечем.
+	ui_scale = 2 if DisplayServer.is_touchscreen_available() else 1
 	_setup_materials()
 	_setup_environment()
 	_setup_light()
@@ -775,13 +778,29 @@ func _try_clear(screen_pos: Vector2) -> void:
 const UI_FONT: int = 13
 const UI_FONT_SMALL: int = 11
 
+# ПАНЕЛЬ НА СТЕКЛЕ ВДВОЕ КРУПНЕЕ. Палец толще курсора: строка в одиннадцать
+# пунктов пальцем не выбирается — промахи идут один за другим. На мыши всё
+# остаётся как было: там мелкий плотный список выверен и менять его незачем.
+var ui_scale: int = 1
+
+
+func _touch_ui() -> bool:
+	return ui_scale > 1
+
+
+# Просвет между переключателями. На мыши его нет — там они читаются как одна
+# строка; на стекле подложки без просвета слиплись бы в сплошную плашку.
+func _chip_gap() -> int:
+	return 4 * ui_scale if _touch_ui() else 0
+
+
 func _panel_box(round_right: bool) -> StyleBoxFlat:
 	var box := StyleBoxFlat.new()
 	box.bg_color = Color(0.06, 0.08, 0.07, 0.55)
-	box.content_margin_left = 8
-	box.content_margin_right = 8
-	box.content_margin_top = 6
-	box.content_margin_bottom = 6
+	box.content_margin_left = 8 * ui_scale
+	box.content_margin_right = 8 * ui_scale
+	box.content_margin_top = 6 * ui_scale
+	box.content_margin_bottom = 6 * ui_scale
 	if round_right:
 		box.corner_radius_top_right = 10
 		box.corner_radius_bottom_right = 10
@@ -792,24 +811,50 @@ func _panel_box(round_right: bool) -> StyleBoxFlat:
 
 
 # Кнопка списка: плоская, без рамки фокуса, с мелким шрифтом и тесными полями.
-func _list_button(size: int = UI_FONT) -> Button:
+#
+# `chip` — для коротких переключателей (режим, ширина, время). На стекле они
+# получают подложку: у слов «класть» и «снять», набранных просто текстом, нет
+# ничего, что говорило бы «сюда можно ткнуть». В списке пород подложки НЕ
+# ставим — там строки идут подряд, и десяток плашек читался бы рябью.
+func _list_button(size: int = -1, chip: bool = false) -> Button:
 	var b := Button.new()
 	b.flat = true
 	b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 	b.focus_mode = Control.FOCUS_NONE
-	b.add_theme_font_size_override("font_size", size)
+	b.add_theme_font_size_override("font_size", (UI_FONT if size < 0 else size) * ui_scale)
 	b.add_theme_constant_override("h_separation", 0)
 	# Поля у кнопки по умолчанию щедрые — из них и набегает высота списка.
 	# Подменяем их пустой рамкой с узкими полями, иначе шрифт мельче, а строки
 	# всё те же.
 	var tight := StyleBoxEmpty.new()
-	tight.content_margin_left = 2
-	tight.content_margin_right = 4
-	tight.content_margin_top = 1
-	tight.content_margin_bottom = 1
+	tight.content_margin_left = 2 * ui_scale
+	tight.content_margin_right = 4 * ui_scale
+	tight.content_margin_top = 1 * ui_scale
+	tight.content_margin_bottom = 1 * ui_scale
 	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
 		b.add_theme_stylebox_override(state, tight)
+	if chip and _touch_ui():
+		b.alignment = HORIZONTAL_ALIGNMENT_CENTER
+		b.add_theme_stylebox_override("normal", _chip_box(0.10))
+		b.add_theme_stylebox_override("hover", _chip_box(0.20))
+		b.add_theme_stylebox_override("pressed", _chip_box(0.26))
 	return b
+
+
+# Подложка переключателя: чуть светлее панели, со скруглением и полями под
+# палец. Яркость передаём снаружи — ею и отличаются нажатое и спокойное.
+func _chip_box(alpha: float) -> StyleBoxFlat:
+	var box := StyleBoxFlat.new()
+	box.bg_color = Color(1, 1, 1, alpha)
+	box.content_margin_left = 7 * ui_scale
+	box.content_margin_right = 7 * ui_scale
+	box.content_margin_top = 4 * ui_scale
+	box.content_margin_bottom = 4 * ui_scale
+	box.corner_radius_top_left = 4 * ui_scale
+	box.corner_radius_top_right = 4 * ui_scale
+	box.corner_radius_bottom_left = 4 * ui_scale
+	box.corner_radius_bottom_right = 4 * ui_scale
+	return box
 
 
 func _setup_toolbar() -> void:
@@ -870,7 +915,7 @@ func _setup_toolbar() -> void:
 				var empty := Label.new()
 				empty.text = "   пока пусто"
 				empty.modulate = Color(1, 1, 1, 0.35)
-				empty.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+				empty.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
 				items.add_child(empty)
 
 		group_headers[g] = head
@@ -884,15 +929,15 @@ func _setup_toolbar() -> void:
 	# Режим — над шириной: он решает, что вообще делает мазок, а ширина лишь
 	# уточняет размах. С пальца иначе никак — Shift на стекле не нажмёшь.
 	var mode_row := HBoxContainer.new()
-	mode_row.add_theme_constant_override("separation", 0)
+	mode_row.add_theme_constant_override("separation", _chip_gap())
 	column.add_child(mode_row)
 	var mode_title := Label.new()
 	mode_title.text = "режим "
 	mode_title.modulate = Color(1, 1, 1, 0.5)
-	mode_title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	mode_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
 	mode_row.add_child(mode_title)
 	for m in MODES:
-		var mb := _list_button(UI_FONT_SMALL)
+		var mb := _list_button(UI_FONT_SMALL, true)
 		mb.pressed.connect(_set_erase_mode.bind(bool(m["erase"])))
 		mode_row.add_child(mb)
 		mode_buttons.append(mb)
@@ -900,15 +945,15 @@ func _setup_toolbar() -> void:
 	# Ширина кисти — внизу, одной строкой: она относится к выбранному, а не
 	# наоборот, и наверху отталкивала список от глаза.
 	var brush_row := HBoxContainer.new()
-	brush_row.add_theme_constant_override("separation", 0)
+	brush_row.add_theme_constant_override("separation", _chip_gap())
 	column.add_child(brush_row)
 	var brush_title := Label.new()
 	brush_title.text = "кисть "
 	brush_title.modulate = Color(1, 1, 1, 0.5)
-	brush_title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	brush_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
 	brush_row.add_child(brush_title)
 	for w in BRUSHES:
-		var bb := _list_button(UI_FONT_SMALL)
+		var bb := _list_button(UI_FONT_SMALL, true)
 		bb.pressed.connect(_set_brush.bind(int(w["width"])))
 		brush_row.add_child(bb)
 		brush_buttons.append(bb)
@@ -917,15 +962,15 @@ func _setup_toolbar() -> void:
 	# широкой кистью, а выедают ложбину или подравнивают край — узкой. С одной
 	# шириной на оба дела её приходилось переключать на каждом шаге лепки.
 	var erase_row := HBoxContainer.new()
-	erase_row.add_theme_constant_override("separation", 0)
+	erase_row.add_theme_constant_override("separation", _chip_gap())
 	column.add_child(erase_row)
 	var erase_title := Label.new()
 	erase_title.text = "снять "
 	erase_title.modulate = Color(1, 1, 1, 0.5)
-	erase_title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	erase_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
 	erase_row.add_child(erase_title)
 	for w in BRUSHES:
-		var eb := _list_button(UI_FONT_SMALL)
+		var eb := _list_button(UI_FONT_SMALL, true)
 		eb.pressed.connect(_set_erase_brush.bind(int(w["width"])))
 		erase_row.add_child(eb)
 		erase_buttons.append(eb)
@@ -955,14 +1000,14 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 	var title := Label.new()
 	title.text = "Время"
 	title.modulate = Color(1, 1, 1, 0.5)
-	title.add_theme_font_size_override("font_size", UI_FONT_SMALL)
+	title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
 	column.add_child(title)
 
 	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 0)
+	row.add_theme_constant_override("separation", _chip_gap())
 	column.add_child(row)
 	for i in range(SPEEDS.size()):
-		var sb := _list_button()
+		var sb := _list_button(-1, true)     # -1 — оставить кегль по умолчанию
 		sb.pressed.connect(_set_time_scale.bind(i))
 		row.add_child(sb)
 		speed_buttons.append(sb)
@@ -1081,8 +1126,15 @@ func _setup_hint() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
 	var label := Label.new()
-	label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева\nС пальца: один ведёт кисть · два — щипок приближает, перенос двигает, поворот вращает"
-	label.position = Vector2(16, 16)
+	# На стекле подсказка ДРУГАЯ, а не та же вдвое крупнее: четыре мышиные
+	# строки там не только занимают пол-экрана, но и врут — ни Shift, ни
+	# колеса, ни боковых кнопок на телефоне нет.
+	if _touch_ui():
+		label.text = "Палец ведёт кисть · два пальца двигают вид\nЧто кисть делает — в панели слева"
+		label.add_theme_font_size_override("font_size", 15 * ui_scale)
+	else:
+		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
+	label.position = Vector2(16 * ui_scale, 16 * ui_scale)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.add_theme_color_override("font_outline_color", Color.BLACK)
 	label.add_theme_constant_override("outline_size", 4)
@@ -1090,7 +1142,9 @@ func _setup_hint() -> void:
 
 	# Пока остров достраивается, честно показываем, сколько уже готово.
 	fill_label = Label.new()
-	fill_label.position = Vector2(16, 112)
+	fill_label.position = Vector2(16 * ui_scale, 112 if not _touch_ui() else 96 * ui_scale)
+	if _touch_ui():
+		fill_label.add_theme_font_size_override("font_size", 15 * ui_scale)
 	fill_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
 	fill_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	fill_label.add_theme_constant_override("outline_size", 4)
