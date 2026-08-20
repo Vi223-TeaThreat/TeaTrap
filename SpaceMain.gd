@@ -115,11 +115,27 @@ var frame_mat: ShaderMaterial
 var frame_id: String = ""
 var fill_label: Label
 
+var _plain: bool = false          # `--plain`: голая форма, без покраски
 var rock_mat: ShaderMaterial
 var grass_mat: ShaderMaterial
 
 
 func _ready() -> void:
+	# ГОЛАЯ ФОРМА — режим для ОДНОГО дела: понять, что кривит камень, сама
+	# поверхность или то, чем её красят. На обычном кадре их не различить, и
+	# по нему одинаково убедительно виноваты и складки поля, и порог дёрна,
+	# который даёт прямую линию поперёк треугольника, и ступени тона.
+	#
+	# Снимает всё, что не форма: дёрн, ступени тона, затемнение щелей, цвет
+	# породы, свет по граням. Остаётся серая поверхность под обычным светом —
+	# на ней видно ровно то, что есть в геометрии, и ничего сверх.
+	#
+	# Читаем ДО постройки мира: свет по граням запекается в нормали при сборке
+	# куска, после неё его уже не снять.
+	_plain = "--plain" in OS.get_cmdline_user_args()
+	if _plain:
+		SurfaceScript.face_light = 0.0
+
 	# Первая прикидка — от плотности экрана. Подсказка строится по ней и такой
 	# и останется; панель потом ещё ужмётся, если перебрала долю экрана.
 	ui_scale = _screen_ui_scale()
@@ -167,6 +183,21 @@ func _setup_materials() -> void:
 	rock_mat = ShaderMaterial.new()
 	rock_mat.shader = load("res://Terrain.gdshader")
 	grass_mat = rock_mat
+	if _plain:
+		# Один серый цвет на всё, и ни одного порога сверху. Дёрн не растёт
+		# нигде (наклон выше единицы недостижим), щели не темнеют, ступеней
+		# тона нет. См. `--plain` в `_ready`.
+		var grey := Color(0.55, 0.55, 0.55)
+		for name in ["rock_dark", "rock_light", "soil_dark", "soil_light",
+				"turf_deep", "turf_lit", "turf_dry"]:
+			rock_mat.set_shader_parameter(name, grey)
+		rock_mat.set_shader_parameter("mantle_soil", 9.0)
+		rock_mat.set_shader_parameter("mantle_stone", 9.0)
+		rock_mat.set_shader_parameter("moss_crack", 0.0)
+		rock_mat.set_shader_parameter("moss_damp", 0.0)
+		rock_mat.set_shader_parameter("bald", 0.0)
+		rock_mat.set_shader_parameter("cavity_dark", 0.0)
+		rock_mat.set_shader_parameter("posterize", 0.0)
 
 
 func _setup_environment() -> void:
@@ -707,15 +738,27 @@ func _update_frame() -> void:
 	if PlantsData.is_plant(current_tool) or PlantsData.is_prop(current_tool):
 		_update_frame_spot()
 		return
+	# ПОДСВЕТКА ПОКАЗЫВАЕТ ТО, ЧТО СДЕЛАЕТ КИСТЬ, — и ничего сверх того. Кисть
+	# кладёт мазок ПО ТОЧКЕ под курсором (`_paint`) и про соседние ячейки не
+	# знает вовсе. А подсветка пряталась, если ячейка СНАРУЖИ поверхности
+	# оказывалась породой: это осталось от прежнего инструмента, который ставил
+	# блок в ячейку, и с нынешней кистью не связано ничем.
+	#
+	# Наружу шагают на полшага решётки (`_pick`), и в узкой щели или под
+	# нависшим краем этот шаг упирается в камень напротив. Выходило хуже всего
+	# там, где игрок как раз и хочет подровнять: кисть работает, а курсор
+	# погас — и место выглядит неприкасаемым.
 	var pick := _pick(get_viewport().get_mouse_position())
-	var target: int = -1 if pick.is_empty() else int(pick["target"])
-	if target < 0 or not grid.in_play(target) or solid.has(target):
+	if not pick.has("pos"):
 		frame_node.visible = false
 		frame_id = ""
 		return
-
-	if not pick.has("pos"):
+	# Накладку ведём от ячейки ПОД поверхностью, а не от той, что снаружи:
+	# именно её видно, и она есть всегда, пока луч во что-то попал.
+	var here: int = int(pick["hit"])
+	if here < 0 or not grid.in_play(here):
 		frame_node.visible = false
+		frame_id = ""
 		return
 	frame_node.visible = true
 
@@ -734,11 +777,11 @@ func _update_frame() -> void:
 	frame_mat.set_shader_parameter("tone", DIG_TONE)
 	frame_mat.set_shader_parameter("strength", 0.55)
 
-	var id := "%d:%d" % [target, _active_brush(erasing)]
+	var id := "%d:%d" % [here, _active_brush(erasing)]
 	if id == frame_id:
 		return
 	frame_id = id
-	var node: Vector3i = grid.node_of(target)
+	var node: Vector3i = grid.node_of(here)
 	# Накладка должна вмещать весь круг подсветки, иначе контур обрезается
 	# квадратом. Считаем от настоящего радиуса, а не от номера кисти.
 	var span := int(ceil(_brush_radius(erasing) / CELL_SPACING)) + 1
@@ -2148,6 +2191,13 @@ func _seed_vines(count: int) -> void:
 			planted += 1
 
 
+# Голые кадры кладём ПОД ДРУГИМ ИМЕНЕМ. Оба прогона нужны рядом — их и
+# сравнивают, — а второй прогон затирал бы файлы первого, и сравнивать было бы
+# не с чем. Перекладывать их руками между прогонами — лишний повод ошибиться.
+func _shot_name(base: String) -> String:
+	return "user://" + base + ("_plain" if _plain else "") + ".png"
+
+
 func _shot_mode() -> void:
 	frame_node.visible = false
 	_seed_moss(8)
@@ -2165,7 +2215,7 @@ func _shot_mode() -> void:
 	for _i in range(12):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
-	get_viewport().get_texture().get_image().save_png("user://space.png")
+	get_viewport().get_texture().get_image().save_png(_shot_name("space"))
 
 	cur_zoom = 14.0
 	target_zoom = 14.0
@@ -2178,7 +2228,7 @@ func _shot_mode() -> void:
 	for _i in range(6):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw
-	get_viewport().get_texture().get_image().save_png("user://space_close.png")
+	get_viewport().get_texture().get_image().save_png(_shot_name("space_close"))
 	# Макро-кадр: подлетаем вплотную к кочке мха — но выбираем ту, что ПОДАЛЬШЕ
 	# ОТ КАМНЯ. У камня сидят лианы, они крупнее мха, и вблизи кадр упирался в
 	# их плети: мха за ними было не разглядеть.
@@ -2213,7 +2263,7 @@ func _shot_mode() -> void:
 		for _i in range(4):
 			await get_tree().process_frame
 		await RenderingServer.frame_post_draw
-		get_viewport().get_texture().get_image().save_png("user://space_macro.png")
+		get_viewport().get_texture().get_image().save_png(_shot_name("space_macro"))
 
 	# Кадр на обрыв: по нему видно слоистость породы и край зелени на кромке.
 	# Надписи убираем — тут смотрят на породу, а не на управление.
@@ -2231,12 +2281,20 @@ func _shot_mode() -> void:
 		cur_zoom = 3.4
 		target_zoom = 3.4
 		cur_pitch = -8.0
-		cur_yaw = 25.0
-		_apply_camera()
-		for _i in range(4):
-			await get_tree().process_frame
-		await RenderingServer.frame_post_draw
-		get_viewport().get_texture().get_image().save_png("user://space_cliff.png")
+		# ТРИ ПОВОРОТА, А НЕ ОДИН. Кадр с одной стороны — это лотерея: беда у
+		# подошвы глыбы вылезает с той стороны, с какой легли складки, и с
+		# другой её просто не видно. Углы разнесены на треть оборота, мир и
+		# камера заданы жёстко — значит, эти же три кадра, снятые с `--plain`,
+		# ложатся на прежние точка в точку и сравниваются напрямую.
+		var shots := [[25.0, "space_cliff"], [145.0, "space_cliff_b"],
+			[265.0, "space_cliff_c"]]
+		for shot in shots:
+			cur_yaw = float(shot[0])
+			_apply_camera()
+			for _i in range(4):
+				await get_tree().process_frame
+			await RenderingServer.frame_post_draw
+			get_viewport().get_texture().get_image().save_png(_shot_name(String(shot[1])))
 
 	print("Кадры сохранены в: ", ProjectSettings.globalize_path("user://"))
 	get_tree().quit()
