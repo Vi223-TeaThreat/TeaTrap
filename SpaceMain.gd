@@ -233,6 +233,14 @@ func _setup_camera() -> void:
 
 
 func _process(delta: float) -> void:
+	# Жест разбираем РАЗ В КАДР и до сглаживания камеры: к этому мигу оба
+	# пальца уже на своих местах, и замер выходит честным.
+	if _gesture_dirty:
+		_gesture_dirty = false
+		# Пальцы могли оторваться в том же кадре, в котором ещё двигались —
+		# без этой проверки пересчёт полез бы в несуществующую пару.
+		if _gesture_on and _touches.size() >= 2:
+			_gesture_update()
 	var t: float = 1.0 - exp(-delta * SMOOTH)
 	cur_yaw = lerpf(cur_yaw, target_yaw, t)
 	cur_pitch = lerpf(cur_pitch, target_pitch, t)
@@ -1398,6 +1406,7 @@ func _unhandled_input(event: InputEvent) -> void:
 # чего мышью не изобразить: второй палец и всё, что он приносит.
 const TOUCH_PAN: float = 0.0022    # палец грубее мыши — шаг панорамы крупнее
 const TWIST_DEAD: float = 0.35     # градусы: дрожание пальцев — ещё не поворот
+const TOUCH_EASE: float = 0.35     # насколько замер идёт за пальцем, а не за шумом
 
 const TAP_AGAIN: float = 0.45      # секунд между нажатиями, чтобы счесть их двойным
 const TAP_NEAR: float = 44.0       # ...и насколько близко второе к первому, в точках
@@ -1407,6 +1416,7 @@ var _touch_pos: Vector2 = Vector2.ZERO   # где палец, ведущий к�
 var _tap_time: float = -10.0
 var _tap_pos: Vector2 = Vector2.ZERO
 var _gesture_on: bool = false
+var _gesture_dirty: bool = false   # пальцы сдвинулись — пересчитать в начале кадра
 var _pinch_span: float = 0.0       # расстояние между пальцами
 var _pinch_mid: Vector2 = Vector2.ZERO
 var _pinch_turn: float = 0.0       # наклон линии между пальцами, радианы
@@ -1461,7 +1471,11 @@ func _touch_input(event: InputEvent) -> void:
 	elif event is InputEventScreenDrag:
 		_touches[event.index] = event.position
 		if _gesture_on and _touches.size() >= 2:
-			_gesture_update()
+			# НЕ считаем прямо здесь. События приходят по одному на палец и по
+			# нескольку за кадр, и тогда новое положение одного пальца
+			# считалось бы против СТАРОГО положения второго — из этого
+			# рождались поворот и зум, которых рука не делала.
+			_gesture_dirty = true
 		elif _touches.size() == 1:
 			_touch_pos = event.position
 
@@ -1494,6 +1508,14 @@ func _gesture_update() -> void:
 	var mid: Vector2 = (a + b) * 0.5
 	var turn: float = (b - a).angle()
 
+	# Палец на стекле дрожит, и его положение приходит с шумом. Ведём замеры
+	# СГЛАЖЕННО: без этого дрожь уходит прямо в поворот и зум, и вид трясётся
+	# даже когда рука лежит неподвижно. Движение при этом не теряется —
+	# сглаженный замер догоняет настоящий, просто на кадр позже.
+	span = lerpf(_pinch_span, span, TOUCH_EASE)
+	mid = _pinch_mid.lerp(mid, TOUCH_EASE)
+	turn = _pinch_turn + wrapf(turn - _pinch_turn, -PI, PI) * TOUCH_EASE
+
 	# Щипок — приближение. Берём ОТНОШЕНИЕ, а не разность: иначе у самого лица
 	# и на общем плане одно и то же движение пальцев меняло бы вид по-разному.
 	target_zoom = clampf(target_zoom * (_pinch_span / span), 0.8, 140.0)
@@ -1510,7 +1532,10 @@ func _gesture_update() -> void:
 	# вид расползался бы вбок на каждом движении.
 	var twist: float = rad_to_deg(wrapf(turn - _pinch_turn, -PI, PI))
 	if absf(twist) > TWIST_DEAD:
-		target_yaw += twist
+		# Мёртвую зону ВЫЧИТАЕМ, а не перешагиваем. Прежде поворот, едва
+		# перевалив порог, применялся целиком — вид трогался рывком на её
+		# величину, а у самого порога дёргался туда-сюда.
+		target_yaw += twist - signf(twist) * TWIST_DEAD
 
 	_pinch_span = span
 	_pinch_mid = mid
