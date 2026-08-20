@@ -96,6 +96,12 @@ const MODES := [
 	{"erase": true, "label": "снять"},
 ]
 
+# РАЗДЕЛЫ, СКРЫТЫЕ ИЗ ПАНЕЛИ. Валуны, обломки и коряги пока рисуются
+# заглушками и в демо только сбивают с толку: друг тычет в них, получает
+# непонятное и решает, что игра сломана. Сам раздел и все его карточки в
+# `Plants.gd` целы — чтобы вернуть, достаточно опустошить этот список.
+const HIDDEN_GROUPS: Array = [3]     # 3 — «Объекты»
+
 const SPEEDS := [
 	{"value": 0.0, "label": "стоп"},
 	{"value": 0.5, "label": "½×"},
@@ -879,6 +885,8 @@ func _setup_toolbar() -> void:
 	# из них — иначе список занимал бы полэкрана.
 	for group in PlantsData.GROUPS:
 		var g: int = group["key"]
+		if g in HIDDEN_GROUPS:
+			continue
 		var head := _list_button()
 		head.pressed.connect(_toggle_group.bind(g))
 		column.add_child(head)
@@ -1014,6 +1022,10 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 
 
 func _toggle_group(group: int) -> void:
+	# Скрытый раздел не сворачивается: клавиша с его номером осталась, а самой
+	# строки в панели нет — без этой проверки цифра 3 роняла бы игру.
+	if not group_open.has(group):
+		return
 	group_open[group] = not group_open[group]
 	_refresh_toolbar()
 
@@ -1074,6 +1086,8 @@ func _refresh_toolbar() -> void:
 	# считаются по ширине шрифта и на мелком кегле разъезжаются.
 	for group in PlantsData.GROUPS:
 		var g: int = group["key"]
+		if g in HIDDEN_GROUPS:
+			continue
 		var open: bool = group_open[g]
 		# Номер оставляем: по нему раздел сворачивается с клавиатуры.
 		group_headers[g].text = "%s %d %s" % ["▾" if open else "▸", g, group["name"]]
@@ -1130,7 +1144,7 @@ func _setup_hint() -> void:
 	# строки там не только занимают пол-экрана, но и врут — ни Shift, ни
 	# колеса, ни боковых кнопок на телефоне нет.
 	if _touch_ui():
-		label.text = "Палец ведёт кисть · два пальца двигают вид\nЧто кисть делает — в панели слева"
+		label.text = "Палец ведёт кисть · растения — двойным нажатием\nДва пальца двигают вид · что класть — в панели слева"
 		label.add_theme_font_size_override("font_size", 15 * ui_scale)
 	else:
 		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
@@ -1231,7 +1245,12 @@ func _hold_tick(delta: float) -> void:
 	if _hold_wait > 0.0:
 		return
 	_hold_wait = _hold_step()
-	_apply_at(get_viewport().get_mouse_position(), held_erase)
+	# Пока палец на стекле, ведём кисть ПО ПАЛЬЦУ, а не по подставному курсору:
+	# курсор идёт за касанием сам, но у него своя жизнь — после отрыва он
+	# остаётся там, где был, и повторный мазок уходил бы в старое место.
+	var at: Vector2 = _touch_pos if not _touches.is_empty() \
+		else get_viewport().get_mouse_position()
+	_apply_at(at, held_erase)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1240,6 +1259,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			orbiting = event.pressed
 		elif event.button_index == MOUSE_BUTTON_MIDDLE:
 			panning = event.pressed
+		elif event.button_index == MOUSE_BUTTON_LEFT and _plant_tap(event):
+			pass                # растение на стекле сажают двойным нажатием
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			# Кисть ведут НАЖАТИЕМ И УДЕРЖАНИЕМ. Пока кнопка держится, мазок
 			# повторяется сам — иначе насыпать холм значит долбить по кнопке
@@ -1286,17 +1307,53 @@ func _unhandled_input(event: InputEvent) -> void:
 const TOUCH_PAN: float = 0.0022    # палец грубее мыши — шаг панорамы крупнее
 const TWIST_DEAD: float = 0.35     # градусы: дрожание пальцев — ещё не поворот
 
+const TAP_AGAIN: float = 0.45      # секунд между нажатиями, чтобы счесть их двойным
+const TAP_NEAR: float = 44.0       # ...и насколько близко второе к первому, в точках
+
 var _touches: Dictionary = {}      # палец -> где он сейчас
+var _touch_pos: Vector2 = Vector2.ZERO   # где палец, ведущий кисть
+var _tap_time: float = -10.0
+var _tap_pos: Vector2 = Vector2.ZERO
 var _gesture_on: bool = false
 var _pinch_span: float = 0.0       # расстояние между пальцами
 var _pinch_mid: Vector2 = Vector2.ZERO
 var _pinch_turn: float = 0.0       # наклон линии между пальцами, радианы
 
 
+# РАСТЕНИЯ НА СТЕКЛЕ САЖАЮТ ДВОЙНЫМ НАЖАТИЕМ, а не одиночным.
+#
+# Землю и камень ведут удержанием, и палец на них лежит подолгу. Если тем же
+# движением сажать, то каждое касание при лепке роняло бы кочку — а на стекле
+# касание случается и когда просто примеряешься, куда ткнуть.
+#
+# Возвращает true, если событие разобрано здесь и обычному удержанию его
+# отдавать не нужно. На мыши всегда false: там ничего не меняется.
+func _plant_tap(event: InputEventMouseButton) -> bool:
+	if not _touch_ui() or not PlantsData.is_plant(current_tool):
+		return false
+	if erase_mode or event.shift_pressed:
+		return false             # снятие оставляем одиночным: убирать — не сажать
+	if not event.pressed:
+		return true              # отпускание гасим: проведения тут нет
+	var now: float = float(Time.get_ticks_msec()) / 1000.0
+	var near: bool = event.position.distance_to(_tap_pos) < TAP_NEAR * float(ui_scale)
+	if now - _tap_time < TAP_AGAIN and near:
+		_open_group()            # посадка — одна отмена, как и мазок
+		_apply_at(event.position, false)
+		_close_group()
+		_tap_time = -10.0        # третье нажатие подряд — уже не двойное
+	else:
+		_tap_time = now
+		_tap_pos = event.position
+	return true
+
+
 func _touch_input(event: InputEvent) -> void:
 	if event is InputEventScreenTouch:
 		if event.pressed:
 			_touches[event.index] = event.position
+			if _touches.size() == 1:
+				_touch_pos = event.position
 			if _touches.size() == 2:
 				# Второй палец означает «я двигаю камеру, а не леплю».
 				# Мазок, успевший лечь под первым пальцем, снимаем: щипок,
@@ -1313,6 +1370,8 @@ func _touch_input(event: InputEvent) -> void:
 		_touches[event.index] = event.position
 		if _gesture_on and _touches.size() >= 2:
 			_gesture_update()
+		elif _touches.size() == 1:
+			_touch_pos = event.position
 
 
 # Считаем по ДВУМ ПЕРВЫМ пальцам. Третий и дальше игнорируем: ладонь, легшая
