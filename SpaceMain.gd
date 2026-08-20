@@ -120,8 +120,8 @@ var grass_mat: ShaderMaterial
 
 
 func _ready() -> void:
-	# Решаем ОДИН раз и до всякой вёрстки: и подсказка, и панель строятся по
-	# этому числу, а перестроить их на ходу нечем.
+	# Первая прикидка — от плотности экрана. Подсказка строится по ней и такой
+	# и останется; панель потом ещё ужмётся, если перебрала долю экрана.
 	ui_scale = _screen_ui_scale()
 	_setup_materials()
 	_setup_environment()
@@ -131,6 +131,9 @@ func _ready() -> void:
 	_setup_hint()
 	_build_world()
 	_setup_toolbar()
+	# БЕЗ await: подгонка ждёт кадров вёрстки, а остальному запуску ждать её
+	# незачем — мир и растения поднимаются своим чередом.
+	_fit_menu()
 
 	plants = SpacePlantsScript.new()
 	add_child(plants)
@@ -815,6 +818,64 @@ func _touch_ui() -> bool:
 	return ui_scale > 1
 
 
+# МЕНЮ НЕ ЗАНИМАЕТ БОЛЬШЕ СЕДЬМОЙ ЧАСТИ ЭКРАНА.
+#
+# Множитель от плотности даёт панель одного размера под пальцем на любом
+# телефоне — но на небольшом экране этот размер съедает пол-вида, и играть
+# становится не во что. Поэтому после вёрстки меряем, что вышло, и если панель
+# перебрала долю — СОБИРАЕМ ЗАНОВО с меньшим множителем.
+#
+# Готовую панель не сжимаем намеренно: сжатая рисует шрифт из чужого кегля и
+# мылит его, а список мы только что делали читаемым.
+const MENU_SHARE: float = 1.0 / 7.0
+
+var toolbar_layer: CanvasLayer
+var toolbar_panel: PanelContainer
+
+
+func _fit_menu() -> void:
+	# Ужимаем шагами: множитель целый, и одного пересчёта хватает почти всегда,
+	# но запас на случай, если доля окажется совсем тесной.
+	for _step in range(4):
+		if ui_scale <= 1:
+			return
+		# Контейнеры считают свой размер не сразу — ждём, пока вёрстка осядет.
+		await get_tree().process_frame
+		await get_tree().process_frame
+		if toolbar_panel == null:
+			return
+		var screen: Vector2 = get_viewport().get_visible_rect().size
+		var budget: float = screen.x * screen.y * MENU_SHARE
+		var taken: float = toolbar_panel.size.x * toolbar_panel.size.y
+		if taken <= 0.0 or taken <= budget:
+			return
+		# Площадь растёт как квадрат множителя, поэтому нужную долю берём
+		# корнем. Округляем ВНИЗ: лучше чуть мельче доли, чем чуть крупнее.
+		var want: int = int(floor(float(ui_scale) * sqrt(budget / taken)))
+		ui_scale = clampi(want, 1, ui_scale - 1)
+		_clear_toolbar()
+		_setup_toolbar()
+
+
+func _clear_toolbar() -> void:
+	if toolbar_layer != null:
+		toolbar_layer.visible = false      # чтобы старая не мелькнула поверх новой
+		toolbar_layer.queue_free()
+	toolbar_layer = null
+	toolbar_panel = null
+	group_headers.clear()
+	group_boxes.clear()
+	group_open.clear()
+	branch_headers.clear()
+	branch_boxes.clear()
+	branch_open.clear()
+	tool_buttons.clear()
+	speed_buttons.clear()
+	brush_buttons.clear()
+	erase_buttons.clear()
+	mode_buttons.clear()
+
+
 # Просвет между переключателями. На мыши его нет — там они читаются как одна
 # строка; на стекле подложки без просвета слиплись бы в сплошную плашку.
 func _chip_gap() -> int:
@@ -887,8 +948,10 @@ func _chip_box(alpha: float) -> StyleBoxFlat:
 func _setup_toolbar() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
+	toolbar_layer = layer
 
 	var panel := PanelContainer.new()
+	toolbar_panel = panel
 	panel.add_theme_stylebox_override("panel", _panel_box(true))
 	panel.anchor_top = 1.0
 	panel.anchor_bottom = 1.0
