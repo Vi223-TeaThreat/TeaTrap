@@ -122,7 +122,7 @@ var grass_mat: ShaderMaterial
 func _ready() -> void:
 	# Решаем ОДИН раз и до всякой вёрстки: и подсказка, и панель строятся по
 	# этому числу, а перестроить их на ходу нечем.
-	ui_scale = 2 if DisplayServer.is_touchscreen_available() else 1
+	ui_scale = _screen_ui_scale()
 	_setup_materials()
 	_setup_environment()
 	_setup_light()
@@ -789,6 +789,27 @@ const UI_FONT_SMALL: int = 11
 # остаётся как было: там мелкий плотный список выверен и менять его незачем.
 var ui_scale: int = 1
 
+# ВО СКОЛЬКО РАЗ ПАНЕЛЬ КРУПНЕЕ НА СТЕКЛЕ, считая от плотности экрана.
+#
+# Godot рисует в НАСТОЯЩИХ пикселях экрана, а у телефона их два-три на каждый
+# условный. Поэтому постоянный множитель врёт: одно и то же число даёт разный
+# размер под пальцем на разных телефонах, и чем экран плотнее, тем панель
+# мельче. Берём плотность и умножаем на два — палец толще курсора, и вдвое
+# крупнее мышиной вёрстки это как раз его размер.
+const TOUCH_GAIN: float = 2.0      # во сколько раз крупнее мышиного при той же плотности
+
+
+func _screen_ui_scale() -> int:
+	if not DisplayServer.is_touchscreen_available():
+		return 1
+	var density: float = DisplayServer.screen_get_scale()
+	if density <= 0.0:
+		# Не всякая платформа умеет отдавать плотность напрямую — тогда считаем
+		# её из числа точек на дюйм, где 96 на дюйм это обычный экран.
+		var dpi: int = DisplayServer.screen_get_dpi()
+		density = float(dpi) / 96.0 if dpi > 0 else 1.0
+	return clampi(int(round(density * TOUCH_GAIN)), 2, 6)
+
 
 func _touch_ui() -> bool:
 	return ui_scale > 1
@@ -1090,16 +1111,20 @@ func _refresh_toolbar() -> void:
 			continue
 		var open: bool = group_open[g]
 		# Номер оставляем: по нему раздел сворачивается с клавиатуры.
-		group_headers[g].text = "%s %d %s" % ["▾" if open else "▸", g, group["name"]]
+		group_headers[g].text = "%s %d %s" % ["-" if open else "+", g, group["name"]]
 		group_boxes[g].visible = open
 		for t in group["tiers"]:
 			var info := PlantsData.tier_info(t)
 			if branch_headers.has(t):
 				branch_headers[t].text = "  %s %s" % [
-					"▾" if branch_open[t] else "▸", info["name"]]
+					"-" if branch_open[t] else "+", info["name"]]
 			branch_boxes[t].visible = branch_open[t] or not branch_headers.has(t)
+	# ЗНАЧКИ СПИСКА — ТОЛЬКО ИЗ ASCII. Прежде тут стояли ▾ ▸ ● ○, и встроенный
+	# шрифт Godot их не знает: вместо значка он рисует рамку с кодом буквы
+	# внутри — те самые «прямоугольники с двумя цифрами и двумя буквами». Свой
+	# шрифт ради четырёх значков в демо тащить незачем.
 	for id in tool_buttons:
-		var mark := "●" if id == current_tool else "○"
+		var mark := "*" if id == current_tool else " "
 		tool_buttons[id].text = "   %s %s" % [mark, PlantsData.ITEMS[id]["name"]]
 
 
@@ -1145,7 +1170,9 @@ func _setup_hint() -> void:
 	# колеса, ни боковых кнопок на телефоне нет.
 	if _touch_ui():
 		label.text = "Палец ведёт кисть · растения — двойным нажатием\nДва пальца двигают вид · что класть — в панели слева"
-		label.add_theme_font_size_override("font_size", 15 * ui_scale)
+		# Кегль тоже от плотности: 11 на условный пиксель читается с вытянутой
+		# руки и на редком, и на плотном экране одинаково.
+		label.add_theme_font_size_override("font_size", 11 * ui_scale)
 	else:
 		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
 	label.position = Vector2(16 * ui_scale, 16 * ui_scale)
@@ -1156,9 +1183,11 @@ func _setup_hint() -> void:
 
 	# Пока остров достраивается, честно показываем, сколько уже готово.
 	fill_label = Label.new()
-	fill_label.position = Vector2(16 * ui_scale, 112 if not _touch_ui() else 96 * ui_scale)
+	# Под подсказкой: на стекле она в две строки, и место под неё считаем от
+	# того же кегля, иначе на плотном экране надпись уезжала бы на середину.
+	fill_label.position = Vector2(16 * ui_scale, 52 * ui_scale if _touch_ui() else 112)
 	if _touch_ui():
-		fill_label.add_theme_font_size_override("font_size", 15 * ui_scale)
+		fill_label.add_theme_font_size_override("font_size", 11 * ui_scale)
 	fill_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
 	fill_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	fill_label.add_theme_constant_override("outline_size", 4)
