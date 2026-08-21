@@ -984,16 +984,33 @@ func bulge_at(index: int, from_edits: bool = false) -> float:
 #
 # Считаем ПОЛЕМ, а не лучом по телу столкновений: луч можно пускать только в
 # такт физики, а рост растений идёт своим ходом и в проверке — вообще без окна.
+#
+# ПОЧЕМУ НЕ НАШЛОСЬ — пишем в `near_why`. Отказ бывает по пяти разным причинам, и
+# по одному числу отказов не видно, какая из них работает; а работать может
+# ошибочно. Спрашивать сразу после отказа.
+const NEAR_OK: int = 0
+const NEAR_OUT: int = 1              # ячейки нет или она вне игры
+const NEAR_FLAT: int = 2             # поле ровное, спускаться некуда
+const NEAR_LEVEL: int = 3            # поле у семени далеко от уровня земли
+const NEAR_FAR: int = 4              # ушли от точки дальше полутора ячеек
+const NEAR_FACET: int = 5            # не села на срез
+const NEAR_NAMES := ["село", "вне игры", "поле ровное", "поле не у уровня",
+	"ушло далеко", "мимо среза"]
+var near_why: int = 0
+
 func surface_near(p: Vector3) -> Dictionary:
 	var at := p
 	var j: int = -1
+	near_why = NEAR_OK
 	for _step in range(3):
 		j = cell_at(at)
 		if j < 0 or not in_play(j):
+			near_why = NEAR_OUT
 			return {}
 		var g: Vector3 = field_slope(j)
 		var mag2: float = g.length_squared()
 		if mag2 < 0.0000001:
+			near_why = NEAR_FLAT
 			return {}
 		var here: float = fill[j] + g.dot(at - seeds[j])
 		# Шаг ОГРАНИЧЕН одной ячейкой. Наклон — это прямая, продолженная от
@@ -1007,29 +1024,47 @@ func surface_near(p: Vector3) -> Dictionary:
 		at += move
 	j = cell_at(at)
 	if j < 0 or not in_play(j):
+		near_why = NEAR_OUT
+		return {}
+	var n: Vector3 = field_slope(j)
+	if n.length_squared() < 0.0000001:
+		near_why = NEAR_FLAT
 		return {}
 	# ПРОВЕРЯЕМ, ЧТО ПРИШЛИ. Поле у семени продолжается прямой, и если точка
 	# села далеко от него, значит прямую продолжили за пределы, где она верна:
 	# такому месту верить нельзя, лучше признать, что земли рядом нет.
-	if absf(fill[j] - SOLID_AT) > 0.5:
+	#
+	# МЕРИТЬ НАДО РАССТОЯНИЕМ, А НЕ САМИМ ПОЛЕМ. Прежде здесь стояло «доля поля у
+	# семени не дальше половины от уровня» — и это порог по величине, поставленный
+	# без оглядки на её размах, ровно те грабли, что уже записаны. Размах у поля
+	# СВОЙ В КАЖДОМ МЕСТЕ: на ровной земле оно переходит от нуля к единице за пару
+	# ячеек, а камень поднимает его больше чем на единицу за одну. Оттого у камня
+	# ближайшее семя почти всегда оказывалось «далеко от уровня», и посадка
+	# отказывала там, где земля прекрасно видна.
+	#
+	# Наклон переводит долю поля в метры: сколько до уровня идти. Полторы ячейки —
+	# та же мерка, что и у ухода от точки ниже.
+	if absf(fill[j] - SOLID_AT) / n.length() > _spacing * 1.5:
+		near_why = NEAR_LEVEL
 		return {}
 	if at.distance_to(p) > _spacing * 1.5:
-		return {}
-	var n: Vector3 = field_slope(j)
-	if n.length_squared() < 0.0000001:
+		near_why = NEAR_FAR
 		return {}
 	# И ТОЛЬКО ТЕПЕРЬ — НА САМУ ПОВЕРХНОСТЬ. Всё выше было приближением по
 	# наклону; последний шаг сажает точку на срез того же поля, по которому
 	# режется картинка. Без него растение сидело рядом с землёй, а не на ней.
 	var exact: Dictionary = _snap_to_facet(at, j)
 	if exact.is_empty():
+		near_why = NEAR_FACET
 		return {}
 	at = exact["pos"]
 	j = exact["cell"]
 	if at.distance_to(p) > _spacing * 1.5:
+		near_why = NEAR_FAR
 		return {}
 	n = field_slope(j)
 	if n.length_squared() < 0.0000001:
+		near_why = NEAR_FLAT
 		return {}
 	return {"pos": at, "nrm": -n.normalized(), "cell": j}
 
