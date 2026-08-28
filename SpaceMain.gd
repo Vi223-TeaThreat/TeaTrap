@@ -1874,12 +1874,29 @@ func _selftest() -> void:
 	print("Мох на снесённой земле: было ", moss_before,
 		", осталось ", _moss_count())
 
+	# СРОК ЗДЕСЬ ОТМЕРЕН НЕ ВРЕМЕНЕМ, А САДОМ. Растения ускорены вдвое (решение
+	# пользователя 2026-08-21), и прежние сорок пять секунд дают теперь впятеро
+	# больше кочек: рост складывается сам с собой, и вдвое быстрее по времени —
+	# это куда больше, чем вдвое по числу. Ждём вдвое меньше, чтобы сад выходил
+	# ТОТ ЖЕ, что и во всех прежних замерах, — иначе ни одно записанное число
+	# не с чем будет сравнить.
 	var t1 := Time.get_ticks_usec()
-	for _i in range(300):
+	for _i in range(150):
 		plants._tick(0.15)
 	var grow := (Time.get_ticks_usec() - t1) / 1000.0
+	# ПЕРЕСБОРКУ МЕРЯЕМ ОТДЕЛЬНО ОТ РОСТА. Рост её больше не делает — только
+	# помечает, — а собирает кадр с запасом. Это две разные цены, и лечатся они
+	# разным: рост дешевеет правилами, пересборка — размером кусков.
+	var t2 := Time.get_ticks_usec()
+	plants.flush_now()
+	var draw := (Time.get_ticks_usec() - t2) / 1000.0
+	var built: Vector2 = plants.rebuild_stats()
 	print("Растения: кочек — ", _moss_count(),
-		", 45 секунд роста за ", snappedf(grow, 0.1), " мс")
+		", 22 секунды роста за ", snappedf(grow, 0.1), " мс")
+	print("Пересборка сада: ", snappedf(draw, 0.1), " мс на ", int(built.x),
+		" кусков, самый дорогой — ", snappedf(built.y, 0.1),
+		" мс; запас на кадр ", snappedf(plants.REBUILD_MS, 0.1),
+		" мс — дорогой кусок его не делится и перебирает в одиночку")
 
 	# СИДИТ ЛИ МОХ НА ЗЕМЛЕ. Промах считаем до того самого среза, по которому
 	# режется картинка: сколько тут метров — столько глаз и видит просвета под
@@ -1920,6 +1937,7 @@ func _selftest() -> void:
 	# ЧЕМ КОЧКА ОБХОДИТСЯ. Объём у неё теперь настоящий — тело куполом, — и это
 	# та цена, которую надо держать на виду: мох должен выглядеть пушистым, но
 	# заросший остров — это тысячи кочек.
+	plants.flush_now()          # меши собираются с запасом на кадр — здесь ждать нечего
 	var tris := 0
 	for cell in plants.cell_nodes:
 		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
@@ -2350,11 +2368,13 @@ func _vine_grown_check() -> void:
 	for pid in plants.patches.keys():
 		if String(plants.patches[pid]["id"]) == "moss":
 			plants.remove_at(pid)
-	for _i in range(1200):
+	# Срок вдвое короче прежнего: растения ускорены вдвое, и сад выходит тот же —
+	# см. про это у проверки мха выше.
+	for _i in range(600):
 		plants._tick(0.15)
 	var big: Dictionary = plants.vine_stats()
 	var links: float = maxf(1.0, float(big["links"]))
-	print("Лиана взрослая (три минуты): звеньев — ", big["links"],
+	print("Лиана взрослая (полторы минуты): звеньев — ", big["links"],
 		", развилок — ", big["forks"], ", то есть одна на ",
 		snappedf(links / maxf(1.0, float(big["forks"])), 0.1), " звеньев")
 	print("Лиана взрослая: толщина от ",
@@ -2396,6 +2416,7 @@ func _vine_grown_check() -> void:
 	# ЧЕМ ЛИСТВА ОБХОДИТСЯ. Дощечка листа — восемь треугольников, а листьев у
 	# взрослой лианы больше, чем звеньев: это самая дорогая её часть, и держать
 	# её цену на виду стоит с самого начала.
+	plants.flush_now()          # меши собираются с запасом на кадр — здесь ждать нечего
 	var tris := 0
 	for cell in plants.cell_nodes:
 		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
@@ -2472,10 +2493,10 @@ func _vine_hang_check() -> void:
 	if plants.plant_at(_hang_at, "vine") < 0:
 		print("Лиана у кромки: на самой кромке лиана не села — там ей не место")
 		return
-	for _i in range(800):
+	for _i in range(400):
 		plants._tick(0.15)
 	var out: Dictionary = plants.vine_stats()
-	print("Лиана у кромки (две минуты): звеньев — ", out["links"],
+	print("Лиана у кромки (минута): звеньев — ", out["links"],
 		", свисающих плетей — ", out["plaits"], ", звеньев в них ", out["hangs"],
 		", самая длинная ", out["plait"], " звеньев и свесилась на ",
 		snappedf(float(out["drop"]) * 100.0, 0.1),
@@ -2494,11 +2515,11 @@ func _vine_tip_check() -> void:
 			continue
 		plants.remove_at(pid)
 		killed += 1
-	for _i in range(400):
+	for _i in range(200):
 		plants._tick(0.15)
 	var after: int = int(plants.vine_stats()["links"])
 	print("Лиана без кончиков: снято ", killed, " из ", before,
-		" звеньев, за минуту отросло ", after - (before - killed),
+		" звеньев, за полминуты отросло ", after - (before - killed),
 		" — ноль значил бы, что плеть встала навсегда")
 
 
