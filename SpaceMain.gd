@@ -78,6 +78,11 @@ var _buried_cache: Dictionary = {}
 var paint: Dictionary = {}        # ячейка -> каким материалом её мазали
 var brush: int = 1                # ширина кисти в ячейках: 1, 2 или 3
 var erase_brush: int = 1          # ... и своя ширина у снятия
+# И СВОЯ ШИРИНА У РОСТА (решение пользователя 2026-08-29: «добавь размеры для
+# кисти роста»). Своя она по той же причине, по какой своя у снятия: лепят и
+# растят по-разному, и переключать одну ширину на каждом шаге — мука. Начинает
+# со средней: рост тычком в одну кочку — редкий случай, обычно ведут по куртине.
+var grow_brush: int = 2
 # РЕЖИМ СНЯТИЯ как состояние, а не как зажатая клавиша. На телефоне нет ни
 # Shift, ни боковых кнопок — там снятие нечем позвать, кроме переключателя.
 # На мыши он не мешает: Shift по-прежнему снимает поверх любого режима.
@@ -99,6 +104,7 @@ var tool_buttons: Dictionary = {}
 var speed_buttons: Array = []
 var brush_buttons: Array = []
 var erase_buttons: Array = []
+var grow_buttons: Array = []
 var mode_buttons: Array = []
 var time_scale: float = 1.0
 
@@ -202,6 +208,17 @@ func _ready() -> void:
 	elif "--vinebench" in args:
 		await _fill_world()
 		_vine_bench()
+	elif "--growbench" in args:
+		# Одна лоза двумя путями: временем и кистью. См. `_grow_bench`.
+		await _fill_world()
+		_grow_bench()
+		get_tree().quit()
+	elif "--meetbench" in args:
+		# Один стенд встречи, без остальной самопроверки: она идёт пять минут, а
+		# крутить числа встречи приходится по многу раз подряд.
+		await _fill_world()
+		_meet_stand()
+		get_tree().quit()
 	else:
 		# Без ожидания: мир достраивается сам, а игра уже отвечает.
 		_fill_world()
@@ -621,12 +638,25 @@ const BLUR: float = 0.34
 # кистью, а выедают в нём ложбину или подравнивают край — узкой. Пока ширина
 # была одна на оба дела, её приходилось переключать туда-обратно на каждом
 # шаге лепки.
+# КАКОЙ ШИРИНОЙ СЕЙЧАС РАБОТАЮТ. Их три, и все три свои: класть, снимать и
+# растить. Спрашивают отсюда все — и сам мазок, и круг подсветки, и шаг
+# удержания, — поэтому кисть роста слушается своей ширины везде разом.
 func _active_brush(erase: bool) -> int:
+	if PlantsData.is_care(current_tool):
+		return grow_brush
 	return erase_brush if erase else brush
 
 
+# КИСТЬ РОСТА УЖЕ ПРОЧИХ В ПОЛТОРА РАЗА (решение пользователя 2026-08-29:
+# «сделай все кисти роста меньше в полтора раза»). Делим здесь, а не в самом
+# мазке, чтобы круг подсветки ужался вместе с ним: врущая подсветка хуже
+# неудобной кисти. Все три ширины при этом остаются на своих местах — уже
+# становятся все разом.
+const GROW_SMALLER: float = 1.5
+
 func _brush_radius(erase: bool = false) -> float:
-	return CELL_SPACING * (1.15 + 1.25 * float(_active_brush(erase)))
+	var r: float = CELL_SPACING * (1.15 + 1.25 * float(_active_brush(erase)))
+	return r / GROW_SMALLER if PlantsData.is_care(current_tool) else r
 
 
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
@@ -1047,6 +1077,7 @@ func _clear_toolbar() -> void:
 	speed_buttons.clear()
 	brush_buttons.clear()
 	erase_buttons.clear()
+	grow_buttons.clear()
 	mode_buttons.clear()
 
 
@@ -1241,6 +1272,22 @@ func _setup_toolbar() -> void:
 		erase_row.add_child(eb)
 		erase_buttons.append(eb)
 
+	# И У РОСТА СВОЯ СТРОКА (решение пользователя 2026-08-29). Рост — не лепка:
+	# им ведут по куртине, а не подравнивают край, и ширина ему нужна другая.
+	var grow_row := HBoxContainer.new()
+	grow_row.add_theme_constant_override("separation", _chip_gap())
+	column.add_child(grow_row)
+	var grow_title := Label.new()
+	grow_title.text = "рост "
+	grow_title.modulate = Color(1, 1, 1, 0.5)
+	grow_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
+	grow_row.add_child(grow_title)
+	for w in BRUSHES:
+		var gb := _list_button(UI_FONT_SMALL, true)
+		gb.pressed.connect(_set_grow_brush.bind(int(w["width"])))
+		grow_row.add_child(gb)
+		grow_buttons.append(gb)
+
 	_setup_time_panel(layer)
 	_refresh_toolbar()
 
@@ -1318,6 +1365,12 @@ func _set_erase_brush(width: int) -> void:
 	_refresh_toolbar()
 
 
+func _set_grow_brush(width: int) -> void:
+	grow_brush = width
+	frame_id = ""
+	_refresh_toolbar()
+
+
 func _set_erase_mode(on: bool) -> void:
 	erase_mode = on
 	frame_id = ""            # подсветка показывает ту кисть, которой сейчас работают
@@ -1336,6 +1389,9 @@ func _refresh_toolbar() -> void:
 		var taken: bool = erase_brush == int(BRUSHES[i]["width"])
 		erase_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if taken else " %s " % BRUSHES[i]["label"]
 		erase_buttons[i].modulate = Color(1, 1, 1, 1.0 if taken else 0.5)
+		var growing: bool = grow_brush == int(BRUSHES[i]["width"])
+		grow_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if growing else " %s " % BRUSHES[i]["label"]
+		grow_buttons[i].modulate = Color(1, 1, 1, 1.0 if growing else 0.5)
 	for i in range(MODES.size()):
 		var now: bool = erase_mode == bool(MODES[i]["erase"])
 		mode_buttons[i].text = "[%s]" % MODES[i]["label"] if now else " %s " % MODES[i]["label"]
@@ -1989,9 +2045,10 @@ func _selftest() -> void:
 	# КОРОБОЧКИ СО СПОРАМИ. Ноль на молодом саду — норма: они начинаются с
 	# седьмой ступени из девяти, а за двадцать две секунды столько успевают
 	# немногие. Ноль на СТАРОМ саду значил бы, что порог не срабатывает вовсе.
-	var pods: Vector2i = plants.spore_stats()
+	var pods: Vector2i = plants.spore_stats("moss")
 	print("Коробочки со спорами: на ", pods.x, " кочках из ", _moss_count(),
 		", всего ", pods.y, " — растут с седьмой ступени из девяти")
+	_meet_report()
 
 	# ЧЕМ КОЧКА ОБХОДИТСЯ. Объём у неё теперь настоящий — тело куполом, — и это
 	# та цена, которую надо держать на виду: мох должен выглядеть пушистым, но
@@ -2049,9 +2106,13 @@ func _selftest() -> void:
 		_vine_grown_check()
 		_vine_brake_check()
 		_burst_check()
+		_plant_gift_check()
 		_vine_reshape_check()
 		_vine_tip_check()
 		_vine_hang_check()          # он сносит все лианы — только последним
+	# СТЕНД ВСТРЕЧИ — ПОСЛЕ ВСЕГО. Он сносит сад и растит свой, поэтому мерить
+	# после него уже нечего; зато и мешать ему некому.
+	_meet_stand()
 
 	await get_tree().physics_frame
 	await get_tree().physics_frame
@@ -2502,8 +2563,11 @@ func _vine_bench() -> void:
 
 
 func _vine_grown_check() -> void:
+	# УБИРАЕМ ВСЁ, ЧТО НЕ ЛИАНА, а не один только мох: с появлением третьего вида
+	# «не мох» перестало значить «лиана». Оставь его расти полторы минуты рядом —
+	# и он тикал бы наравне с лозой, а числа ниже мерили бы заодно и его.
 	for pid in plants.patches.keys():
-		if String(plants.patches[pid]["id"]) == "moss":
+		if String(plants.patches[pid]["id"]) != "vine":
 			plants.remove_at(pid)
 	# Срок вдвое короче прежнего: растения ускорены вдвое, и сад выходит тот же —
 	# см. про это у проверки мха выше.
@@ -2722,6 +2786,138 @@ func _vine_count() -> int:
 	return n
 
 
+func _plant_count(id: String) -> int:
+	var n := 0
+	for pid in plants.patches:
+		if String(plants.patches[pid]["id"]) == id:
+			n += 1
+	return n
+
+
+# ВСТРЕЧА ВИДОВ — ЧТО ВЫШЛО В ОБЫЧНОМ САДУ.
+#
+# Читать так: касания и рождения — разные вещи, и это нарочно. Касаний много
+# всегда (лоза, идущая по ковру, касается его каждым своим звеном), рождений
+# мало: на стыке заводится ОДНО пятно, а не кайма. Все нули значат «не сошлись» —
+# мох сеется подальше от камня, лоза сидит у камня, и за двадцать две секунды они
+# могут не встретиться вовсе. Работает ли механизм, отвечает стенд встречи ниже.
+func _meet_report() -> void:
+	var met: Vector3i = plants.meet_stats()
+	var born: int = _plant_count("liamoss")
+	var line := "Встречи видов: касаний — %d, родилось на стыках — %d," \
+		% [met.x, met.y] + " сорвалось после броска — %d; лиамоха — %d" \
+		% [met.z, born]
+	if born > 0:
+		var pods: Vector2i = plants.spore_stats("liamoss")
+		line += ", метёлок на %d кочках, спорангиев %d" % [pods.x, pods.y]
+	print(line)
+
+
+# СТЕНД ВСТРЕЧИ: НАРОЧНО СВОДИМ ЛОЗУ С МХОМ.
+#
+# Зачем он есть. В обычном саду стык — дело случая, и по нулям в строке выше не
+# отличить «не сошлись» от «не работает». Стенд сводит их силой: растит ковёр
+# мха, сажает в его середину лозу и смотрит, что вышло на стыках.
+#
+# ИДЁТ ПОСЛЕДНИМ, когда все прочие замеры сняты: он сносит сад, растит свой и
+# сдвигает поток случайности — после него мерить уже нечего.
+func _meet_stand() -> void:
+	# ПОСЕВ СЛУЧАЙНОСТИ ЗАДАЁМ, как и на стенде лианы: числа встречи надо
+	# сравнивать «до» и «после» правки, а на плавающем посеве читаешь шум.
+	plants._rng.seed = 20260829
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	# ПЕРВЫМ ДЕЛОМ — ПОРОЗНЬ, ОТ ОДНОГО СЕМЕНИ КАЖДЫЙ. «Хаотичнее» не должно
+	# незаметно обернуться «быстрее»: у лиамоха и шаг длиннее, и локоть
+	# гуляет вдвое сильнее, и к чужому виду он подсаживается вплотную — а всё это
+	# снимает препятствия, из-за которых ковёр мха растёт медленнее, чем мог бы.
+	# Пара скоростей у обоих одна и та же, значит и пятна должны выйти
+	# сопоставимыми; сильно разошлись — крутить надо `spread_rate` третьего вида.
+	#
+	# ЗАОДНО ТУТ ЖЕ И ЦЕНА В ТРЕУГОЛЬНИКАХ — по тому же прогону. Сравнивать её
+	# можно только на РОВЕСНИКАХ: в общем саду кочки разного возраста, а метёлка
+	# у молодой ещё не выросла, и «на кочку» вышло бы число ни о чём.
+	var solo_moss: Vector2i = _solo_grow("moss", 300)
+	var solo_lia: Vector2i = _solo_grow("liamoss", 300)
+	print("Стенд встречи, порознь: от одного семени за 45 секунд мха — ",
+		solo_moss.x, " кочек, лиамоха — ", solo_lia.x,
+		"; числа должны быть одного порядка")
+	print("Стенд встречи, порознь: треугольников на кочку у мха ",
+		snappedf(float(solo_moss.y) / maxf(1.0, float(solo_moss.x)), 0.1),
+		", у лиамоха ",
+		snappedf(float(solo_lia.y) / maxf(1.0, float(solo_lia.x)), 0.1),
+		" — метёлка стоит дороже одиночной коробочки, и это надо видеть")
+	# ЧИСТИМ ЗА СОБОЙ ПЕРЕД САМОЙ ВСТРЕЧЕЙ. Грабли, замеренные тут же: после
+	# прогона порознь на месте оставались две с половиной сотни кочек, и лозу в
+	# них уже не воткнуть — стенд доложил «лоза НЕ ПОСАЖЕНА», а встреч ноль.
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	plants.flush_now()
+	var was: Vector3i = plants.meet_stats()
+	var at: Vector3 = _test_spot()
+	# ЛОЗУ САЖАЕМ ПЕРВОЙ, А МОХ ВОКРУГ НЕЁ, и порядок тут не мелочь: в готовый
+	# ковёр лозу уже не воткнуть — запрет на тесноту не пустит (замерено, стенд
+	# докладывал «лоза НЕ ПОСАЖЕНА»). Растут дальше вместе: ковёр доходит до
+	# мерки зрелости примерно тогда же, когда плети выбираются с середины наружу.
+	var vines: int = 1 if plants.plant_at(at, "vine") >= 0 else 0
+	var seeded := 0
+	for i in range(8):
+		var a: float = TAU * float(i) / 8.0
+		if plants.plant_at(at + Vector3(cos(a), 0.0, sin(a)) * 0.45, "moss") >= 0:
+			seeded += 1
+	for _i in range(460):
+		plants._tick(0.15)
+	var carpet: int = _plant_count("moss")
+	var met: Vector3i = plants.meet_stats() - was
+	print("Стенд встречи: посеяно мха ", seeded, ", ковёр дорос до ", carpet,
+		" кочек, лоза ", "посажена" if vines > 0 else "НЕ ПОСАЖЕНА", " — ",
+		_vine_count(), " звеньев")
+	print("Стенд встречи: касаний — ", met.x, ", родилось — ", met.y,
+		", сорвалось — ", met.z, " (это `apart`: на стыке заводится одно пятно,",
+		" а не кайма); лиамоха ", _plant_count("liamoss"), " кочек")
+	# А РАСТЁТ ЛИ ОН ДАЛЬШЕ САМ И НЕ СЪЕДАЕТ ЛИ РОДИТЕЛЕЙ. Родившееся на стыке —
+	# это одно пятно; всё остальное третий вид должен нажить сам, не убавляя мха.
+	var was_born: int = _plant_count("liamoss")
+	var was_moss: int = _plant_count("moss")
+	for _i in range(300):
+		plants._tick(0.15)
+	print("Стенд встречи: за 45 секунд лиамоха стало ",
+		_plant_count("liamoss"), " кочек (было ", was_born, "), мха ",
+		_plant_count("moss"), " (было ", was_moss,
+		") — мох убывать не должен вовсе")
+	var pods: Vector2i = plants.spore_stats("liamoss")
+	print("Стенд встречи: метёлки со спорангиями — на ", pods.x,
+		" кочках лиамоха, спорангиев ", pods.y,
+		"; ноль значил бы, что кисть не собирается вовсе")
+	# СТЕНД ЗА СОБОЙ УБИРАЕТ. Он идёт последним, а сад после него остаётся
+	# расти в каждом кадре: с полутысячей звеньев и сотнями кочек выход из игры
+	# растягивался на минуты.
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	plants.flush_now()
+
+
+# ВЫРАСТИТЬ ОДИН ВИД НА ЧИСТОМ МЕСТЕ и вернуть, сколько его стало и во сколько
+# треугольников он обошёлся. Пересобрать сад тут необходимо: рост меши не
+# строит, только помечает, — а без сборки не проверить и саму геометрию.
+func _solo_grow(id: String, ticks: int) -> Vector2i:
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	plants.flush_now()
+	if plants.plant_at(_test_spot(), id) < 0:
+		return Vector2i.ZERO
+	for _i in range(ticks):
+		plants._tick(0.15)
+	plants.flush_now()
+	var tris := 0
+	for cell in plants.cell_nodes:
+		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
+		for si in range(mesh.get_surface_count()):
+			var indexed: int = mesh.surface_get_array_index_len(si)
+			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
+	return Vector2i(_plant_count(id), tris)
+
+
 # ЧТО ТОРМОЗИТ ЛИАНУ. Ей записано «на ровном растёт вдвое медленнее», и вопрос
 # один: отличает ли мерка ровное место от опоры. Печатаем обе — нынешнюю (по
 # опоре) и прежнюю (по наклону земли), — потому что прежняя выглядела разумно и
@@ -2798,6 +2994,135 @@ func _burst_check() -> void:
 	print("Всплеск от руки: при стоящем времени само наросло ", idle,
 		" звеньев (норма ноль), от одного мазка — ", seen - start,
 		" за ", frames, " разных кадров из 240 — единица значила бы рывок")
+
+
+# ТОЛЧОК ПРИ ПОСАДКЕ (решение пользователя 2026-08-29). Меряем при СТОЯЩЕМ
+# времени, и в этом вся сила проверки: мир не идёт, значит всё, что кочка
+# набрала, пришло из подарка. Без толчка зрелость осталась бы ровно такой, какой
+# её посадили, — спорить тут не о чем.
+#
+# ЧЕРЕЗ `_process`, А НЕ ЧЕРЕЗ `_tick`. Подарок проливается своим сердцем, по
+# настоящим секундам; прямой вызов `_tick(0.15)` (каким растят сад все прочие
+# проверки) подаренного не берёт ВОВСЕ — оттого их числа толчок и не сдвинул.
+func _plant_gift_check() -> void:
+	var was_time: float = plants.time_scale
+	plants.time_scale = 0.0
+	var pid: int = plants.plant_at(_test_spot(), "moss")
+	if pid < 0:
+		plants.time_scale = was_time
+		print("Толчок при посадке: посадить не вышло — мерить нечего")
+		return
+	var born: float = float(plants.patches[pid]["m"])
+	for _i in range(180):
+		plants._process(1.0 / 60.0)
+	var grown: float = born
+	if plants.patches.has(pid):
+		grown = float(plants.patches[pid]["m"])
+	plants.time_scale = was_time
+	print("Толчок при посадке: зрелость ", snappedf(born, 0.01), " → ",
+		snappedf(grown, 0.01), ", ступень ", int(born * 9.0) + 1, " → ",
+		int(grown * 9.0) + 1, " из девяти. Время стояло: без толчка осталась бы",
+		" прежней")
+	if plants.patches.has(pid):
+		plants.remove_at(pid)
+
+
+# =============================================================================
+#  СТЕНД РОСТА КИСТЬЮ  (`--growbench`)
+# =============================================================================
+#
+# ЗАЧЕМ ОН ЕСТЬ. Сад растёт двумя путями — временем и рукой, — и кисть роста
+# задумана ГЛАВНЫМ из них: бегущее время доживает своё. Значит, выращенная кистью
+# лоза обязана выходить такой же, как выращенная временем. Все прежние проверки
+# растили её `_tick`-ом, то есть ВРЕМЕНЕМ, и разницы между путями не видели вовсе.
+#
+# А разница была, и крупная: по жалобе пользователя 2026-08-29 «лианы поломались,
+# почти не ветвятся, листья аномально мелкие». Стенд растит одну и ту же лозу
+# обоими путями и печатает числа рядом.
+#
+# ЧИТАТЬ ТАК: развилок на звено и листьев на звено должно быть ОДНОГО ПОРЯДКА в
+# обеих строках. Ноль развилок во второй строке — это и есть та поломка.
+# РАСТИМ У ГЛЫБЫ, А НЕ НА ЛУГУ, и это не мелочь. Арки родятся ТАМ, ГДЕ ЕСТЬ
+# ОПОРА: на ровном месте вольной ветви и отрываться реже (`air_flat`), и вверх
+# ходу нет вовсе (`air_rise_prop`). Кадры пользователя — лоза на камне, туда же
+# ставим и стенд.
+func _grow_bench() -> void:
+	plants._rng.seed = 20260829
+	_seed_structures()
+	_flush_chunks()
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	_seed_vine()
+	var at := Vector3.ZERO
+	for pid in plants.patches:
+		if String(plants.patches[pid]["id"]) == "vine":
+			at = plants.patches[pid]["pos"]
+			break
+	for _i in range(600):
+		plants._tick(0.15)
+	var by_time: Dictionary = plants.vine_stats()
+	var arch_time: Dictionary = plants.arch_stats()
+
+	# КИСТЬЮ — ПО ТРЁМ ПОСЕВАМ, И ЭТО НЕ ПРИДИРКА. У лозы разброс огромный, а
+	# всякая правка роста ещё и сдвигает общий поток случайности: сравнив «до» и
+	# «после» по одному прогону, читаешь шум и принимаешь его за работу. На арках
+	# я на это и наступил — 1.27 против 1.09 оказались одним и тем же.
+	var was_tool: String = current_tool
+	var was_time: float = plants.time_scale
+	var by_hand: Dictionary = {}
+	var arch_hand: Dictionary = {}
+	for s in [20260829, 7, 424242]:
+		for pid in plants.patches.keys():
+			plants.remove_at(pid)
+		plants._rng.seed = int(s)
+		# Кисть роста работает только при стоящем времени — так же и меряем.
+		current_tool = "grow"
+		plants.time_scale = 0.0
+		plants.plant_at(at, "vine")
+		# Мазок ДЕРЖАТ: в игре он повторяется десятками раз в секунду, пока
+		# кнопка нажата. Раз в шесть кадров — примерно то же, потолок подарка
+		# всё равно не даёт скопить больше своего.
+		for i in range(2400):
+			if i % 6 == 0:
+				_wake_plants(at, _brush_radius())
+			plants._process(1.0 / 60.0)
+		plants.time_scale = was_time
+		current_tool = was_tool
+		var one: Dictionary = plants.vine_stats()
+		var arcs_one: Dictionary = plants.arch_stats()
+		for k in one:
+			if one[k] is int or one[k] is float:
+				by_hand[k] = (by_hand.get(k, 0) if by_hand.has(k) else 0) + one[k]
+		for k in arcs_one:
+			arch_hand[k] = int(arch_hand.get(k, 0)) + int(arcs_one[k])
+
+	for row in [["временем", by_time, arch_time], ["кистью  ", by_hand, arch_hand]]:
+		var out: Dictionary = row[1]
+		var arcs: Dictionary = row[2]
+		var links: float = maxf(1.0, float(out["links"]))
+		print("Стенд роста ", row[0], ": звеньев ", out["links"],
+			", развилок ", out["forks"], " (", snappedf(float(out["forks"]) / links, 0.001),
+			" на звено), листьев ", out["leaves"], " (",
+			snappedf(float(out["leaves"]) / links, 0.01),
+			" на звено), дальний порядок ветви ", out["order"])
+		# АРКИ — на сотню звеньев, иначе два прогона разной величины не сравнить.
+		# И ПОРОЗНЬ: при спуске (их и просили убавить) и всего.
+		print("Стенд роста ", row[0], ": арок ПРИ СПУСКЕ ", arcs["falling"],
+			" — ", snappedf(float(arcs["falling"]) / links * 100.0, 0.01),
+			" на сто звеньев; из них перелазов ", arcs["fall_rode"],
+			", плетей ", arcs["fall_hang"], " (вольных ",
+			arcs["fall_hang_free"], ")",
+			"; всего арок ", arcs["arches"], " (перелазов ", arcs["rode"],
+			", плетей ", arcs["hang"], ") из ", arcs["runs"], " пробегов")
+		# ПЛЕТИ РЯДОМ С АРКАМИ — чтобы видеть цену: арки-то делают они, и убавить
+		# арки, потеряв заодно все занавесы, было бы не починкой, а разменом.
+		print("Стенд роста ", row[0], ": свисающих плетей ", out["plaits"],
+			", звеньев в них ", out["hangs"], ", самая длинная ", out["plait"],
+			" звеньев и свесилась на ", snappedf(float(out["drop"]) * 100.0, 0.1),
+			" см")
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	plants.flush_now()
 
 
 func _seed_vine() -> void:

@@ -126,6 +126,13 @@ var _solid_least: int = 0         # самая тесная клетка, в т�
 # Сколько секторов за всё время не нашли под собой земли и были поджаты внутрь.
 # Именно этот путь и давал повисшие над обрывом края, поэтому его надо видеть.
 var _stub_sectors: int = 0
+# ВСТРЕЧИ ДВУХ ВИДОВ. Три числа, и порознь они бесполезны: касаний много всегда
+# (лоза, идущая по ковру, касается его каждым звеном), рождений мало нарочно, а
+# отказов столько же, сколько удач, — по ним и видно, что мешает: тесно от своих
+# же, земли на стыке нет или рядом уже родилось.
+var _met_touch: int = 0                 # касаний, прошедших мерку зазора
+var _met_born: int = 0                  # и сколько из них дали третий вид
+var _met_deny: int = 0                  # ... а сколько сорвалось после броска
 
 
 func setup(main_ref: Node3D) -> void:
@@ -194,7 +201,7 @@ func _scan_solid(sheet: Texture2D) -> void:
 			var box: Rect2i = _dense_box(img, kd * cw, s * ch, cw, ch)
 			# Тесноту считаем ТОЛЬКО по столбцу тела: у клеток с фигурками
 			# сплошного места мало по природе, и его там никто не ищет.
-			if kd == BODY_COL:
+			if kd == BODY_COL or kd == LIA_BODY_COL:
 				_solid_least = mini(_solid_least, box.size.x * box.size.y)
 			_solid_uv[s * COLS + kd] = Rect2(
 				float(box.position.x) / float(w), float(box.position.y) / float(h),
@@ -208,7 +215,7 @@ func _scan_solid(sheet: Texture2D) -> void:
 			# запасную точку у корней — а она там прозрачная. Сторож поднял бы
 			# крик о дыре в теле, которой нет: разметку вырезанных клеток никто
 			# не читает.
-			if kd != BODY_COL and kd != BARK_COL:
+			if kd != BODY_COL and kd != BARK_COL and kd != LIA_BODY_COL:
 				continue
 			for y in range(box.position.y, box.position.y + box.size.y):
 				for x in range(box.position.x, box.position.x + box.size.x):
@@ -322,7 +329,23 @@ const BLOOM_COL: int = KINDS + 2 + LEAF_KINDS
 # пользователю каждый столбец от руки. Мало покажется — третий добавляется
 # одной строкой здесь и одной в заглушке.
 const BLOOM_KINDS: int = 2
-const COLS: int = KINDS + 2 + LEAF_KINDS + BLOOM_KINDS   # всего столбцов на листе
+# ДВА ПОСЛЕДНИХ СТОЛБЦА — ЛИАМОХ (решение пользователя 2026-08-29: «добавь
+# текстуры нового мха к остальным текстурам», два столбца — тело и ворсинка).
+#
+# СВОЁ ТЕЛО ему нужно затем, что иначе третий вид отличается от мха одним лишь
+# цветом: рисунок-то на них один. Устроено оно как пятый столбец — сплошной
+# кусок поверхности, которым обивают купол, — но рисуется не комочками, а
+# ВОЛОСКАМИ: пушистое читается волоском, а не холмиком.
+#
+# СВОЯ ВОРСИНКА — вырезанная фигурка на прозрачном фоне, пучок волосков от
+# нижнего края клетки. Ею обтягивают дощечки, встающие ПО ОБОДУ кочки (её
+# решение: «ворс по ободу — мохнатый силуэт»).
+#
+# ПРИБАВЛЯЕМ В КОНЕЦ, а не в середину: нарисованное от руки лежит в файле по
+# столбцам, и всякая вставка посередине сдвинула бы чужую работу.
+const LIA_BODY_COL: int = KINDS + 2 + LEAF_KINDS + BLOOM_KINDS
+const LIA_FUZZ_COL: int = LIA_BODY_COL + 1
+const COLS: int = LIA_FUZZ_COL + 1                       # всего столбцов на листе
 
 # НАРИСОВАННЫЙ ЛИСТ ГЛАВНЕЕ СЧИТАННОГО. Если в `art/moss.png` лежит картинка,
 # берём её; иначе рисуем сами. Так рисунок от руки подменяет заглушку без
@@ -390,6 +413,12 @@ func _widen_sheet(drawn: Texture2D, have: int) -> ImageTexture:
 			continue
 		for s in range(STAGES):
 			_paint_bloom_cell(img, (BLOOM_COL + k) * TILE, s * TILE, s, k, rng)
+	if have <= LIA_BODY_COL:
+		for s in range(STAGES):
+			_paint_lia_body_cell(img, LIA_BODY_COL * TILE, s * TILE, s, rng)
+	if have <= LIA_FUZZ_COL:
+		for s in range(STAGES):
+			_paint_lia_fuzz_cell(img, LIA_FUZZ_COL * TILE, s * TILE, s, rng)
 	return ImageTexture.create_from_image(img)
 
 
@@ -780,6 +809,116 @@ func _paint_body_cell(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGen
 
 
 # =============================================================================
+#  ЛИАМОХ: ТЕЛО ВОЛОСКАМИ И ВОРСИНКА ПО ОБОДУ — заглушки, пока не нарисованы
+# =============================================================================
+#
+# Решение пользователя 2026-08-29: пушистость делают ДВЕ вещи разом — «ворс по
+# ободу» (силуэт) и «свой рисунок тела и рельеф» (поверхность вблизи). Здесь
+# рисуются обе, и обе — временные: рисовать их ей, в `art/moss.png`.
+#
+# ЧЕМ ЭТО ТЕЛО ОТЛИЧАЕТСЯ ОТ МХОВОГО. У мха образец сложен из КУСКОВ — комочков
+# с ломаными границами, и это верно: мховая подушка вблизи и есть россыпь
+# сросшихся холмиков. Пушистое же читается ВОЛОСКОМ. Поэтому здесь по тёмному
+# основанию идут светлые штрихи, и рельеф с них снимается сам: столбец рисован
+# не нами (для движка), высота у него берётся из яркости — светлое выше тёмного,
+# а волосок как раз и есть светлая черта.
+#
+# ОБРАЗЕЦ ПОВТОРЯЕТСЯ, значит волосок, вышедший за край клетки, обязан войти с
+# другой стороны — иначе по стыку идёт полоса обрубленных волосков.
+const LIA_HAIR_YOUNG: int = 60              # волосков в клетке на первой ступени
+const LIA_HAIR_OLD: int = 130               # ... и на девятой: с возрастом гуще
+const LIA_HAIR_SHORT: float = 0.10          # длина волоска в долях клетки
+const LIA_HAIR_LONG: float = 0.20
+
+func _paint_lia_body_cell(img: Image, ox: int, oy: int, s: int,
+		rng: RandomNumberGenerator) -> void:
+	var age: float = float(s) / float(STAGES - 1)
+	# ОСНОВАНИЕ ТЕМНЕЕ ВОЛОСКОВ и холоднее мхового: между волосками виден низ
+	# куртины, туда свет не доходит. Сам цвет вида приходит с вершин, из
+	# каталога, — здесь только рисунок и его светотень.
+	#
+	# И СВЕТЛЕЕ МХОВОГО (её решение: «более светло-бледным»). Светлоту кочке
+	# задаёт именно рисунок, а не цвет в карточке: цвет вида приходит с вершин
+	# БЕЗ своей темноты — он поворачивает оттенок, но не делает кочку светлее.
+	# Мховое основание — (0.31, 0.44, 0.21); это заметно бледнее и холоднее.
+	var ground := Color(0.38, 0.43, 0.32).lerp(Color(0.34, 0.39, 0.29), age)
+	for y in range(TILE):
+		for x in range(TILE):
+			var n: float = (_hash01(x * 7919 + y * 104729 + s * 61) - 0.5) * 0.09
+			var c: Color = ground.lightened(n) if n > 0.0 else ground.darkened(-n)
+			img.set_pixel(ox + x, oy + y, Color(c.r, c.g, c.b, 1.0))
+	var many: int = int(round(lerpf(float(LIA_HAIR_YOUNG), float(LIA_HAIR_OLD), age)))
+	var long: float = float(TILE) * lerpf(LIA_HAIR_SHORT, LIA_HAIR_LONG, age)
+	for i in range(many):
+		var x0: float = rng.randf_range(0.0, float(TILE))
+		var y0: float = rng.randf_range(0.0, float(TILE))
+		# Направление у каждого своё: образец ложится на купол в какую попало
+		# сторону, и общая расчёска на нём читалась бы швом.
+		var ang: float = rng.randf_range(0.0, TAU)
+		var bend: float = rng.randf_range(-0.6, 0.6)
+		var reach: float = long * rng.randf_range(0.6, 1.45)
+		var tip: float = rng.randf_range(0.16, 0.45)
+		var steps: int = maxi(2, int(ceil(reach * 2.0)))
+		for j in range(steps):
+			var t: float = float(j) / float(steps - 1)
+			var a: float = ang + bend * t
+			var px: int = int(round(x0 + cos(a) * reach * t))
+			var py: int = int(round(y0 + sin(a) * reach * t))
+			# Заворот по клетке — см. выше, иначе стык рисует обрубки.
+			var c: Color = ground.lightened(tip * (0.35 + 0.65 * t))
+			img.set_pixel(ox + posmod(px, TILE), oy + posmod(py, TILE),
+				Color(c.r, c.g, c.b, 1.0))
+
+
+# ВОРСИНКА ЛИАМОХА — вырезанная фигурка: пучок волосков, растущий от нижнего
+# края клетки. Ею обтягивают дощечки, встающие по ободу кочки, поэтому корни
+# должны быть у самого низа: низ клетки утапливается в тело.
+#
+# С ВОЗРАСТОМ ГУЩЕ И ДЛИННЕЕ — по тому же правилу, что и всё на этом листе:
+# ряд клетки это возраст.
+const LIA_TUFT_YOUNG: int = 3
+const LIA_TUFT_OLD: int = 8
+
+func _paint_lia_fuzz_cell(img: Image, ox: int, oy: int, s: int,
+		rng: RandomNumberGenerator) -> void:
+	var age: float = float(s) / float(STAGES - 1)
+	for y in range(TILE):
+		for x in range(TILE):
+			img.set_pixel(ox + x, oy + y, Color(0, 0, 0, 0))
+	var hairs: int = int(round(lerpf(float(LIA_TUFT_YOUNG), float(LIA_TUFT_OLD), age)))
+	var tall: float = float(TILE) * lerpf(0.45, 0.85, age)
+	var root := Color(0.31, 0.38, 0.24)
+	var tip := Color(0.62, 0.68, 0.47)
+	for i in range(hairs):
+		# Корни расходятся по низу клетки, но к середине гуще: пучок, а не
+		# частокол.
+		var x0: float = float(TILE) * (0.5 + (rng.randf() - 0.5) * 0.55)
+		var reach: float = tall * rng.randf_range(0.6, 1.15)
+		# Клонит наружу от середины пучка: волоски расходятся веером, а не
+		# заваливаются все в одну сторону.
+		var lean: float = (x0 / float(TILE) - 0.5) * 1.2 + rng.randf_range(-0.2, 0.2)
+		var wide: int = 2 if rng.randf() < 0.35 + 0.3 * age else 1
+		var steps: int = maxi(3, int(ceil(reach)))
+		for j in range(steps):
+			var t: float = float(j) / float(steps - 1)
+			# Волосок клонится тем сильнее, чем ближе к кончику: прямая щетина
+			# читается щёткой, а не ворсом.
+			var px: int = int(round(x0 + lean * reach * t * t))
+			var py: int = TILE - 1 - int(round(reach * t))
+			if px < 0 or px >= TILE or py < 0 or py >= TILE:
+				continue
+			var c: Color = root.lerp(tip, t)
+			for w in range(wide):
+				var qx: int = px + w
+				if qx < 0 or qx >= TILE:
+					continue
+				# Кончик тоньше и прозрачнее — от этого ворс на кадре мягкий, а
+				# не нарисованный по линейке.
+				img.set_pixel(ox + qx, oy + py,
+					Color(c.r, c.g, c.b, 1.0 if w == 0 else 1.0 - 0.55 * t))
+
+
+# =============================================================================
 #  РЕЛЬЕФ ТЕЛА — КАРТА НОРМАЛЕЙ, СНЯТАЯ С САМОЙ КАРТИНКИ
 # =============================================================================
 #
@@ -826,6 +965,12 @@ func _make_bumps(sheet: Texture2D) -> ImageTexture:
 	# волокно и есть перепад высоты, и берётся он из яркости.
 	var told: Vector2 = _bump_column(src, out, BODY_COL, _body_hgt)
 	_bump_column(src, out, BARK_COL, PackedFloat32Array())
+	# ТЕЛО ЛИАМОХА — ПО ЯРКОСТИ, и это не поблажка, а точный ответ. Свои высоты
+	# мы помним только у мхового образца (там цвет нарочно ровный, и выжимать из
+	# него рельеф нечем). У лиамоха же высота И ЕСТЬ яркость: волосок нарисован
+	# светлым по тёмному основанию — светлое выше. То же правило потом сработает
+	# и для нарисованного ею от руки, без единой правки здесь.
+	_bump_column(src, out, LIA_BODY_COL, PackedFloat32Array())
 	_bump_spread = told.x
 	_bump_tilt = told.y
 	return ImageTexture.create_from_image(out)
@@ -926,6 +1071,111 @@ func bump_stats() -> Vector2:
 # Главное здесь — «на круче»: лиане велено самой искать опору, и если она этого
 # не делает, доля звеньев на крутом будет такой же, как доля крутого на острове,
 # то есть маленькой. Это и есть проверка поведения, а не отрисовки.
+# =============================================================================
+#  АРКИ — СКОЛЬКО РАЗ ВОЛЬНАЯ ВЕТВЬ УШЛА ВВЕРХ И ВЕРНУЛАСЬ
+# =============================================================================
+#
+# Жалоба пользователя 2026-08-29 по кадру: «очень много арок». Арка — это не
+# всякое висящее звено: плеть, свесившаяся с кромки, тоже висит, и она законна.
+# Арка — ПРОБЕГ вольных звеньев, который поднялся над обоими своими концами и
+# сел обратно на землю: на кадре это дуга-хомут поперёк камня.
+#
+# Считаем так: находим начала пробегов (вольное звено, у которого родитель не
+# вольный), идём по детям, пока они вольные, запоминаем самую высокую точку и
+# высоту приземления. Поднялась выше обоих концов на `ARCH_RISE` — арка.
+#
+# Пробег, никуда не севший (кончик ещё растёт или это свисающая плеть), аркой не
+# считается: у него нет второго конца, и дуги он не образует.
+# И СЧИТАЕМ ИХ ПОРОЗНЬ: ПРИ СПУСКЕ И ПРОЧИЕ. Уточнение пользователя 2026-08-29:
+# «пусть когда лоза спускается с возвышенности будет меньше таких арок на 80%».
+# Арка при спуске — та, что села НИЖЕ своего начала: лоза шла с камня вниз и по
+# дороге выгнулась хомутом. Арка при подъёме — дело другое, её не трогаем.
+const ARCH_RISE: float = 0.06               # насколько дуга должна подняться, м
+const ARCH_FALL: float = 0.04               # ... и насколько ниже сесть, чтобы
+                                            # считаться спуском
+
+func arch_stats() -> Dictionary:
+	var kids_of: Dictionary = {}
+	for pid in patches:
+		var p: Dictionary = patches[pid]
+		if not _is_stem(PlantsData.ITEMS[String(p["id"])]):
+			continue
+		var from: int = int(p.get("from", -1))
+		if not patches.has(from):
+			continue
+		if not kids_of.has(from):
+			kids_of[from] = []
+		kids_of[from].append(pid)
+	var arches := 0
+	var falling := 0
+	var by_ride := 0
+	var fall_ride := 0
+	var by_hang := 0
+	var fall_hang := 0
+	var fall_free := 0
+	var runs := 0
+	for pid in patches:
+		var p: Dictionary = patches[pid]
+		if not _is_stem(PlantsData.ITEMS[String(p["id"])]) \
+				or not bool(p.get("air", false)):
+			continue
+		var from: int = int(p.get("from", -1))
+		if patches.has(from) and bool(patches[from].get("air", false)):
+			continue                    # это середина пробега, а не начало
+		var foot: float = float(Vector3(patches[from]["pos"]).y) \
+			if patches.has(from) else float(Vector3(p["pos"]).y)
+		var stack: Array = [pid]
+		var top: float = -1e9
+		var land: float = -1e9
+		var many := 0
+		# ПЕРЕЛАЗ — ЭТО НЕ ПОЛЁТ. Молодой побег, наткнувшись на старую толстую
+		# ветвь, перекидывается ЧЕРЕЗ неё (`_ride_over`) и тем самым тоже
+		# поднимается над землёй. По виду это та же дуга, а по причине — другая, и
+		# лечится она другим. Считаем порознь.
+		var rode := false
+		# И ТРЕТЬЯ ПРИЧИНА — СВИСАЮЩАЯ ПЛЕТЬ. Она начинает не с падения: молодой
+		# побег держит себя сам и сперва выносит плеть ВВЕРХ И НАРУЖУ
+		# (`_hang_dir`), и только отросши, переваливается вниз. Где под ним обрыв,
+		# из этого выходит занавес; где невысоко — хомут.
+		var hung := false
+		var hung_free := false
+		while not stack.is_empty():
+			var at: int = int(stack.pop_back())
+			many += 1
+			if bool(patches[at].get("rode", false)):
+				rode = true
+			if int(patches[at].get("hangs", 0)) > 0:
+				hung = true
+				if bool(patches[at].get("hang_free", false)):
+					hung_free = true
+			top = maxf(top, float(Vector3(patches[at]["pos"]).y))
+			for kid in kids_of.get(at, []):
+				if bool(patches[kid].get("air", false)):
+					stack.append(kid)
+				else:
+					land = maxf(land, float(Vector3(patches[kid]["pos"]).y))
+		runs += 1
+		if many < 2 or land <= -1e8:
+			continue
+		if top - maxf(foot, land) > ARCH_RISE:
+			arches += 1
+			if rode:
+				by_ride += 1
+			if hung:
+				by_hang += 1
+			if land < foot - ARCH_FALL:
+				falling += 1
+				if rode:
+					fall_ride += 1
+				if hung:
+					if hung_free:
+						fall_free += 1
+					fall_hang += 1
+	return {"arches": arches, "falling": falling, "runs": runs,
+		"rode": by_ride, "fall_rode": fall_ride,
+		"hang": by_hang, "fall_hang": fall_hang, "fall_hang_free": fall_free}
+
+
 func vine_stats() -> Dictionary:
 	var links := 0
 	var roots := 0
@@ -1306,6 +1556,8 @@ func _make_blade_texture() -> ImageTexture:
 			_paint_leaf_cell(img, (LEAF_COL + k) * TILE, s * TILE, s, k, rng)
 		for k in range(BLOOM_KINDS):
 			_paint_bloom_cell(img, (BLOOM_COL + k) * TILE, s * TILE, s, k, rng)
+		_paint_lia_body_cell(img, LIA_BODY_COL * TILE, s * TILE, s, rng)
+		_paint_lia_fuzz_cell(img, LIA_FUZZ_COL * TILE, s * TILE, s, rng)
 
 	for s in range(STAGES):
 		var age: float = float(s) / float(STAGES - 1)
@@ -1416,9 +1668,13 @@ func plant_at(pos: Vector3, id: String) -> int:
 	# Посаженная игроком — САМАЯ КРУПНАЯ в своём пятне: от неё размер и убывает
 	# к краю. Не ровно предельная, чтобы два пятна рядом различались.
 	var bulk: float = _rng.randf_range(BULK_MAX - 0.2, BULK_MAX)
-	if _crowded(spot["pos"], bulk):
+	if _crowded(spot["pos"], bulk, id):
 		return -1
-	return _create(spot, id, 0.15, bulk)
+	var pid: int = _create(spot, id, 0.15, bulk)
+	# ПОСАЖЕННОЕ СРАЗУ НЕМНОГО ВЫРАСТАЕТ (решение пользователя 2026-08-29) — см.
+	# `PLANT_GIFT`. Одно на все виды: «не имеет значения, что за растение».
+	gift_to(pid)
+	return pid
 
 
 # ПЕРЕСОБРАТЬ ДЕТЕЙ. Колено лианы рисуется в куске РЕБЁНКА, а не родителя: сдвинь
@@ -1722,6 +1978,11 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		if int(spot.get("hangs", 0)) > 0:
 			patches[pid]["hangs"] = int(spot["hangs"])
 			patches[pid]["hang_max"] = int(spot.get("hang_max", 1))
+			# И ОТКУДА ПЛЕТЬ ПОШЛА — с кромки или от вольной ветви. От этого
+			# зависит её вынос вверх, а значит и то, выйдет ли из неё занавес или
+			# хомут поперёк камня.
+			if bool(spot.get("hang_free", false)):
+				patches[pid]["hang_free"] = true
 		# ЗВЕНО МЕТЁЛКИ: которое оно по счёту и сколько их всего. Длина меряется
 		# при закладке цветоноса и дальше наследуется — иначе каждое звено мерило
 		# бы метёлку заново, и кончалась бы она где придётся.
@@ -1761,6 +2022,9 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 	by_cell[cell][pid] = true
 	_link_near(pid)
 	_dirty[cell] = true
+	# НЕ СОШЁЛСЯ ЛИ ЗДЕСЬ СТЫК ДВУХ ВИДОВ. Спрашиваем последним, когда
+	# новорождённый уже стоит в списках: встреча ищет пару по ним же.
+	_meet_check(pid)
 	return pid
 
 
@@ -1808,10 +2072,23 @@ func _link_near(pid: int) -> void:
 # Есть ли кто-то вплотную. Смотрим ТОЛЬКО ячейку под точкой и её соседей по
 # решётке: перебор всего сада на каждый отросток — это работа в квадрате от
 # числа кочек, и заросшая карта встала бы колом.
-func _crowded(pos: Vector3, bulk: float) -> bool:
+#
+# МЕРКА СВОЯ У ТОГО, КТО САДИТСЯ, — и на этом стоит «третий вид не замещает
+# родителей». Локоть рядом с ЧУЖИМ видом умножается на `mix_room` из его
+# карточки: у мха и лианы его нет вовсе (то есть единица, всё как было), у
+# лиамоха — 0.45, и он подсаживается к обоим вплотную. Обратно это не
+# работает: мох, спрашивая место, читает СВОЮ карточку и держится от лиамоха
+# на прежнем расстоянии. Гибели от соседства нет ни у кого, поэтому вход в
+# чужое пятно — это именно вход, а не вытеснение.
+func _crowded(pos: Vector3, bulk: float, id: String = "") -> bool:
 	var home: int = main.grid.cell_at(pos)
 	if home < 0:
 		return false
+	var def: Dictionary = PlantsData.ITEMS.get(id, {})
+	var mix: float = float(def.get("mix_room", 1.0))
+	# Насколько гуляет зазор — тоже из карточки: у хаотично расползающегося вида
+	# он гуляет вдвое сильнее, и укладка выходит кучками с прогалинами.
+	var vary: float = float(def.get("sit_vary", SIT_JITTER))
 	# Место требуется ПО СЕБЕ И ПО СОСЕДУ: у крупной кочки локоть шире. Меряем по
 	# взрослым радиусам, а не по нынешним, — иначе на молодняке заросль сбивалась
 	# бы в кучу, а к старости кочки лезли бы одна из другой.
@@ -1828,10 +2105,176 @@ func _crowded(pos: Vector3, bulk: float) -> bool:
 					# решётка, только с кружками разного калибра.
 					var room: float = SIT_APART * (mine
 						+ _patch_span(1.0, float(patches[pid]["bulk"]))) \
-						* _rng.randf_range(1.0 - SIT_JITTER, 1.0 + SIT_JITTER)
+						* _rng.randf_range(1.0 - vary, 1.0 + vary)
+					if id != "" and String(patches[pid]["id"]) != id:
+						room *= mix
 					if pos.distance_squared_to(patches[pid]["pos"]) < room * room:
 						return true
 	return false
+
+
+# =============================================================================
+#  ВСТРЕЧА ДВУХ ВИДОВ: НА СТЫКЕ РОДИТСЯ ТРЕТИЙ
+# =============================================================================
+#
+# Первая трансформация в игре (решение пользователя 2026-08-29). Лоза доросла до
+# кочки мха — и там, где они сошлись, заводится третий вид, которого больше
+# взяться неоткуда. Что с чем встречается и что из этого выходит, лежит в
+# `Plants.gd` (`MEETS`): это ДАННЫЕ, встреч со временем будет несколько.
+#
+# СПРАШИВАЕМ ПРИ РОЖДЕНИИ, А НЕ КАЖДЫЙ УДАР СЕРДЦА. Сад сходится в стык только
+# двумя путями: выросло новое звено лозы рядом с готовой кочкой или новая кочка
+# села рядом с готовым звеном. Оба пути ведут сюда, потому что оба — рождение;
+# обход же всего сада на каждом ударе стоил бы работы в квадрате от числа
+# растений и не находил бы ничего нового.
+#
+# ЗАМКНУТЬСЯ ЭТО НЕ МОЖЕТ: рождение третьего вида зовёт проверку и для него, но
+# в парах его нет, и он выходит на первой же строке.
+func _meet_check(pid: int) -> void:
+	if not patches.has(pid):
+		return
+	var p: Dictionary = patches[pid]
+	var mine := String(p["id"])
+	for rule in PlantsData.MEETS:
+		var who: Array = rule["who"]
+		if not who.has(mine):
+			continue
+		var other := String(who[0]) if String(who[1]) == mine else String(who[1])
+		if not _meet_ripe(p, rule):
+			continue
+		# СНАЧАЛА НАХОДИМ ПАРУ, ПОТОМ ДЕЙСТВУЕМ. Рождение трогает `by_cell`, а
+		# ищем мы как раз по нему: сажать посреди обхода значило бы править
+		# список, по которому идёшь.
+		var mate: int = _mate_near(p, other, rule)
+		if mate < 0:
+			continue
+		_met_touch += 1
+		if _rng.randf() >= float(rule.get("rate", 0.25)):
+			continue
+		if not _meet_born(p, patches[mate], rule):
+			_met_deny += 1
+
+
+# Зрелость участника. У КОЧКИ она значит размер пятна, и мерку спрашиваем с неё:
+# кочка первой ступени — зелёная точка в сантиметр, и «лоза её коснулась» было бы
+# неправдой. У НИТИ зрелость значит толщину звена, а не размер, поэтому мерка к
+# ней не применяется вовсе: новорождённое звено — такое же звено лозы.
+# ДОРОС ЛИ ДО ТОГО, ЧТОБЫ ВСТРЕЧА ВООБЩЕ СЧИТАЛАСЬ. Спрашивает `_mark_steps` —
+# ему надо знать, стоит ли будить проверку на этой ступени роста.
+func _meet_wake(p: Dictionary) -> bool:
+	var mine := String(p["id"])
+	for rule in PlantsData.MEETS:
+		var who: Array = rule["who"]
+		if who.has(mine) and _meet_ripe(p, rule):
+			return true
+	return false
+
+
+func _meet_ripe(p: Dictionary, rule: Dictionary) -> bool:
+	if _is_stem(PlantsData.ITEMS[String(p["id"])]):
+		return true
+	return float(p["m"]) >= float(rule.get("ripe", 0.0))
+
+
+# Насколько далеко от своей середины растение считается «здесь». У кочки это
+# радиус её тела в этот миг, у звена — ноль: нить тонкая, и весь запас на
+# касание держится одним числом `touch` из правила.
+func _meet_reach(p: Dictionary) -> float:
+	if _is_stem(PlantsData.ITEMS[String(p["id"])]):
+		return 0.0
+	return _patch_span(float(p["m"]), float(p["bulk"]))
+
+
+# Есть ли поблизости тот, с кем встреча считается. Смотрим свою ячейку и соседей
+# по решётке — тот же приём, что у запрета на тесноту: перебор всего сада на
+# каждое рождение был бы работой в квадрате от числа растений.
+func _mate_near(p: Dictionary, other: String, rule: Dictionary) -> int:
+	var home: int = int(p["cell"])
+	if home < 0:
+		return -1
+	var pos: Vector3 = p["pos"]
+	var gap: float = float(rule.get("touch", 0.05)) + _meet_reach(p)
+	var node: Vector3i = main.grid.node_of(home)
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var c: int = main.grid.node_seed(node + Vector3i(dx, dy, dz))
+				if c < 0:
+					continue
+				for pid in by_cell.get(c, {}):
+					if not patches.has(pid):
+						continue
+					var q: Dictionary = patches[pid]
+					if String(q["id"]) != other or not _meet_ripe(q, rule):
+						continue
+					var reach: float = gap + _meet_reach(q)
+					if pos.distance_squared_to(q["pos"]) <= reach * reach:
+						return int(pid)
+	return -1
+
+
+# САЖАЕМ ТРЕТИЙ ВИД НА СТЫК. Место — ровно между двумя: не на кочке и не на
+# нити, а там, где они сошлись.
+func _meet_born(a: Dictionary, b: Dictionary, rule: Dictionary) -> bool:
+	var born := String(rule["born"])
+	if not PlantsData.ITEMS.has(born):
+		return false
+	var def: Dictionary = PlantsData.ITEMS[born]
+	# Землю ищем тем же прибором, каким её ищет всякая посадка: середина отрезка
+	# висит между двумя точками поверхности и на самой поверхности не лежит.
+	var spot: Dictionary = main.grid.surface_near(
+		(Vector3(a["pos"]) + Vector3(b["pos"])) * 0.5)
+	if spot.is_empty() or not _fits_surface(spot["nrm"], def):
+		return false
+	if _meet_taken(Vector3(spot["pos"]), born, float(rule.get("apart", 1.5))):
+		return false
+	# Новорождённый на стыке — СРЕДНЕГО размера: он корень своего пятна, и от
+	# него размер пойдёт убывать к краю, как у всякого посаженного.
+	var bulk: float = _rng.randf_range(0.9, BULK_MAX - 0.15)
+	if _crowded(Vector3(spot["pos"]), bulk, born):
+		return false
+	var pid: int = _create(spot, born, 0.05, bulk)
+	if pid < 0:
+		return false
+	# И РОДИВШЕЕСЯ НА СТЫКЕ — ТОЖЕ (решение пользователя 2026-08-29: толчок даётся
+	# «в том числе при появлении реакции между растениями с появлением нового»).
+	# Ему он нужнее прочих: рождается оно ростом с ноготь, и без толчка первая
+	# трансформация в игре проходила бы незамеченной.
+	gift_to(pid)
+	_met_born += 1
+	return true
+
+
+# НЕ БЛИЖЕ СКОЛЬКИХ ЯЧЕЕК ОТ УЖЕ РОДИВШЕГОСЯ. Без этого встреча выходит не
+# событием, а каймой: лоза идёт по ковру и касается его каждым своим звеном.
+#
+# Ячеек тут больше одной, поэтому и соседей обходим на два узла в каждую
+# сторону, а не на один, как в запрете на тесноту: тот меряет сантиметрами,
+# этот — метрами. Зовут его редко — только после удачного броска.
+func _meet_taken(at: Vector3, born: String, apart: float) -> bool:
+	var keep: float = main.CELL_SPACING * apart
+	var home: int = main.grid.cell_at(at)
+	if home < 0:
+		return false
+	var node: Vector3i = main.grid.node_of(home)
+	var span: int = maxi(1, int(ceil(apart)))
+	for dx in range(-span, span + 1):
+		for dy in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var c: int = main.grid.node_seed(node + Vector3i(dx, dy, dz))
+				if c < 0:
+					continue
+				for pid in by_cell.get(c, {}):
+					if not patches.has(pid) or String(patches[pid]["id"]) != born:
+						continue
+					if at.distance_squared_to(patches[pid]["pos"]) < keep * keep:
+						return true
+	return false
+
+
+# Встречи: касаний, рождений и сорвавшихся попыток. Только для проверок.
+func meet_stats() -> Vector3i:
+	return Vector3i(_met_touch, _met_born, _met_deny)
 
 
 # =============================================================================
@@ -1955,7 +2398,8 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 			if not target.is_empty():
 				if _is_stem(def):
 					_sprout_win += 1
-				sprouts.append([target, p["id"], _child_bulk(float(p["bulk"])), pid])
+				sprouts.append([target, p["id"],
+					_child_bulk(float(p["bulk"]), def), pid])
 			elif _is_stem(def):
 				# КОНЧИК УПЁРСЯ. Одна неудача — случайность (сторона выпала
 				# неудачная), десяток подряд — тупик, из которого сам он уже не
@@ -1974,7 +2418,8 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 			if not born.is_empty():
 				# ОДИН УЗЕЛ — ОДНА МЕТЁЛКА.
 				p["bloomed"] = true
-				sprouts.append([born, p["id"], _child_bulk(float(p["bulk"])), pid])
+				sprouts.append([born, p["id"],
+					_child_bulk(float(p["bulk"]), def), pid])
 			else:
 				# НЕ ВЫШЛО — ПРОБУЕМ ЕЩЁ НЕСКОЛЬКО РАЗ И ОТСТУПАЕМСЯ. Место вокруг
 				# узла не меняется само, и вечные попытки — это чистая работа
@@ -1993,7 +2438,8 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 	for s in sprouts:
 		# Звено лианы садится ВПЛОТНУЮ к родителю — на то она и нить. Запрет на
 		# тесноту писался под ковёр мха, где две кочки в одной точке — это брак.
-		if _is_stem(PlantsData.ITEMS[String(s[1])]) or not _crowded(s[0]["pos"], float(s[2])):
+		if _is_stem(PlantsData.ITEMS[String(s[1])]) \
+				or not _crowded(s[0]["pos"], float(s[2]), String(s[1])):
 			var kid: int = _create(s[0], s[1], 0.05, float(s[2]), int(s[3]))
 			# ОСТАТОК ПОДАРКА ПЕРЕХОДИТ К КОНЧИКУ. У лианы свободно растёт только
 			# он: отпустив побег, звено само больше не удлинится, и подаренное на
@@ -2702,7 +3148,8 @@ const HANG_FREE: float = 0.05
 # КУДА ПАДАЕТ ПЛЕТЬ НА ЭТОМ ЗВЕНЕ — одно правило и для роста, и для обеих
 # проверок. Тяжесть клонит тем сильнее, чем больше уже свесилось (`HANG_EASE`),
 # и к этому добавляется виляние.
-func _hang_dir(def: Dictionary, way: Vector3, hangs: int, sway: float) -> Vector3:
+func _hang_dir(def: Dictionary, way: Vector3, hangs: int, sway: float,
+		lift: float = HANG_LIFT, rise: float = HANG_RISE) -> Vector3:
 	# ТЯЖЕСТЬ БЕРЁТ СВОЁ НЕ СРАЗУ. Молодой побег держит себя сам: у настоящего
 	# винограда плеть сперва выносит ВВЕРХ И НАРУЖУ, и только отросши, она
 	# переваливается и повисает. Отсюда и «перевал» — он не только у кромки.
@@ -2711,8 +3158,20 @@ func _hang_dir(def: Dictionary, way: Vector3, hangs: int, sway: float) -> Vector
 	# завестись лишь там, где под ней сразу обрыв. Таких мест в этом мире 44 на
 	# 2000, и лиана к ним не идёт — она лезет вверх. Замерено: 26 попыток за
 	# кромку, из них с местом на плеть одна.
-	var lean: float = clampf((float(hangs) - HANG_RISE) * HANG_EASE,
-		-HANG_LIFT, 1.0)
+	#
+	# ВЫНОС ВВЕРХ — ЭТО И ЕСТЬ ГЛАВНЫЙ ДЕЛАТЕЛЬ АРОК, и потому он стал числом
+	# (`lift`), а не постоянной. Плеть, сходящая с настоящей кромки, пусть
+	# выносится: под ней обрыв, и дуга обращается занавесом. А плеть, начатая
+	# ВОЛЬНОЙ ВЕТВЬЮ посреди камня, поднимается там, где падать некуда, — и
+	# садится обратно хомутом. Замерено: 28 арок при спуске из 33 — это плети.
+	#
+	# И ВТОРОЕ ЧИСЛО, `rise`, ВАЖНЕЕ ПЕРВОГО: до какого звена тяжесть ещё не
+	# берёт своё. Пока `hangs` меньше него, плеть идёт ТУДА ЖЕ, КУДА ШЁЛ ПОБЕГ, —
+	# а побег лез вверх, и первые два звена плети продолжают этот подъём. Убери
+	# один только вынос (`lift`) — дуга станет ниже, но не исчезнет: замерено,
+	# 1.27 арки на сто звеньев против 1.13.
+	var lean: float = clampf((float(hangs) - rise) * HANG_EASE,
+		-lift, 1.0)
 	var out: Vector3 = way.normalized() \
 		+ Vector3.DOWN * (float(def.get("hang", 1.0)) * lean)
 	if sway > 0.0:
@@ -2965,14 +3424,17 @@ func _bloom_place(p: Dictionary, def: Dictionary, way: Vector3, n: int,
 
 
 func _hang_room(def: Dictionary, at: Vector3, way: Vector3, step: float,
-		free: float = HANG_FREE) -> int:
+		free: float = HANG_FREE, lift: float = HANG_LIFT,
+		rise: float = HANG_RISE) -> int:
 	var bend_max: float = deg_to_rad(float(def.get("bend_max", 180.0)))
 	var here: Vector3 = at
 	var dir: Vector3 = way
 	for i in range(HANG_ROOM):
 		# Своей случайности проверка не берёт: она отвечает на вопрос «пройдёт ли
 		# плеть», а не «как именно она вильнёт».
-		var next_dir: Vector3 = _hang_dir(def, dir, i + 2, 0.0).normalized()
+		# Мерим ТЕМ ЖЕ ВЫНОСОМ, каким плеть и пойдёт: считай мы место по одному
+		# пути, а роняй плеть по другому — проверка отвечала бы не про ту плеть.
+		var next_dir: Vector3 = _hang_dir(def, dir, i + 2, 0.0, lift, rise).normalized()
 		var turn: float = dir.angle_to(next_dir)
 		if turn > bend_max and turn > 0.000001:
 			next_dir = dir.slerp(next_dir, bend_max / turn).normalized()
@@ -3024,6 +3486,13 @@ func _hang_step(p: Dictionary, def: Dictionary, way: Vector3,
 	# обрыва. Замерено: посаженная прямо на кромку лиана за минуту не свесилась ни
 	# разу. Одной кромкой плеть остаётся правилом, которое почти не срабатывает.
 	var free: bool = bool(p.get("air", false))
+	# ОТКУДА ПЛЕТЬ ПОШЛА, ОНА ПОМНИТ ДО КОНЦА. Вынос вверх у двух путей разный
+	# (см. `_hang_dir`), а спрашивается он на каждом звене; определять же путь по
+	# нынешнему звену нельзя — у плети всякое звено висит в воздухе, и любая плеть
+	# со второго звена выглядела бы начатой вольной ветвью.
+	var from_free: bool = free if hangs <= 1 else bool(p.get("hang_free", false))
+	var lift: float = float(def.get("hang_lift", HANG_LIFT))
+	var rise: float = float(def.get("hang_rise", HANG_RISE))
 	if hangs <= 1 and free:
 		# Не всякая висящая ветвь: она должна сперва ОТОЙТИ от опоры на несколько
 		# звеньев (`hang_air`). Иначе вольная ветвь виснет с первого же звена, и
@@ -3076,10 +3545,32 @@ func _hang_step(p: Dictionary, def: Dictionary, way: Vector3,
 	#
 	# Виляние: отвес по нитке читается верёвкой, а не плетью.
 	var dir: Vector3 = _hang_dir(def, fall, hangs,
-		float(def.get("hang_sway", 0.0)))
+		float(def.get("hang_sway", 0.0)), lift, rise)
 	if dir.length_squared() < 0.000001:
 		return {}
 	dir = dir.normalized()
+	# ПЛЕТЬ ОТХОДИТ ВБОК, А НЕ ВВЕРХ — и вот тут была причина арок.
+	#
+	# Найдено замерами, а не рассуждением (решение пользователя 2026-08-29:
+	# «пусть когда лоза спускается с возвышенности будет меньше таких арок на
+	# 80%»). Тяжесть у плети — СЛАГАЕМОЕ, а не приказ: `hang_dir` прибавляет её к
+	# направлению побега, а побег лез на глыбу под шестьдесят градусов. Прибавь к
+	# такому направлению хоть полную тяжесть — остаток всё равно смотрит ВВЕРХ.
+	# Плеть уходила вверх, дорастала до своей длины и падала обратно на камень:
+	# на кадре хомут поперёк глыбы.
+	#
+	# ВЫНОС ПРИ ЭТОМ НУЖЕН, и убирать его нельзя. Он не для высоты, а для того,
+	# чтобы плеть ОТОШЛА ОТ СКЛОНА и не чиркала по нему; без него плеть почти не
+	# заводится. Замерено на трёх посевах: сняв вынос, мы убрали и арки (1.13 →
+	# 0.05 на сто звеньев), и сами плети — 103 против трёх. Размен, а не починка.
+	#
+	# Поэтому режем не вынос, а только его ВЕРТИКАЛЬНУЮ долю: вбок отходи,
+	# вверх — нет.
+	if dir.y > 0.0:
+		dir.y *= float(def.get("hang_up", 1.0))
+		if dir.length_squared() < 0.000001:
+			return {}
+		dir = dir.normalized()
 	if came != Vector3.ZERO and bend_max < PI:
 		var turn: float = came.angle_to(dir)
 		if turn > bend_max and turn > 0.000001:
@@ -3122,7 +3613,8 @@ func _hang_step(p: Dictionary, def: Dictionary, way: Vector3,
 		# писана для той плети, что сходит с камня: там она отличает свисание от
 		# лежания на боку. Требуй её и от вольной — и плеть отказалась бы виснуть
 		# всюду, где под ней близко земля, то есть почти везде.
-		var room: int = _hang_room(def, to, dir, step, 0.0 if free else HANG_FREE)
+		var room: int = _hang_room(def, to, dir, step,
+			0.0 if free else HANG_FREE, lift, rise)
 		# И СРАЗУ ЗАПИСЫВАЕМ, СКОЛЬКО МЕСТА НАШЛОСЬ. «Плетей ноль» — ответ без
 		# причины: то ли места нет вовсе, то ли его на звено меньше мерки. Числом
 		# это видно, гаданием нет.
@@ -3136,7 +3628,7 @@ func _hang_step(p: Dictionary, def: Dictionary, way: Vector3,
 		if room < (1 if free else HANG_ROOM):
 			return {}
 	return {"pos": to, "nrm": p["nrm"], "cell": c, "air": true,
-		"hangs": hangs, "hang_max": most}
+		"hangs": hangs, "hang_max": most, "hang_free": from_free}
 
 
 # МОЛОДОЙ ПОБЕГ ПЕРЕЛЕЗАЕТ ЧЕРЕЗ СТАРЫЙ, А НЕ ПРОХОДИТ СКВОЗЬ (решение
@@ -3291,6 +3783,24 @@ const BURST_PACE: float = 3.0        # ... и по стольку секунд �
 # взорвался бы разом. С потолком удержание даёт непрерывный, но ровный отклик:
 # зелень тянется, пока рука лепит, и не быстрее чем `BURST_PACE`.
 const BURST_MAX: float = 6.0
+# ПЕРВОНАЧАЛЬНЫЙ ТОЛЧОК НОВОМУ РАСТЕНИЮ (решение пользователя 2026-08-29): «при
+# посадке растения на место — не имеет значения, что за растение, — в том числе
+# при появлении реакции между растениями с появлением нового, посаженное или
+# новое растение получает первоначальный буст к росту, сразу немного вырастает».
+#
+# ДАРИМ ТЕ ЖЕ СЕКУНДЫ РОСТА, что и кисть, и по той же причине, по которой они
+# выбраны для неё: прибавка зрелости на месте — это скачок в один кадр, и притом
+# кривой (кочка перескакивает ступень рывком, а лиана не удлиняется ВОВСЕ, у неё
+# звенья родятся на своих попытках, а не от возраста). Подарок же течёт через
+# обычный рост: кочка на глазах наливается, лоза выпускает первые звенья.
+#
+# Течёт он и при остановленном времени — это ответ на действие руки, а не ход
+# мира. Ровно столько же, сколько потолок у кисти: два счёта тут были бы двумя
+# правдами об одном и том же.
+#
+# РАСПОЛЗАНИЮ ЭТОГО НЕ ДАЁТСЯ. Отросток — не посадка: он идёт сам, десятками, и
+# толчок каждому был бы просто общим ускорением роста втрое.
+const PLANT_GIFT: float = BURST_MAX
 # ТОЧКА РОСТА — НЕ РАСТЕНИЕ ЦЕЛИКОМ (решение пользователя 2026-08-28).
 #
 # У лианы это кончик побега и проснувшаяся почка: старое звено посреди плети
@@ -3300,19 +3810,74 @@ const BURST_MAX: float = 6.0
 #
 # Тупики точками роста не считаются — доросшая плеть и доцветшая метёлка: у них
 # `chance` и так ноль, и подарок на них просто сгорел бы.
+# ГРАБЛИ, найденные по кадру пользователя 2026-08-29 («лианы поломались, почти не
+# ветвятся и на них аномально мелкие листья»), и они стоят подробной записи.
+#
+# ЗВЕНО С ОТРОСТКОМ СЧИТАЛОСЬ ТУПИКОМ — «старое звено посреди плети расти не
+# может ничем». Для ДЛИНЫ это правда: удлиняется только кончик. Но развилка и
+# цветение идут ИМЕННО ИЗ ТАКИХ ЗВЕНЬЕВ — из молодого звена, у которого один
+# отросток уже есть. Пока сад рос временем, беды не было: время течёт ко всем
+# сразу, и звену хватало своего хода. А кисть роста работает ТОЛЬКО при
+# остановленном времени, и тогда единственный ход растению даёт подарок; звену,
+# не признанному точкой роста, не достаётся ни секунды — оно не стареет, не
+# ветвится и не зацветает ВОВСЕ.
+#
+# Что из этого выходило, замерено стендом роста (`--growbench`), одна и та же
+# лоза двумя путями:
+#
+#     временем — 317 звеньев, 22 развилки (0.069 на звено), 321 лист
+#     кистью   —  72 звена,    1 развилка (0.014 на звено),   0 листьев
+#
+# Листьев ноль не оттого, что они мелкие: лист садится с третьего поколения
+# ветвей (`leaf_from`), а без развилок поколение всегда первое. Отсюда и «мелкие
+# листья» на кадре — у тех немногих, что выросли, размер идёт от числа поколений
+# под ними (`leaf_gen`).
+#
+# ТЕПЕРЬ ТОЧКА РОСТА — ЭТО ЗВЕНО, КОТОРОМУ ЕЩЁ ЕСТЬ ЧТО СДЕЛАТЬ: удлиниться
+# (кончик), проснуться почкой, разветвиться или зацвести. Тупик — только то, у
+# чего дел не осталось совсем.
+#
+# Соотношение при этом сохраняется само: подарок ускоряет и зрелость, и попытки
+# развилки в одно и то же число раз, поэтому развилок на звено выходит столько
+# же, сколько при росте временем.
 func _growth_point(p: Dictionary, def: Dictionary) -> bool:
 	if not _is_stem(def):
 		return true
 	if bool(p.get("wake", false)):
 		return true
-	if int(p.get("kids", 0)) > 0:
-		return false
+	# Тупики: доросшая плеть и доцветшая метёлка. У них и `chance` ноль, подарок
+	# на них просто сгорел бы.
 	if p.has("hangs") and int(p["hangs"]) >= int(p.get("hang_max", 0)):
 		return false
 	if int(p.get("bloom", 0)) > 0 \
 			and int(p["bloom"]) >= int(p.get("bloom_max", 1)):
 		return false
-	return true
+	if int(p.get("kids", 0)) <= 0:
+		return true                       # кончик: ему расти в длину
+	return _can_fork(p, def) or _bloom_ready(p, def)
+
+
+# МОЖЕТ ЛИ ЗВЕНО ЕЩЁ РАЗВЕТВИТЬСЯ. Те же две мерки, что и в `_tick`: больше
+# `branch_max` отростков звено не даёт вовсе, а боковой побег идёт только из
+# молодого. Про соседние развилки (`_fork_near`) тут не спрашиваем: это дело
+# самой попытки, а лишний подарок звену, которому откажут, ничего не портит.
+func _can_fork(p: Dictionary, def: Dictionary) -> bool:
+	if not def.has("branch"):
+		return false
+	if int(p.get("kids", 0)) >= int(def.get("branch_max", 2)):
+		return false
+	return float(p["m"]) <= float(def.get("branch_until", 0.7))
+
+
+# Толчок ОДНОМУ растению, по номеру. Тем же подарком, что раздаёт кисть, и с тем
+# же потолком; заводим и её сердце, иначе при стоящем времени подарок пролежал бы
+# нетронутым до первого мазка.
+func gift_to(pid: int, secs: float = PLANT_GIFT) -> void:
+	if secs <= 0.0 or not patches.has(pid):
+		return
+	var p: Dictionary = patches[pid]
+	p["burst"] = minf(float(p.get("burst", 0.0)) + secs, BURST_MAX)
+	_burst_left = maxf(_burst_left, BURST_MAX / BURST_PACE + TICK)
 
 
 func burst_at(at: Vector3, radius: float, gift: float = BURST_GIFT) -> void:
@@ -3503,12 +4068,29 @@ var _drawn_cells: int = 0                   # и сколько их собра�
 # себе это дёшево — обход без геометрии, — а вот пересборка стоит дорого, и она
 # идёт отдельно.
 func _mark_steps() -> void:
+	# ДОРОСШАЯ КОЧКА — ТОЖЕ СОБЫТИЕ ВСТРЕЧИ, и без него половина стыков не
+	# случилась бы вовсе. Рождение спрашивает про встречу сразу, но новорождённая
+	# кочка ростом с ноготь: мерку зрелости она не проходит, а второго рождения у
+	# неё не будет. Вот и ловим тот удар, на котором она этой мерки достигла.
+	#
+	# ОДИН РАЗ ЗА ЖИЗНЬ (`met`): зрелость только растёт, и спрашивать на каждой из
+	# двадцати четырёх ступеней значило бы обходить соседей сотнями впустую.
+	# Обратный случай — лоза, доросшая до готовой кочки, — ловится её рождением.
+	#
+	# СПРАШИВАЕМ ПОСЛЕ ОБХОДА, А НЕ В НЁМ: встреча сажает третий вид, то есть
+	# правит тот самый список, по которому мы идём.
+	var woke: Array = []
 	for pid in patches:
 		var p: Dictionary = patches[pid]
 		var step := int(p["m"] * float(STEPS))
 		if step != p["step"]:
 			p["step"] = step
 			_dirty[int(p["cell"])] = true
+			if not bool(p.get("met", false)) and _meet_wake(p):
+				p["met"] = true
+				woke.append(pid)
+	for pid in woke:
+		_meet_check(pid)
 
 
 # Собрать помеченное, пока не вышел запас. Ноль — собрать всё сразу.
@@ -3944,9 +4526,15 @@ func _patch_span(m: float, bulk: float) -> float:
 # Размер отростка. Родительский, чуть убавленный и сбитый разбросом — см.
 # `BULK_MIN`: убавление ведёт мельчание от крупной кочки к краю пятна, разброс
 # местами его перебивает, и порядок не читается порядком.
-func _child_bulk(parent: float) -> float:
+#
+# РАЗБРОС МОЖЕТ БЫТЬ СВОИМ У ВИДА (`bulk_drift`). Подними его вдвое — и разброс
+# перебивает убывание всякий раз, а не местами: порядка размеров, по которому у
+# мха читается, где середина пятна, а где край, не будет вовсе. Это и просили от
+# третьего вида — «расползается хаотичнее родителей».
+func _child_bulk(parent: float, def: Dictionary = {}) -> float:
+	var drift: float = float(def.get("bulk_drift", BULK_DRIFT))
 	return clampf(parent - BULK_FADE
-		+ _rng.randf_range(-BULK_DRIFT, BULK_DRIFT * 1.4), BULK_MIN, BULK_MAX)
+		+ _rng.randf_range(-drift, drift * 1.4), BULK_MIN, BULK_MAX)
 
 
 # РАСКЛАДКА КОЧКИ СЧИТАЕТСЯ ОДИН РАЗ, при рождении, и живёт с ней.
@@ -4112,7 +4700,14 @@ func _make_cushion(spot: Dictionary, def: Dictionary, salt: int,
 		"shade": 0.92 + 0.14 * _hash01(salt + 1223),
 		# Пухлость своя у каждой: при одной на всех кочки одного размера выходят
 		# слепками друг друга, и разброс размера этого не спасает.
-		"rise": 0.85 + 0.30 * _hash01(salt + 1777),
+		#
+		# И СВОЯ У ВИДА (`rise_k`): лиамох держит купол выше обычного.
+		# Множитель кладём ИМЕННО СЮДА, а не к высоте при отрисовке, и это не
+		# мелочь: высоту спрашивают трое — тело, поле соседей и замер срастания, —
+		# и все трое читают это самое число. Разложи его по трём местам, и
+		# разойтись они могут на волос, а в перемычке от этого прорезается щель.
+		"rise": (0.85 + 0.30 * _hash01(salt + 1777)) \
+			* float(def.get("rise_k", 1.0)),
 		# И СВОЙ КУСОК ОБРАЗЦА. Клетка тела сплошная, значит по ней можно ездить
 		# как угодно: сдвиг заворачивается внутри той же клетки и наружу не
 		# вылезает. Без него у всех кочек одна и та же зелень в одних и тех же
@@ -5358,7 +5953,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# шейдеру надо знать, где она начинается. Берём клетку ЦЕЛИКОМ, а не найденный
 	# сплошной кусок (`_scan_solid`): повторяться без шва образец умеет только по
 	# целой клетке, а что она сплошная — стережёт `see_through`.
-	st.set_uv2(Vector2(float(BODY_COL) / float(COLS),
+	st.set_uv2(Vector2(float(_body_col(def)) / float(COLS),
 		float(bstage) / float(STAGES)))
 	st.set_color((hue * float(body["shade"])).srgb_to_linear())
 	for s in range(SECTORS):
@@ -5382,8 +5977,99 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 				st.set_uv(cuts[rr][ss])
 				st.add_vertex(pts[rr][ss])
 
+	# ВОРС ПО ОБОДУ — ПОСЛЕДНИМ, поверх готового тела: он и садится на его край.
+	_emit_rim_fuzz(st, def, pts[rings - 1], nrms[rings - 1], up, span, hue,
+		stage_f, m, int(p["salt"]))
 	_emit_spores(st, p, def, centre, up, span, high)
 	return true
+
+
+# КАКИМ СТОЛБЦОМ ОБИВАТЬ ТЕЛО. У мха он пятый, у лиамоха свой — предпоследний.
+# Прибавится четвёртый вид со своим рисунком — прибавится столбец и строка сюда;
+# `body_art` в карточке для того и заведён, чтобы это оставалось данными.
+func _body_col(def: Dictionary) -> int:
+	return LIA_BODY_COL if String(def.get("body_art", "")) == "lia" else BODY_COL
+
+
+# =============================================================================
+#  ВОРС ПО ОБОДУ — МОХНАТЫЙ СИЛУЭТ
+# =============================================================================
+#
+# Решение пользователя 2026-08-29, из разговора о том, чем делать пушистость:
+# «ворс по ободу — мохнатый силуэт».
+#
+# ЧЕМ ЭТО ОТЛИЧАЕТСЯ ОТ СНЯТОГО ВОРСА (см. `_make_fuzz`, там же и почему его
+# сняли 2026-08-17). Тот стоял по ВСЕМУ куполу — на макушке, поясами, везде — и
+# на кадре читался россыпью мелких царапин поверх кочки: картинка, наклеенная
+# на видимую поверхность, спорит с ней и портит её. Мохнатость же видно ТАМ, ГДЕ
+# КОЧКА ГРАНИЧИТ С ФОНОМ, то есть по краю: там дощечка стоит ребром к телу и
+# работает силуэтом, а не наклейкой.
+#
+# Оттого и середина остаётся чистой поверхностью — за неё отвечает свой рисунок
+# тела (волоски и рельеф), второе из двух решений о пушистости.
+const RIM_FUZZ_PER: int = 2                 # ворсинок на сектор обода
+const RIM_FUZZ_SINK: float = 0.30           # насколько корень утоплен в тело
+
+func _emit_rim_fuzz(st: SurfaceTool, def: Dictionary, ring: Array, norms: Array,
+		up: Vector3, span: float, hue: Color, stage_f: float, m: float,
+		salt: int) -> void:
+	var tall: float = float(def.get("fuzz_tall", 0.0))
+	if tall <= 0.0:
+		return
+	# Длина ворсинки — в долях радиуса кочки, а не в метрах: кочка за жизнь
+	# ширится вдвое, и ворс, привязанный к метрам, на взрослой стал бы щетинкой.
+	var high: float = span * tall
+	var wide: float = high * float(def.get("fuzz_wide", 0.8))
+	var many: int = maxi(1, int(def.get("fuzz_many", RIM_FUZZ_PER)))
+	var stage: int = clampi(int(stage_f), 0, STAGES - 1)
+	var u0: float = float(LIA_FUZZ_COL) / float(COLS)
+	var u1: float = float(LIA_FUZZ_COL + 1) / float(COLS)
+	var v0: float = float(stage) / float(STAGES)          # верх клетки — концы
+	var v1: float = float(stage + 1) / float(STAGES)      # низ — корни
+	# Вторая разметка ОТРИЦАТЕЛЬНАЯ — знак шейдеру, что заворачивать нечего:
+	# ворсинка берёт вырезанную фигурку целиком, а не повторяющийся образец.
+	st.set_uv2(Vector2(-1.0, -1.0))
+	var n: int = ring.size()
+	for s in range(n):
+		var here: Vector3 = ring[s]
+		var nxt: Vector3 = ring[(s + 1) % n]
+		var n_here: Vector3 = norms[s]
+		var n_nxt: Vector3 = norms[(s + 1) % n]
+		for j in range(many):
+			# Ворсинки садятся ВНУТРИ сектора, со сдвигом от соли: ровно по
+			# точкам обода они выстроились бы частоколом с шагом сектора.
+			var t: float = (float(j) + 0.5 + (_hash01(salt + s * 331 + j * 17) - 0.5)
+				* 0.7) / float(many)
+			var foot: Vector3 = here.lerp(nxt, t)
+			# Куда ворсинка смотрит: наружу-вверх по нормали края. У самого обода
+			# нормаль уже завалена наружу, и ворс ложится по краю сам собой.
+			var stand: Vector3 = n_here.lerp(n_nxt, t)
+			if stand.length_squared() < 0.000001:
+				stand = up
+			stand = (stand.normalized() + up * 0.35).normalized()
+			# Лицом ВДОЛЬ обода: так дощечка видна снаружи плашмя, а не ребром.
+			var face: Vector3 = (nxt - here)
+			if face.length_squared() < 0.000001:
+				face = up.cross(stand)
+			face = face.normalized()
+			var grow: float = clampf(m * 1.4, 0.25, 1.0)
+			var h: float = high * grow * (0.7 + 0.6 * _hash01(salt + s * 97 + j * 7))
+			var half: Vector3 = face * (wide * grow * 0.5)
+			# Корень утапливаем в тело: иначе между картинкой и куполом
+			# просвечивает щель, и ворс читается воткнутым, а не выросшим.
+			var seat: Vector3 = foot - stand * (h * RIM_FUZZ_SINK)
+			st.set_color((hue * (0.9 + 0.2 * _hash01(salt + s * 53 + j * 3)))
+				.srgb_to_linear())
+			var quad := [seat - half, seat + half,
+				seat + half + stand * h, seat - half + stand * h]
+			var uvs := [Vector2(u0, v1), Vector2(u1, v1), Vector2(u1, v0),
+				Vector2(u0, v0)]
+			# Стороны у материала не отсекаются, поэтому порядок обхода не важен.
+			for tri in [[0, 1, 2], [0, 2, 3]]:
+				for q in tri:
+					st.set_normal(stand)
+					st.set_uv(uvs[q])
+					st.add_vertex(quad[q])
 
 
 # =============================================================================
@@ -5421,17 +6107,25 @@ func _spore_count(p: Dictionary, def: Dictionary) -> int:
 
 
 # Коробочки: на скольких кочках выросли и сколько всего. Только для проверок.
-func spore_stats() -> Vector2i:
-	var mossy := 0
+#
+# СПРАШИВАТЬ НАДО ПРО ОДИН ВИД, а не про все разом: видов с коробочками теперь
+# два, устроены они по-разному (у мха одиночная, у лиамоха метёлка), и общая
+# куча ничего не говорит ни про того, ни про другого.
+func spore_stats(only: String = "") -> Vector2i:
+	var seen := 0
 	var pods := 0
 	for pid in patches:
 		var p: Dictionary = patches[pid]
+		if only != "" and String(p["id"]) != only:
+			continue
 		var def: Dictionary = PlantsData.ITEMS[String(p["id"])]
 		var n: int = _spore_count(p, def)
 		if n > 0:
-			mossy += 1
-			pods += n
-	return Vector2i(mossy, pods)
+			seen += 1
+			# `_spore_count` считает НОЖКИ. У метёлки коробочек на ней больше
+			# одной: первое колено голое, дальше на каждом по одной.
+			pods += n * maxi(1, int(def.get("pod_row", 1)) - 1)
+	return Vector2i(seen, pods)
 
 
 func _emit_spores(st: SurfaceTool, p: Dictionary, def: Dictionary,
@@ -5488,10 +6182,59 @@ func _emit_spores(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		if way.length_squared() < 0.000001:
 			way = up
 		way = way.normalized()
+		# МЕТЁЛКА ИЛИ ОДИНОЧНАЯ КОРОБОЧКА — решает карточка. У мха ножка прямая и
+		# коробочка на ней одна; у лиамоха `pod_row` больше единицы, и
+		# ножка становится плакучей кистью со спорангиями вдоль неё.
+		if int(def.get("pod_row", 1)) > 1:
+			_emit_plume(st, def, seat, way, dir, tall, grown, seta, pod, stage,
+				salt + i * 1013)
+			continue
 		var top: Vector3 = seat + way * tall
 		_emit_twig(st, seat, top, thin * 1.25, thin, dir, seta, stage)
 		_emit_pod(st, top, way, float(def.get("capsule_long", 0.022)) * grown,
 			float(def.get("capsule_wide", 0.011)) * grown, pod, stage)
+
+
+# МЕТЁЛКА СПОРАНГИЕВ — ТА ЖЕ ПЛАКУЧАЯ КИСТЬ, ЧТО У ЛИАНЫ, ТОЛЬКО МЕЛКАЯ.
+#
+# Решение пользователя 2026-08-29 про третий вид: «со спорангиями, внешне
+# похожими на метёлку лианы с цветками». Сходство держится на трёх вещах, и все
+# три взяты у цветоноса: ножка идёт ДУГОЙ (клонится всё сильнее к концу, потому
+# что тяжесть копится там же), спорангии висят ПОД ней на коротких цветоножках, а
+# первое колено ГОЛОЕ — у кисти лианы оно тоже голое, и по той же причине:
+# коробочка на нём висела бы прямо в теле кочки.
+#
+# Кисть лианы длиной под метр, эта — одиннадцать сантиметров, и всё различие
+# между ними в числах карточки, а не в устройстве.
+func _emit_plume(st: SurfaceTool, def: Dictionary, seat: Vector3, way: Vector3,
+		side: Vector3, tall: float, grown: float, seta: Color, pod: Color,
+		stage: int, salt: int) -> void:
+	var row: int = maxi(2, int(def.get("pod_row", 3)))
+	var droop: float = float(def.get("pod_droop", 0.9))
+	var thin: float = float(def.get("spore_thin", 0.002))
+	var hang: float = float(def.get("pod_hang", 0.018)) * grown
+	var long: float = float(def.get("capsule_long", 0.015)) * grown
+	var wide: float = float(def.get("capsule_wide", 0.0075)) * grown
+	var seg: float = tall / float(row)
+	var at: Vector3 = seat
+	var go: Vector3 = way
+	for k in range(row):
+		var bend: Vector3 = go + Vector3.DOWN * (droop * float(k + 1) / float(row))
+		if bend.length_squared() > 0.000001:
+			go = bend.normalized()
+		var nxt: Vector3 = at + go * seg
+		# Ножка сходит на нет к концу, как всякий стебель.
+		_emit_twig(st, at, nxt, thin * (1.4 - 0.6 * float(k) / float(row)),
+			thin * (1.4 - 0.6 * float(k + 1) / float(row)), side, seta, stage)
+		if k > 0:
+			var foot: Vector3 = nxt + Vector3.DOWN * hang
+			_emit_twig(st, nxt, foot, thin * 0.7, thin * 0.6, side, seta, stage)
+			# Размер коробочки гуляет — в кисти они заметно разные, как и цветки
+			# у лианы. Берётся от соли, а не от случая: раскладка обязана быть
+			# одной и той же при каждой пересборке.
+			var wob: float = 0.8 + 0.4 * _hash01(salt + k * 613)
+			_emit_pod(st, foot, Vector3.DOWN, long * wob, wide * wob, pod, stage)
+		at = nxt
 
 
 # Коробочка: маленький овоид на конце ножки, слегка склонённый.
