@@ -67,7 +67,8 @@ func _init() -> void:
 		Plants.STAGES, " возрастов, клетка ", Plants.TILE)
 	print("Столбцы слева направо: ", Plants.KINDS,
 		" разновидности куртинки мха, тело мха, кора лианы, лист лианы ×",
-		Plants.LEAF_KINDS)
+		Plants.LEAF_KINDS, ", ЛЕПЕСТОК цветка лианы ×", Plants.BLOOM_KINDS,
+		" (цветок складывается из шести таких)")
 	plants.free()
 	quit()
 

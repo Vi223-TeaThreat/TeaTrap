@@ -103,12 +103,18 @@ var _play_high: float = 0.0
 
 
 func generate(radius: float, top: float, bottom: float, headroom: float,
-		spacing: float, grid_seed: int) -> void:
+		underroom: float, spacing: float, grid_seed: int) -> void:
 	_spacing = spacing
 	_cell_size = spacing * 1.4
-	# Играбельный объём: сам остров плюс запас по высоте для построек.
+	# ИГРАБЕЛЬНЫЙ ОБЪЁМ: сам остров плюс запас по высоте — вверх и вниз.
+	#
+	# ЗАПАС СНИЗУ — ОТДЕЛЬНОЕ ЧИСЛО, А НЕ СДВИГ ДНА (решение пользователя
+	# 2026-08-28: «увеличь доступную комнату в высоту, количество изначальной
+	# земли оставь прежним»). Опусти мы `bottom` — и остров стал бы толще: это
+	# же число задаёт его подошву в `_fill_terrain`. Запас же копать вниз
+	# позволяет, а породы не прибавляет.
 	_play_radius = radius + spacing * 0.6
-	_play_low = bottom - spacing * 0.6
+	_play_low = bottom - maxf(underroom, spacing * 0.6)
 	_play_high = top + headroom
 	var rng := RandomNumberGenerator.new()
 	rng.seed = grid_seed

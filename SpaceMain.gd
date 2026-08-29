@@ -20,7 +20,14 @@ const PlantsData = preload("res://Plants.gd")
 const ISLAND_RADIUS: float = 13.0
 const ISLAND_TOP: float = 2.5
 const ISLAND_BOTTOM: float = -3.5
-const HEADROOM: float = 6.0          # запас высоты для построек
+# ЗАПАС ВЫСОТЫ — ВВЕРХ И ВНИЗ (решение пользователя 2026-08-28: «увеличь
+# доступную комнату в высоту, количество изначальной земли оставь прежним»).
+# Земли это не прибавляет: остров лепится по `ISLAND_TOP` и `ISLAND_BOTTOM`, а
+# запас лишь расширяет объём, в котором игроку позволено класть и копать.
+#
+# Платим семенами: объём мира вырос вдвое, и с ним постройка и память.
+const HEADROOM: float = 10.0         # запас высоты над островом
+const UNDERROOM: float = 4.0         # ... и под ним, чтобы было куда копать
 const CELL_SPACING: float = 0.6667   # втрое мельче прежнего — детальнее рельеф
 # ПИКСЕЛЬ ЗЕМЛИ, в метрах: сторона клетки, которой красится поверхность.
 #
@@ -192,6 +199,9 @@ func _ready() -> void:
 	elif "--shot" in args:
 		await _fill_world()
 		_shot_mode()
+	elif "--vinebench" in args:
+		await _fill_world()
+		_vine_bench()
 	else:
 		# Без ожидания: мир достраивается сам, а игра уже отвечает.
 		_fill_world()
@@ -387,7 +397,8 @@ func _camera_flat_axes() -> Dictionary:
 func _build_world() -> void:
 	var started := Time.get_ticks_msec()
 	grid = SpaceGridScript.new()
-	grid.generate(ISLAND_RADIUS, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, CELL_SPACING, WORLD_SEED)
+	grid.generate(ISLAND_RADIUS, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, UNDERROOM,
+		CELL_SPACING, WORLD_SEED)
 	solid = {}
 	for i in grid.solid:
 		solid[i] = "ground"
@@ -714,6 +725,12 @@ func _stone_push(amount: float, material: String) -> float:
 	return float(card.get("stone", 0.0)) * 2.0 - 1.0
 
 
+# НАСКОЛЬКО ШИРЕ САМОЙ КИСТИ БУДИТ ЗЕЛЕНЬ РУКА. Ровно по кисти было бы мало:
+# растение сидит в точке, а видит игрок круг подсветки — отозваться должно всё,
+# что в нём, иначе кочка у самого края круга стоит неподвижно, пока соседка в
+# пяди от неё тянется.
+const BURST_REACH: float = 1.8
+
 # Мазок ложится ровно туда, куда наведён курсор.
 func _paint(pick: Dictionary, material: String) -> void:
 	if pick.has("pos"):
@@ -723,6 +740,33 @@ func _paint(pick: Dictionary, material: String) -> void:
 func _erase(pick: Dictionary) -> void:
 	if pick.has("pos"):
 		_dab(pick["pos"], -_stroke_amount(true), "")
+
+
+# КИСТЬ СТИМУЛЯЦИИ РОСТА (решение пользователя 2026-08-28). Обычная кисть: своя
+# ширина, удержание, круг подсветки. Всё, что попало в круг И ЯВЛЯЕТСЯ ТОЧКОЙ
+# РОСТА, трогается в рост — не растение целиком, а именно точка (разбор точек —
+# в `_growth_point`).
+#
+# РАБОТАЕТ ТОЛЬКО ПРИ ОСТАНОВЛЕННОМ ВРЕМЕНИ, по её решению: «в будущем режим
+# времени будет вырезан, поэтому кисть стимуляции должна работать только при
+# остановленном времени». Пока время идёт, пункт в панели притушен — иначе
+# молчащая кисть читается поломкой.
+#
+# ПРЕЖДЕ ЗЕЛЕНЬ БУДИЛ ЛЮБОЙ МАЗОК ЗЕМЛЁЙ, и это тоже была её задача. Теперь
+# снято по её же решению «только новая кисть»: лепить рельеф можно, не боясь
+# разогнать сад, а рост стал отдельным осознанным действием.
+func _stimulate_at(screen_pos: Vector2) -> void:
+	if plants == null or not is_zero_approx(time_scale):
+		return
+	var pick := _pick(screen_pos)
+	if not pick.has("pos"):
+		return
+	_wake_plants(pick["pos"], _brush_radius())
+
+
+func _wake_plants(at: Vector3, radius: float) -> void:
+	if plants != null:
+		plants.burst_at(at, radius * BURST_REACH)
 
 
 # Отменяем ВСЁ ОДНО ПРОВЕДЕНИЕ кистью, а не последний мазок. Пока кнопка
@@ -1319,6 +1363,12 @@ func _refresh_toolbar() -> void:
 	for id in tool_buttons:
 		var mark := "*" if id == current_tool else " "
 		tool_buttons[id].text = "   %s %s" % [mark, PlantsData.ITEMS[id]["name"]]
+		# УХОД ПРИТУШЕН, ПОКА ИДЁТ ВРЕМЯ. Кисть стимуляции работает только при
+		# «стоп» (решение пользователя), а молчащий без объяснения пункт читается
+		# поломкой: игрок водит кистью и не понимает, почему ничего нет.
+		if PlantsData.is_care(id):
+			tool_buttons[id].modulate = Color(1, 1, 1,
+				1.0 if is_zero_approx(time_scale) else 0.35)
 
 
 # В режиме посадки подсвечиваем ТО ЖЕ ПЯТНО, что и при лепке, только мельче и
@@ -1434,6 +1484,9 @@ var _group_next: int = 1
 
 # Один мазок в точке экрана — тем, что сейчас выбрано в панели.
 func _apply_at(screen_pos: Vector2, erase: bool) -> void:
+	if PlantsData.is_care(current_tool):
+		_stimulate_at(screen_pos)
+		return
 	if PlantsData.is_plant(current_tool) or PlantsData.is_prop(current_tool):
 		if erase:
 			_try_clear(screen_pos)
@@ -1513,7 +1566,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed:
 		if event.keycode == KEY_Z and event.ctrl_pressed:
 			_undo()
-		elif event.keycode >= KEY_1 and event.keycode <= KEY_3:
+		elif event.keycode >= KEY_1 and event.keycode <= KEY_4:
 			_toggle_group(event.keycode - KEY_1 + 1)
 
 
@@ -1933,6 +1986,12 @@ func _selftest() -> void:
 	print("Край кочки: над землёй до ", snappedf(edge_max, 0.001),
 		" м, повисших краёв — ", edge_lost, ", поджато секторов — ",
 		plants.stub_count())
+	# КОРОБОЧКИ СО СПОРАМИ. Ноль на молодом саду — норма: они начинаются с
+	# седьмой ступени из девяти, а за двадцать две секунды столько успевают
+	# немногие. Ноль на СТАРОМ саду значил бы, что порог не срабатывает вовсе.
+	var pods: Vector2i = plants.spore_stats()
+	print("Коробочки со спорами: на ", pods.x, " кочках из ", _moss_count(),
+		", всего ", pods.y, " — растут с седьмой ступени из девяти")
 
 	# ЧЕМ КОЧКА ОБХОДИТСЯ. Объём у неё теперь настоящий — тело куполом, — и это
 	# та цена, которую надо держать на виду: мох должен выглядеть пушистым, но
@@ -1988,6 +2047,8 @@ func _selftest() -> void:
 	# напечатаны: иначе они считают по пустому месту и врут не глядя.
 	if plants.vine_stats()["links"] > 0:
 		_vine_grown_check()
+		_vine_brake_check()
+		_burst_check()
 		_vine_reshape_check()
 		_vine_tip_check()
 		_vine_hang_check()          # он сносит все лианы — только последним
@@ -2364,6 +2425,82 @@ func _seed_props() -> void:
 #
 # МОХ ПЕРЕД ЭТИМ УБИРАЕМ. Он тут ни при чём, а тикает дороже всех: с ним прогон
 # втрое дольше растёт сам и вдесятеро — по числу кочек.
+# =============================================================================
+#  СТЕНД ЛИАНЫ  (`--vinebench`)
+# =============================================================================
+#
+# ЗАЧЕМ ОН НУЖЕН. У лианы разброс огромный: две лозы в одном и том же прогоне
+# самопроверки дают 215 и 407 звеньев, а в иной день 438 и 1339. Это не поломка,
+# а её устройство: лоза растёт одной нитью, и судьба её решается несколькими
+# ранними поворотами — нашла глыбу и полезла вверх, ветвясь, или пошла мимо и
+# стелется по лугу.
+#
+# Отсюда правило, купленное дорого: ОДНО ЧИСЛО О СКОРОСТИ РОСТА НЕ ГОВОРИТ
+# НИЧЕГО. Хуже того, всякая правка роста сдвигает общий поток случайности — и
+# даже мох, которого правка не касалась, выходит в самопроверке другим. Сравнив
+# «до» и «после» по одному прогону, читаешь шум и принимаешь его за работу.
+#
+# Стенд растит лозу на одном и том же месте по нескольким посевам подряд.
+# СРАВНИВАТЬ НАДО СЕРЕДИНЫ, а не лучшее и не худшее.
+const BENCH_SEEDS := [20260811, 7, 1234, 99991, 424242, 31337, 8080]
+
+func _vine_bench() -> void:
+	_seed_structures()
+	_flush_chunks()
+	print("Стенд лианы: посевов ", BENCH_SEEDS.size(), ", по полторы минуты роста")
+	var got: Array = []
+	for s in BENCH_SEEDS:
+		plants.clear_all()
+		plants._rng.seed = int(s)
+		plants._sprout_why = PackedInt32Array()
+		plants._sprout_why.resize(SpacePlantsScript.WHY_NAMES.size())
+		_seed_vine()
+		for _i in range(600):
+			plants._tick(0.15)
+		var out: Dictionary = plants.vine_stats()
+		got.append(int(out["links"]))
+		# ОТКАЗЫ — САМОЕ ВАЖНОЕ ЗДЕСЬ. Застрявшая лоза от бодрой отличается не
+		# числом звеньев, а тем, обо что она упёрлась: кончик пробует расти
+		# каждую секунду и получает отказ по одной и той же причине.
+		var why: PackedInt32Array = plants.sprout_why()
+		var parts: Array = []
+		for k in range(why.size()):
+			if why[k] > 0:
+				parts.append(String(SpacePlantsScript.WHY_NAMES[k]) + " "
+					+ str(why[k]))
+		print("  посев ", s, ": звеньев ", out["links"], ", развилок ",
+			out["forks"], ", кончиков ", out["tips"], ", метёлок ",
+			out["sprays"], " с ", out["flowers"], " цветками; вросло ",
+			out["buried"], ", колено под землёй до ",
+			snappedf(float(out["sunk"]) * 100.0, 0.1), " см; отказы — ",
+			", ".join(parts) if not parts.is_empty() else "нет")
+		# ЧТО С КОНЧИКОМ У ЗАСТРЯВШЕЙ ЛОЗЫ. Разбираем только бедные: у бодрой
+		# кончиков десятки, и смотреть там не на что.
+		if int(out["links"]) < 40:
+			for pid in plants.patches:
+				var p: Dictionary = plants.patches[pid]
+				if String(p["id"]) != "vine" or int(p.get("kids", 0)) != 0:
+					continue
+				var was: int = int(p.get("from", -1))
+				var came := Vector3.ZERO
+				if plants.patches.has(was):
+					var went: Vector3 = Vector3(p["pos"]) \
+						- Vector3(plants.patches[was]["pos"])
+					if went.length_squared() > 0.000001:
+						came = went.normalized()
+				print("    кончик: в воздухе ", p.get("air", false),
+					", перелез ", p.get("rode", false), ", свесилось ",
+					p.get("hangs", 0), " из ", p.get("hang_max", 0),
+					", зрелость ", snappedf(float(p["m"]), 0.01), ", опора ",
+					snappedf(float(p.get("prop", 0.0)), 0.01), "; шли под ",
+					snappedf(rad_to_deg(came.angle_to(Vector3(p["nrm"]))), 1.0),
+					"° к нормали земли — 90° это вдоль земли, 0° прямо от неё")
+	got.sort()
+	print("Стенд лианы: середина ", got[got.size() / 2], ", от ", got[0],
+		" до ", got[got.size() - 1])
+	get_tree().quit()
+
+
 func _vine_grown_check() -> void:
 	for pid in plants.patches.keys():
 		if String(plants.patches[pid]["id"]) == "moss":
@@ -2413,6 +2550,20 @@ func _vine_grown_check() -> void:
 		" звеньев, то есть ", snappedf(float(big["leaves"]) / links, 0.01),
 		" на звено; вошло кончиком в породу ", big["leaf_in"],
 		" — норма ноль")
+	# ЦВЕТЕНИЕ. Ноль метёлок значил бы, что цветоносы не заводятся вовсе — а
+	# завестись им положено с третьего поколения ветвей, и на взрослой лозе таких
+	# ветвей сотни. Свес меньше длины — это норма: метёлка сперва отходит наружу.
+	# ВРОСШИЕ В ЗЕМЛЮ ЗВЕНЬЯ — сторож по кадру пользователя «лоза потерялась и
+	# вросла в текстуру». Норма ноль: звену положено лежать НА земле, а висящему
+	# — над ней. Не ноль — значит, либо побег ушёл под поверхность, либо игрок
+	# засыпал висящую ветвь и та не заметила.
+	print("Лиана взрослая: вросло в землю звеньев — ", big["buried"],
+		" из ", big["links"], " — норма ноль")
+	print("Лиана взрослая: метёлок — ", big["sprays"], ", цветков на них ",
+		big["flowers"], ", самая длинная ", big["spray_len"],
+		" звеньев и свесилась на ",
+		snappedf(float(big["spray_drop"]) * 100.0, 0.1),
+		" см; вошло цветком в породу ", big["flower_in"], " — норма ноль")
 	# ЧЕМ ЛИСТВА ОБХОДИТСЯ. Дощечка листа — восемь треугольников, а листьев у
 	# взрослой лианы больше, чем звеньев: это самая дорогая её часть, и держать
 	# её цену на виду стоит с самого начала.
@@ -2561,6 +2712,92 @@ func _moss_count() -> int:
 		if String(plants.patches[pid]["id"]) == "moss":
 			n += 1
 	return n
+
+
+func _vine_count() -> int:
+	var n := 0
+	for pid in plants.patches:
+		if String(plants.patches[pid]["id"]) == "vine":
+			n += 1
+	return n
+
+
+# ЧТО ТОРМОЗИТ ЛИАНУ. Ей записано «на ровном растёт вдвое медленнее», и вопрос
+# один: отличает ли мерка ровное место от опоры. Печатаем обе — нынешнюю (по
+# опоре) и прежнюю (по наклону земли), — потому что прежняя выглядела разумно и
+# врала молча: наклон это та же крутизна, а крутизна на камне 0.214 против 0.186
+# на земле, то есть глыбы от луга не видит вовсе.
+#
+# ЧИТАТЬ ТАК: у мерки должен быть РАЗМАХ. Если оба края близки, растение всюду
+# растёт одинаково, как его ни зови.
+func _vine_brake_check() -> void:
+	var flat_slow: float = float(PlantsData.ITEMS["vine"].get("flat_slow", 1.0))
+	var n := 0
+	var prop_sum := 0.0
+	var slow_sum := 0.0
+	var old_sum := 0.0
+	var prop_low := 1.0
+	var prop_high := 0.0
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) != "vine":
+			continue
+		n += 1
+		var prop: float = clampf(float(p.get("prop", 0.0)), 0.0, 1.0)
+		prop_sum += prop
+		prop_low = minf(prop_low, prop)
+		prop_high = maxf(prop_high, prop)
+		slow_sum += lerpf(flat_slow, 1.0, prop)
+		old_sum += lerpf(flat_slow, 1.0,
+			1.0 - clampf(Vector3(p["nrm"]).y, 0.0, 1.0))
+	if n == 0:
+		return
+	print("Тормоз лианы: опора под звеном от ", snappedf(prop_low, 0.01), " до ",
+		snappedf(prop_high, 0.01), ", в среднем ", snappedf(prop_sum / n, 0.01),
+		" — отсюда рост идёт в ", snappedf(slow_sum / n, 0.01),
+		" силы; прежней меркой по наклону вышло бы ", snappedf(old_sum / n, 0.01),
+		" (предел замедления ", flat_slow, ")")
+
+
+# ВСПЛЕСК РОСТА ОТ РУКИ — ПРИ ОСТАНОВЛЕННОМ ВРЕМЕНИ.
+#
+# Проверяем ровно то, ради чего он делался (решение пользователя 2026-08-28):
+# мир стоит, игрок трогает землю у лианы — и она всё равно тянется, а НЕ ОДНИМ
+# КАДРОМ. Требование «плавно» тут не про красоту: скачок в один кадр увидеть
+# нельзя, а увиденное и есть весь смысл отклика на действие.
+#
+# ТРИ ЧИСЛА, И КАЖДОЕ ЛОВИТ СВОЮ БЕДУ: сколько наросло при стоящем времени без
+# всякого мазка (норма ноль — иначе «стоп» не останавливает), сколько от одного
+# мазка (ноль значил бы, что всплеск не работает вовсе) и за сколько разных
+# кадров это набралось (единица значила бы тот самый рывок).
+func _burst_check() -> void:
+	var at := Vector3.ZERO
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) == "vine" and int(p.get("kids", 0)) == 0:
+			at = p["pos"]
+			break
+	if at == Vector3.ZERO:
+		return
+	var was_time: float = plants.time_scale
+	plants.time_scale = 0.0
+	var start: int = _vine_count()
+	for _i in range(60):
+		plants._process(1.0 / 60.0)
+	var idle: int = _vine_count() - start
+	_wake_plants(at, _brush_radius())
+	var seen: int = _vine_count()
+	var frames := 0
+	for _i in range(240):
+		plants._process(1.0 / 60.0)
+		var now: int = _vine_count()
+		if now != seen:
+			seen = now
+			frames += 1
+	plants.time_scale = was_time
+	print("Всплеск от руки: при стоящем времени само наросло ", idle,
+		" звеньев (норма ноль), от одного мазка — ", seen - start,
+		" за ", frames, " разных кадров из 240 — единица значила бы рывок")
 
 
 func _seed_vine() -> void:
