@@ -40,6 +40,10 @@ const CELL_SPACING: float = 0.6667   # втрое мельче прежнего 
 # Около двадцати клеток на грань решётки. Подробности — в `Terrain.gdshader`.
 const TERRAIN_PIXEL: float = 0.03
 const WORLD_SEED: int = 20260811
+# Зерно ЭТОГО запуска. По умолчанию — прежнее, чтобы все кадры и замеры
+# оставались сравнимыми; другой остров той же породы даёт ключ `--seed=N`.
+# Стендов это касается тоже — кто передал ключ, тот сам выбрал другой мир.
+var world_seed: int = WORLD_SEED
 
 # --- Камера ---
 const SMOOTH: float = 12.8
@@ -178,6 +182,7 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_frame()
 	_setup_hint()
+	world_seed = int(_arg_num(OS.get_cmdline_user_args(), "--seed", float(world_seed)))
 	_build_world()
 	_setup_toolbar()
 	# БЕЗ await: подгонка ждёт кадров вёрстки, а остальному запуску ждать её
@@ -404,7 +409,7 @@ func _process(delta: float) -> void:
 		if fill_done < 1.0:
 			fill_label.text = "остров достраивается — %d%%" % int(fill_done * 100.0)
 	if not _dirty_chunks.is_empty():
-		_flush_chunks()
+		_flush_chunks_some()
 
 
 func _apply_camera() -> void:
@@ -428,7 +433,7 @@ func _build_world() -> void:
 	var started := Time.get_ticks_msec()
 	grid = SpaceGridScript.new()
 	grid.generate(ISLAND_RADIUS, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, UNDERROOM,
-		CELL_SPACING, WORLD_SEED)
+		CELL_SPACING, world_seed)
 	solid = {}
 	for i in grid.solid:
 		solid[i] = "ground"
@@ -563,6 +568,43 @@ func material_of(cell: int) -> String:
 	return m if m is String else "ground"
 
 
+# ПЕРЕСБОРКА ЗЕМЛИ — С ЗАПАСОМ НА КАДР, как уже сделано у сада. Мазок широкой
+# кистью метит с десяток кусков, и собранные разом они стоили кадру 48–111 мс —
+# рывок на каждом движении руки. Теперь кадр собирает, сколько успевает, а
+# остальное догоняет в следующих.
+#
+# КУСОК ПОД РУКОЙ СОБИРАЕТСЯ ПЕРВЫМ. У земли есть тонкость, которой не было у
+# растений: курсор целится по коллизии меша, и пока кусок под кистью не
+# пересобран, кисть рисует по вчерашнему рельефу. Мазок оставляет своё место в
+# `_flush_focus`, и очередь начинается с ближайших к нему кусков.
+const CHUNK_MS: float = 6.0
+var _flush_focus: Vector3 = Vector3.INF
+
+func _flush_chunks_some() -> void:
+	var order: Array = _dirty_chunks.keys()
+	if _flush_focus.is_finite():
+		var at: Vector3 = _flush_focus / (CELL_SPACING * float(CHUNK_NODES))
+		order.sort_custom(func(a, b):
+			return Vector3(a).distance_squared_to(at) < Vector3(b).distance_squared_to(at))
+	var deadline: int = Time.get_ticks_usec() + int(CHUNK_MS * 1000.0)
+	for ch in order:
+		_rebuild_chunk(ch)
+		_dirty_chunks.erase(ch)
+		if Time.get_ticks_usec() >= deadline:
+			break
+	# Растения пересаживаются сразу, не дожидаясь мешей: они ходят по полю, а
+	# поле уже изменено в момент мазка. Постройки же строятся группой целиком —
+	# их дёргаем один раз, когда очередь опустела.
+	if plants != null and not _touched_cells.is_empty():
+		plants.surface_changed(_touched_cells.keys())
+	_touched_cells.clear()
+	if _dirty_chunks.is_empty():
+		if buildings != null:
+			buildings.rebuild_all()
+		if props != null:
+			props.surface_changed()
+
+
 func _flush_chunks() -> void:
 	for ch in _dirty_chunks:
 		_rebuild_chunk(ch)
@@ -677,6 +719,7 @@ func _brush_radius(erase: bool = false) -> float:
 
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
 		stone_push: float = 0.0) -> void:
+	_flush_focus = at
 	var touched: Array = grid.stroke_at(at, radius, amount, stone_push)
 	if amount > 0.0:
 		for c in touched:
@@ -718,6 +761,7 @@ func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> 
 	# по соседям. Отменить его вычислением нельзя (сколько снялось, зависит от
 	# того, что было вокруг), поэтому в память кладётся сам список прибавок.
 	if material == "smooth" and amount > 0.0:
+		_flush_focus = at
 		var delta: Dictionary = grid.blur_at(at, _brush_radius() * 1.15, BLUR)
 		if delta.is_empty():
 			return
@@ -1352,6 +1396,42 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		sb.pressed.connect(_set_time_scale.bind(i))
 		row.add_child(sb)
 		speed_buttons.append(sb)
+
+	# ПЕРЕМОТКА. Не скорость, а действие: одно нажатие дарит саду тридцать
+	# игровых секунд, и они проливаются ускоренно (см. `fast_left` у растений).
+	# Работает и при «стоп» — это ответ на руку, как и кисть роста.
+	var ff := _list_button(-1, true)
+	ff.text = " +30с "
+	ff.tooltip_text = "Перемотать рост: сад проживёт тридцать секунд ускоренно"
+	ff.pressed.connect(func():
+		if plants != null:
+			plants.fast_left += 30.0)
+	row.add_child(ff)
+
+	# С ПАЛЬЦА НЕТ НИ ОТМЕНЫ, НИ НАКЛОНА: Ctrl+Z на стекле не нажать, а тангаж
+	# живёт на вертикали ПКМ. Свободных жестов не осталось (см. README,
+	# «Управление с пальца») — поэтому кнопки, и только на сенсорном стекле:
+	# мыши они лишь загораживали бы вид.
+	if _touch_ui():
+		var extra := HBoxContainer.new()
+		extra.add_theme_constant_override("separation", _chip_gap())
+		column.add_child(extra)
+		var ub := _list_button(-1, true)
+		ub.text = " ⟲ отмена "
+		ub.pressed.connect(_undo)
+		extra.add_child(ub)
+		var tilt_up := _list_button(-1, true)
+		tilt_up.text = " ⤒ "
+		tilt_up.tooltip_text = "Взгляд ниже к земле"
+		tilt_up.pressed.connect(func():
+			target_pitch = clampf(target_pitch + 15.0, -85.0, -5.0))
+		extra.add_child(tilt_up)
+		var tilt_down := _list_button(-1, true)
+		tilt_down.text = " ⤓ "
+		tilt_down.tooltip_text = "Взгляд круче сверху"
+		tilt_down.pressed.connect(func():
+			target_pitch = clampf(target_pitch - 15.0, -85.0, -5.0))
+		extra.add_child(tilt_down)
 
 
 func _toggle_group(group: int) -> void:
@@ -2458,7 +2538,7 @@ func _rock_bench(args: PackedStringArray) -> void:
 	grid.joint_span = _arg_num(args, "--span", grid.joint_span)
 	# Семейства заведены при постройке мира, до того как стенд прочёл ключи, —
 	# значит, при смене шага их надо завести заново, иначе ключ ничего не сделает.
-	grid._build_joints(WORLD_SEED)
+	grid._build_joints(world_seed)
 	grid.crack_thru = _arg_num(args, "--thru", grid.crack_thru)
 	grid.seam_deep = _arg_num(args, "--seam", grid.seam_deep)
 	grid.stroke_reach = _arg_num(args, "--skirt", grid.stroke_reach)
@@ -2575,7 +2655,7 @@ const SCENE_FORCE: float = 6.0
 
 func _scene_rocks() -> void:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = WORLD_SEED + 31337
+	rng.seed = world_seed + 31337
 	var was_brush := brush
 	brush = 3
 	var turn: float = rng.randf_range(0.0, TAU)

@@ -77,6 +77,10 @@ var patches: Dictionary = {}      # номер -> {pos, nrm, id, m, step, cell, 
 var by_cell: Dictionary = {}      # ячейка -> {номер: true}
 var cell_nodes: Dictionary = {}   # ячейка -> меш со всеми её растениями
 var time_scale: float = 1.0
+# Запас перемотки, в игровых секундах: кнопка «+30 с» прибавляет сюда, кадр
+# проливает по FAST_K игровых секунд на настоящую (см. `_process`).
+var fast_left: float = 0.0
+const FAST_K: float = 8.0
 var _dirty: Dictionary = {}
 var _accum: float = 0.0
 # ВСПЛЕСК ОТ РУКИ ИГРОКА — свой счёт времени, по настоящим секундам. `_burst_left`
@@ -1648,6 +1652,15 @@ func _process(delta: float) -> void:
 		# мире удары сердца заводят вторые, а мир в них не стареет ни на миг:
 		# `_tick` получает ноль мирового времени и один лишь подарок.
 		_accum += delta * time_scale
+		# ПЕРЕМОТКА: кнопка «+30 с» дарит саду игровые секунды, и они проливаются
+		# ускоренно, но не разом — FAST_K игровых секунд на настоящую. Одним
+		# куском нельзя: сотни тиков в один кадр — это замирание, а не перемотка.
+		# Течёт и при остановленном времени: это ответ на действие руки, как и
+		# всплеск роста.
+		if fast_left > 0.0:
+			var boost: float = minf(fast_left, delta * FAST_K)
+			_accum += boost
+			fast_left -= boost
 		if _burst_left > 0.0:
 			_burst_left -= delta
 			_burst_accum += delta
