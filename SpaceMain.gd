@@ -1172,19 +1172,30 @@ const TOUCH_GAIN: float = 2.0      # во сколько раз крупнее �
 
 
 func _screen_ui_scale() -> int:
-	if not DisplayServer.is_touchscreen_available():
-		return 1
 	var density: float = DisplayServer.screen_get_scale()
 	if density <= 0.0:
 		# Не всякая платформа умеет отдавать плотность напрямую — тогда считаем
 		# её из числа точек на дюйм, где 96 на дюйм это обычный экран.
 		var dpi: int = DisplayServer.screen_get_dpi()
 		density = float(dpi) / 96.0 if dpi > 0 else 1.0
-	return clampi(int(round(density * TOUCH_GAIN)), 2, 6)
+	if DisplayServer.is_touchscreen_available():
+		return clampi(int(round(density * TOUCH_GAIN)), 2, 6)
+	# И НА МЫШИ ПЛОТНОСТЬ УЧИТЫВАЕТСЯ. Окно рисуется в физических пикселях, и
+	# на плотном экране (ретина — плотность 2) прежняя единица давала шрифт
+	# вдвое мельче задуманного. Обычный экран остаётся единицей, как был.
+	#
+	# НА МАКЕ — ЕЩЁ В 2.5 РАЗА (решение пользователя 2026-08-31: «всё ещё
+	# мелко»). Только мак: винду и веб это не трогает, там прежние размеры.
+	if OS.get_name() == "macOS":
+		density *= 2.5
+	return clampi(int(round(density)), 1, 8)
 
 
+# Сенсорность и размер — разные вещи: крупный интерфейс бывает и на мыши
+# (плотный экран), а тач-повадки — двойное нажатие посадки, кнопки отмены и
+# наклона — только там, где есть стекло.
 func _touch_ui() -> bool:
-	return ui_scale > 1
+	return DisplayServer.is_touchscreen_available()
 
 
 # МЕНЮ НЕ ЗАНИМАЕТ БОЛЬШЕ СЕДЬМОЙ ЧАСТИ ЭКРАНА.
