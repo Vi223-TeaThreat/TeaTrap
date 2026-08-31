@@ -176,6 +176,21 @@ func _ready() -> void:
 	# Первая прикидка — от плотности экрана. Подсказка строится по ней и такой
 	# и останется; панель потом ещё ужмётся, если перебрала долю экрана.
 	ui_scale = _screen_ui_scale()
+	# ОКНО МЕНЯЕТ РАЗМЕР — МЕНЮ ПЕРЕСЧИТЫВАЕТСЯ ЗАНОВО. Правило «не больше
+	# седьмой части» меряет по окну, и мерка живёт ровно до первого растягивания
+	# или сжатия окна: без пересчёта панель оставалась той, что была скроена
+	# под прежний размер. Масштаб при этом каждый раз берётся исходный — иначе
+	# ужатое единожды меню оставалось бы мелким навсегда.
+	get_viewport().size_changed.connect(func():
+		if _resize_wait:
+			return
+		_resize_wait = true
+		get_tree().create_timer(0.4).timeout.connect(func():
+			_resize_wait = false
+			ui_scale = _screen_ui_scale()
+			_clear_toolbar()
+			_setup_toolbar()
+			_fit_menu()))
 	_setup_materials()
 	_setup_environment()
 	_setup_light()
@@ -1180,15 +1195,13 @@ func _screen_ui_scale() -> int:
 		density = float(dpi) / 96.0 if dpi > 0 else 1.0
 	if DisplayServer.is_touchscreen_available():
 		return clampi(int(round(density * TOUCH_GAIN)), 2, 6)
-	# И НА МЫШИ ПЛОТНОСТЬ УЧИТЫВАЕТСЯ. Окно рисуется в физических пикселях, и
-	# на плотном экране (ретина — плотность 2) прежняя единица давала шрифт
-	# вдвое мельче задуманного. Обычный экран остаётся единицей, как был.
-	#
-	# НА МАКЕ — ЕЩЁ В 2.5 РАЗА (решение пользователя 2026-08-31: «всё ещё
-	# мелко»). Только мак: винду и веб это не трогает, там прежние размеры.
-	if OS.get_name() == "macOS":
-		density *= 2.5
-	return clampi(int(round(density)), 1, 8)
+	# НА МЫШИ РАЗМЕР МЕНЮ РЕШАЕТ ДОЛЯ ОКНА, А НЕ ПЛОТНОСТЬ. Жёсткая база тут
+	# не живёт: под маленькое окно её просили поднять, под растянутое — она же
+	# оказывалась «слишком крупной» (два решения пользователя 2026-08-31 за
+	# один вечер, в разные стороны). Поэтому старт — с потолка, а правило доли
+	# (`_fit_menu`) ужимает панель, пока она не уместится в свою часть окна:
+	# большое окно — крупное меню, маленькое — мелкое, само.
+	return 8
 
 
 # Сенсорность и размер — разные вещи: крупный интерфейс бывает и на мыши
@@ -1208,7 +1221,26 @@ func _touch_ui() -> bool:
 # Готовую панель не сжимаем намеренно: сжатая рисует шрифт из чужого кегля и
 # мылит его, а список мы только что делали читаемым.
 const MENU_SHARE: float = 1.0 / 7.0
+# НА ПЛОТНЫХ ЭКРАНАХ БЕЗ СТЕКЛА ДОЛЯ ВТРОЕ СТРОЖЕ (решение пользователя
+# 2026-08-31): 1/7 писалась под телефон, где панель должна быть под пальцем;
+# на большом мониторе высокого разрешения та же доля раздувает меню на
+# пол-вида, стоит растянуть окно.
+const MENU_SHARE_DENSE: float = 1.0 / 21.0
 
+func _screen_density() -> float:
+	var density: float = DisplayServer.screen_get_scale()
+	if density <= 0.0:
+		var dpi: int = DisplayServer.screen_get_dpi()
+		density = float(dpi) / 96.0 if dpi > 0 else 1.0
+	return density
+
+
+func _menu_share() -> float:
+	if _touch_ui():
+		return MENU_SHARE
+	return MENU_SHARE_DENSE if _screen_density() >= 1.5 else MENU_SHARE
+
+var _resize_wait: bool = false
 var toolbar_layer: CanvasLayer
 var toolbar_panel: PanelContainer
 
@@ -1225,7 +1257,7 @@ func _fit_menu() -> void:
 		if toolbar_panel == null:
 			return
 		var screen: Vector2 = get_viewport().get_visible_rect().size
-		var budget: float = screen.x * screen.y * MENU_SHARE
+		var budget: float = screen.x * screen.y * _menu_share()
 		var taken: float = toolbar_panel.size.x * toolbar_panel.size.y
 		if taken <= 0.0 or taken <= budget:
 			return
@@ -1704,7 +1736,13 @@ func _setup_hint() -> void:
 		label.add_theme_font_size_override("font_size", 11 * ui_scale)
 	else:
 		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
-	label.position = Vector2(16 * ui_scale, 16 * ui_scale)
+		# На мыши кегль от плотности экрана: на ретине дефолтные 13 физических
+		# пикселей нечитаемы. От `ui_scale` брать нельзя — в момент постройки
+		# он ещё потолок, его только потом ужимает правило доли окна.
+		label.add_theme_font_size_override("font_size",
+			13 * clampi(int(round(_screen_density())), 1, 3))
+	var hint_px: int = ui_scale if _touch_ui() else clampi(int(round(_screen_density())), 1, 3)
+	label.position = Vector2(16 * hint_px, 16 * hint_px)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.add_theme_color_override("font_outline_color", Color.BLACK)
 	label.add_theme_constant_override("outline_size", 4)
@@ -1714,9 +1752,9 @@ func _setup_hint() -> void:
 	fill_label = Label.new()
 	# Под подсказкой: на стекле она в две строки, и место под неё считаем от
 	# того же кегля, иначе на плотном экране надпись уезжала бы на середину.
-	fill_label.position = Vector2(16 * ui_scale, 52 * ui_scale if _touch_ui() else 112)
-	if _touch_ui():
-		fill_label.add_theme_font_size_override("font_size", 11 * ui_scale)
+	fill_label.position = Vector2(16 * hint_px, 52 * hint_px if _touch_ui() else 112 * hint_px / 2)
+	fill_label.add_theme_font_size_override("font_size",
+		11 * ui_scale if _touch_ui() else 13 * hint_px)
 	fill_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
 	fill_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	fill_label.add_theme_constant_override("outline_size", 4)
