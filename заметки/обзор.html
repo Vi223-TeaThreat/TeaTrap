@@ -1,0 +1,491 @@
+<title>Разбор Pilot Garden</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,500;0,700;1,500&family=Golos+Text:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+:root{
+  --paper:#E7EAE4;
+  --card:#F4F6F1;
+  --card-2:#DDE2D6;
+  --ink:#1D211B;
+  --ink-2:#535B4E;
+  --ink-3:#7C8474;
+  --rule:#C6CCBE;
+  --accent:#4F6821;
+  --accent-soft:#D9E2C4;
+  --ochre:#8A6020;
+  --ochre-soft:#EFE2C9;
+  --oxide:#8C4326;
+  --oxide-soft:#F0DAD1;
+  --shadow:0 1px 0 rgba(29,33,27,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#15180F;
+    --card:#1E2318;
+    --card-2:#2A3022;
+    --ink:#E4E8DC;
+    --ink-2:#A2AA94;
+    --ink-3:#79816C;
+    --rule:#333A2A;
+    --accent:#A2C361;
+    --accent-soft:#2A3319;
+    --ochre:#D5A661;
+    --ochre-soft:#332917;
+    --oxide:#D4835F;
+    --oxide-soft:#332017;
+    --shadow:none;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#15180F;
+  --card:#1E2318;
+  --card-2:#2A3022;
+  --ink:#E4E8DC;
+  --ink-2:#A2AA94;
+  --ink-3:#79816C;
+  --rule:#333A2A;
+  --accent:#A2C361;
+  --accent-soft:#2A3319;
+  --ochre:#D5A661;
+  --ochre-soft:#332917;
+  --oxide:#D4835F;
+  --oxide-soft:#332017;
+  --shadow:none;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:"Golos Text","Helvetica Neue",Arial,sans-serif;
+  font-size:16px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1000px;margin:0 auto;padding:0 20px 96px}
+
+/* ---------- шапка ---------- */
+.masthead{padding:64px 0 40px;border-bottom:1px solid var(--rule)}
+.eyebrow{
+  font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);margin:0 0 18px;
+}
+h1{
+  font-family:Alegreya,Georgia,serif;
+  font-weight:700;font-size:clamp(38px,6vw,62px);line-height:1.04;
+  margin:0 0 18px;letter-spacing:-.015em;text-wrap:balance;
+}
+.standfirst{
+  font-family:Alegreya,Georgia,serif;font-size:clamp(18px,2.3vw,22px);
+  line-height:1.5;color:var(--ink-2);max-width:60ch;margin:0;
+}
+.standfirst em{color:var(--ink);font-style:italic}
+
+/* ---------- стратиграфическая колонка ---------- */
+.strata{display:grid;grid-template-columns:34px minmax(0,1fr);gap:0}
+section{display:contents}
+.rail{
+  position:relative;border-right:1px solid var(--rule);
+}
+.rail::before{
+  content:"";position:absolute;left:-1px;top:18px;width:9px;height:9px;
+  background:var(--accent);border-radius:1px;transform:translateX(-4px);
+}
+.rail[data-mark="warn"]::before{background:var(--oxide)}
+.rail[data-mark="new"]::before{background:var(--ochre)}
+.body{padding:48px 0 8px 26px;min-width:0}
+@media(max-width:720px){
+  .strata{grid-template-columns:14px minmax(0,1fr)}
+  .body{padding-left:16px}
+}
+
+h2{
+  font-family:Alegreya,Georgia,serif;font-weight:700;
+  font-size:clamp(26px,3.4vw,34px);line-height:1.15;
+  margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance;
+}
+.kicker{
+  font-family:"IBM Plex Mono",ui-monospace,monospace;
+  font-size:11.5px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ink-3);margin:0 0 20px;
+}
+h3{
+  font-family:"Golos Text",sans-serif;font-weight:600;font-size:17px;
+  margin:32px 0 8px;letter-spacing:-.005em;
+}
+p{margin:0 0 16px;max-width:66ch}
+ul,ol{margin:0 0 16px;padding-left:22px;max-width:66ch}
+li{margin:0 0 8px}
+strong{font-weight:600}
+a{color:var(--accent)}
+code,.num{font-family:"IBM Plex Mono",ui-monospace,monospace;font-variant-numeric:tabular-nums}
+code{
+  font-size:.88em;background:var(--card-2);padding:.1em .34em;border-radius:3px;
+}
+
+/* ---------- плитки чисел ---------- */
+.tiles{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+  gap:8px;margin:0 0 28px;
+}
+.tile{background:var(--card);border:1px solid var(--rule);padding:16px 16px 14px}
+.tile b{
+  display:block;font-family:"IBM Plex Mono",monospace;font-weight:500;
+  font-size:26px;line-height:1.1;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums;margin-bottom:4px;
+}
+.tile span{display:block;font-size:12.5px;line-height:1.35;color:var(--ink-2)}
+.tile.hi b{color:var(--accent)}
+.tile.warn b{color:var(--oxide)}
+
+/* ---------- таблицы ---------- */
+.scroll{overflow-x:auto;margin:0 0 24px;border:1px solid var(--rule);background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:14.5px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{
+  font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:11px;
+  letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);
+  background:var(--card-2);white-space:nowrap;
+}
+tr:last-child td{border-bottom:0}
+td.n{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.chip{
+  display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;
+  letter-spacing:.08em;text-transform:uppercase;padding:2px 7px;border-radius:2px;
+  white-space:nowrap;
+}
+.chip.a{background:var(--oxide-soft);color:var(--oxide);border:1px solid var(--oxide)}
+.chip.b{background:var(--ochre-soft);color:var(--ochre);border:1px solid var(--ochre)}
+.chip.c{background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent)}
+
+/* ---------- врезка ---------- */
+.pull{
+  border-left:3px solid var(--accent);background:var(--card);
+  padding:16px 20px;margin:0 0 24px;box-shadow:var(--shadow);
+}
+.pull p:last-child{margin-bottom:0}
+.pull.warn{border-left-color:var(--oxide)}
+
+/* ---------- пути ---------- */
+.paths{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px;margin:0 0 24px}
+.path{background:var(--card);border:1px solid var(--rule);padding:18px 18px 14px;display:flex;flex-direction:column}
+.path .no{
+  font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.12em;
+  color:var(--ink-3);margin-bottom:8px;
+}
+.path h4{font-family:Alegreya,Georgia,serif;font-weight:700;font-size:21px;margin:0 0 4px;line-height:1.2}
+.path .cost{
+  font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--accent);margin-bottom:12px;
+}
+.path p{font-size:14.5px;margin-bottom:12px}
+.path ul{font-size:13.5px;padding-left:18px;margin-bottom:0}
+.path li{margin-bottom:5px;color:var(--ink-2)}
+
+/* ---------- список файлов ---------- */
+.files{display:grid;gap:1px;background:var(--rule);border:1px solid var(--rule);margin:0 0 24px}
+.file{background:var(--card);padding:14px 16px;display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:14px}
+.file code{background:none;padding:0;font-size:13.5px;color:var(--accent);word-break:break-word}
+.file span{font-size:14px;color:var(--ink-2)}
+@media(max-width:620px){.file{grid-template-columns:1fr;gap:4px}}
+
+footer{
+  border-top:1px solid var(--rule);margin-top:56px;padding-top:20px;
+  font-size:13px;color:var(--ink-3);
+  font-family:"IBM Plex Mono",monospace;
+}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Прототип · 86 коммитов · 11–31 августа 2026</p>
+  <h1>Разбор Pilot&nbsp;Garden</h1>
+  <p class="standfirst">Двадцать один день работы дали <em>очень хороший симулятор поверхности с двумя растениями</em>. Игры в нём пока нет. Ниже — что накоплено, где демка проваливается и как из этого сделать игру с целями.</p>
+</header>
+
+<div class="strata">
+
+<!-- ================= ОБЪЁМ ================= -->
+<section>
+  <div class="rail"></div>
+  <div class="body">
+    <h2>Что накоплено</h2>
+    <p class="kicker">Оценка со стороны</p>
+
+    <div class="tiles">
+      <div class="tile"><b>15 138</b><span>строк GDScript в восьми файлах</span></div>
+      <div class="tile"><b>38 %</b><span>из них — комментарии: 5 785 строк</span></div>
+      <div class="tile"><b>301 КБ</b><span>README: 3 155 строк, 27 842 слова</span></div>
+      <div class="tile hi"><b>85</b><span>таблиц с замерами в документации</span></div>
+      <div class="tile hi"><b>41</b><span>записанные грабли с числами</span></div>
+      <div class="tile"><b>33</b><span>решения пользователя, зафиксированных дословно</span></div>
+      <div class="tile"><b>238</b><span>параметров в каталоге растений</span></div>
+      <div class="tile"><b>6</b><span>стендов и проверок без запуска игры</span></div>
+      <div class="tile warn"><b>3</b><span>вида растений, из них сажаются два</span></div>
+      <div class="tile warn"><b>1 / 9</b><span>клеток матрицы взаимодействий заполнена</span></div>
+      <div class="tile warn"><b>4 / 13</b><span>картинок нарисованы от руки, остальные — заглушки кодом</span></div>
+      <div class="tile"><b>39 МБ</b><span>весит веб-демка</span></div>
+    </div>
+
+    <h3>Что здесь сильного — и это редкость</h3>
+    <p>Почти каждое число в проекте <strong>замерено, а не подобрано на глаз</strong>, и рядом с ним записана причина. Восемьдесят пять таблиц замеров на пятнадцать тысяч строк — плотность, которой не бывает у коммерческих проектов такого возраста.</p>
+    <p>Отдельно ценно, что <strong>записаны и неудачи</strong>: шесть подходов честно помечены «пробовали и убрали» — отдельные тела камней, рисованные трещины (трижды), осколки, свой уровень у глыбы, спокойная поверхность. Отрицательный результат дороже удачного: он не даёт зайти в тот же тупик второй раз.</p>
+
+    <h3>Что здесь слабого</h3>
+    <div class="pull warn">
+      <p><strong>Пропорция.</strong> Триста килобайт документации и пятнадцать тысяч строк кода поддерживают два вида растений и одну реакцию между ними. Примерно <strong>половина всех усилий ушла в камень и поверхность</strong>, треть — в две формы роста, остаток — во всё прочее. Машина построена прекрасно; содержания в ней почти нет.</p>
+    </div>
+    <p>Знание живёт в одном файле на 300 КБ — теперь хотя бы <strong>с оглавлением</strong>. Дрейф README против кода найден и выправлен: три устаревших числа (<code>branch</code>, <code>bloom_share</code>, <code>crack_floor</code>) и мёртвая ссылка на демку. На 238 параметров это мало, но напоминание держать README при коде — честное.</p>
+    <p>Самопроверка шла руками; теперь <strong>пуш демки без чистой самопроверки не проходит</strong> — хук в репозитории.</p>
+
+    <h3>Проверено сегодня на этой машине</h3>
+    <p>Godot 4.7.1 поставлен, проект собрался, самопроверка прошла целиком: рёбер поверхности 79 092, <strong>вывернутых 0, незамкнутых 0</strong>; шипов на камне за 90° — 0; отмена возвращает поле и глыбы в ноль. Мак оказался вдвое быстрее прежней машины: мазок широкой кистью 48 мс против записанных 111.</p>
+  </div>
+</section>
+
+<!-- ================= СЛАБЫЕ МЕСТА ================= -->
+<section>
+  <div class="rail" data-mark="warn"></div>
+  <div class="body">
+    <h2>Где демка проваливается</h2>
+    <p class="kicker">Порядок — по тому, сколько игроков теряется на каждом</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Что не так</th><th>Почему это больно</th><th>Что делать</th><th>Цена</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Игроку не сказано, что делать</strong></td>
+            <td>Открывается остров и панель. Ни цели, ни первого шага. Друг тыкает, получает кочку и закрывает вкладку.</td>
+            <td>Три строки при первом запуске и одна заданная задача: «доведи лозу до вершины скалы».</td>
+            <td><span class="chip c">день</span></td>
+          </tr>
+          <tr>
+            <td><strong>Сад не сохраняется</strong></td>
+            <td>Обновил вкладку — час лепки исчез молча. Возвращаться не к чему, а значит и незачем.</td>
+            <td>Сохранять не поле, а <strong>историю правок</strong> — она уже ведётся ради отмены. Это десятки килобайт, не мегабайты.</td>
+            <td><span class="chip c">2–3 дня</span></td>
+          </tr>
+          <tr>
+            <td><strong>Ссылка на демку была мёртвой</strong></td>
+            <td>README вёл на старый адрес, отдававший 404: страница переехала вместе с репозиторием. Сам вес терпим: полоса загрузки есть, по сети едет ~10 МБ сжатым из 39.</td>
+            <td><strong>Исправлено:</strong> ссылка в README ведёт на живую страницу /TeaTrap/.</td>
+            <td><span class="chip c">готово</span></td>
+          </tr>
+          <tr>
+            <td><strong>Два режима роста спорят</strong></td>
+            <td>Время идёт само, но кисть роста работает только на «стоп» — и притушена без объяснения. Читается поломкой.</td>
+            <td>Решение уже принято («время доживает своё») — довести до конца: сделать «стоп» состоянием по умолчанию.</td>
+            <td><span class="chip b">2 дня</span></td>
+          </tr>
+          <tr>
+            <td><strong>Мазок дёргает картинку</strong></td>
+            <td>48 мс широкой кистью на этой машине, 111 на прежней — при кадре в 16 мс это рывок на каждом движении руки.</td>
+            <td>Тот же запас на кадр, что уже сделан для сада, плюс правило «кусок под рукой пересобирается первым».</td>
+            <td><span class="chip b">3–4 дня</span></td>
+          </tr>
+          <tr>
+            <td><strong>Тишина</strong></td>
+            <td>Отсутствие звука читается недоделанностью сильнее, чем любая графика. Четыре звука меняют ощущение больше, чем месяц работы над камнем.</td>
+            <td>Ветер, шорох земли, стук камня, шелест листвы.</td>
+            <td><span class="chip c">2 дня</span></td>
+          </tr>
+          <tr>
+            <td><strong>С пальца нет отмены и наклона</strong></td>
+            <td>На телефоне ошибку не откатить вовсе, а камеру не наклонить — половина видов недоступна.</td>
+            <td>Две кнопки на экране. Жестов свободных нет, и искать их не надо.</td>
+            <td><span class="chip c">день</span></td>
+          </tr>
+          <tr>
+            <td><strong>Треть панели ведёт в никуда</strong></td>
+            <td>Раздел «Объекты» скрыт, здания выключены — они ждут переезда с кусочков граней.</td>
+            <td>Либо доделать, либо честно убрать из каталога, чтобы не тянуть мёртвый вес.</td>
+            <td><span class="chip b">решение</span></td>
+          </tr>
+          <tr>
+            <td><strong>Девять картинок из тринадцати — заглушки</strong></td>
+            <td>Лист, кора, цветок и лиамох выглядят программистской графикой рядом с честно нарисованным мхом.</td>
+            <td>Рисовать по <code>art/КАК-РИСОВАТЬ.txt</code>. Это единственная часть, которую нельзя сделать кодом.</td>
+            <td><span class="chip a">рука</span></td>
+          </tr>
+          <tr>
+            <td><strong>Один остров навсегда</strong></td>
+            <td>Одно зерно мира, две сцены. Второй раз открывать нечего.</td>
+            <td>Зерно в настройках — и каждый запуск даёт новый остров той же породы.</td>
+            <td><span class="chip c">полдня</span></td>
+          </tr>
+          <tr>
+            <td><strong>Про друзей ничего не известно</strong></td>
+            <td>Ссылку раздали, но где люди бросают игру и что успевают сделать — неизвестно. Правки идут вслепую.</td>
+            <td>Кнопка «отправить кадр и рассказать» вместо аналитики: пять ответов честнее тысячи событий.</td>
+            <td><span class="chip c">день</span></td>
+          </tr>
+          <tr>
+            <td><strong>Заросли слишком густые</strong></td>
+            <td>Открытый вопрос с 29 августа, ждёт вашего выбора из пяти способов.</td>
+            <td>Предложение прежнее: начать с «лист и цветок реже» и «старые кончики глохнут» вместе.</td>
+            <td><span class="chip b">ваше слово</span></td>
+          </tr>
+          <tr>
+            <td><strong>Лиамох дорог</strong></td>
+            <td>207 треугольников на кочку против 84 у мха. Заросль в тысячу кочек — двести тысяч треугольников на один вид.</td>
+            <td>Убавлять <code>fuzz_many</code> и <code>spore_many</code>: они и стоят.</td>
+            <td><span class="chip c">число</span></td>
+          </tr>
+          <tr>
+            <td><strong>Проверки не шли сами</strong></td>
+            <td>Четыре минуты и запуск руками — сломанная сборка доехала бы до друзей незамеченной.</td>
+            <td><strong>Исправлено:</strong> хук не выпускает пуш с пересобранной демкой, пока самопроверка не пройдёт чистой.</td>
+            <td><span class="chip c">готово</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================= СЮЖЕТНЫЕ УРОВНИ ================= -->
+<section>
+  <div class="rail"></div>
+  <div class="body">
+    <h2>Сюжетные уровни</h2>
+    <p class="kicker">Цели через комбинирование растений и условий среды</p>
+
+    <div class="pull">
+      <p><strong>Главное: изобретать почти ничего не надо.</strong> В игре уже лежат оба ингредиента головоломки. Первый — <strong>виды реагируют друг на друга</strong>: на стыке лианы и мха родится третий вид, и механизм встречи про виды не знает, он читает таблицу. Второй — <strong>среда решает, где что растёт</strong>: у каждого вида записано, на каких поверхностях он живёт, как ему помогают тень и стык, а лиане нужна опора — без неё она не лезет и не свешивается.</p>
+    </div>
+
+    <p>Значит, задача «получи третий вид вон там» уже сегодня требует от игрока слепить скалу, посадить мох у подножия и посадить лозу так, чтобы она до него дошла. Это <strong>готовая головоломка</strong> — не хватает только цели и проверки.</p>
+
+    <h3>Уровень — это данные, а не код</h3>
+    <p>Ровно как сцены и встречи видов. Карточка уровня: сцена, список целей, необязательный запас действий, подсказка. Цель — это число, которое <strong>самопроверка уже умеет считать</strong>: сколько кочек какого вида, докуда доросла лоза, какая доля породы покрыта зеленью, сколько было встреч. Цель = это же число плюс порог.</p>
+
+    <div class="paths">
+      <div class="path">
+        <p class="no">ПУТЬ ПЕРВЫЙ</p>
+        <h4>Задачник</h4>
+        <p class="cost">1–2 недели · риск малый</p>
+        <p>Уровень = сцена + цели + счётчик. Симуляция не трогается вовсе.</p>
+        <ul>
+          <li>таблица уровней рядом со сценами</li>
+          <li>панель целей и проверка раз в секунду</li>
+          <li>экран «сделано» и кнопка «заново»</li>
+          <li><strong>Даёт:</strong> цель, победу, повод вернуться</li>
+          <li><strong>Не даёт:</strong> настоящей головоломки — цели берутся перебором</li>
+        </ul>
+      </div>
+      <div class="path">
+        <p class="no">ПУТЬ ВТОРОЙ</p>
+        <h4>Влага как ресурс</h4>
+        <p class="cost">3–5 недель · риск средний</p>
+        <p>Вода полем решётки: копится в ложбинах, стекает по склону, сохнет на солнце.</p>
+        <ul>
+          <li>то же устройство, что у каменистости</li>
+          <li>поля карточки «любит сырое / нужно сырое»</li>
+          <li>мокрый камень уже умеет блестеть</li>
+          <li><strong>Даёт:</strong> смысл лепке — «вырасти мох на вершине» превращается в «проведи туда воду»</li>
+          <li><strong>Почему верный шаг:</strong> сейчас рельеф и сад почти не связаны</li>
+        </ul>
+      </div>
+      <div class="path">
+        <p class="no">ПУТЬ ТРЕТИЙ</p>
+        <h4>Дерево видов</h4>
+        <p class="cost">по строке за раз · риск малый</p>
+        <p>Расширить таблицу встреч до цепочки: A+B→C, C+A→D, C+вода→E.</p>
+        <ul>
+          <li>механизм двусторонний и про виды не знает</li>
+          <li>каждая новая связь — строка данных и одна карточка</li>
+          <li><strong>Даёт:</strong> уровень «получи E» становится задачей «найди порядок»</li>
+          <li><strong>Платить:</strong> каждый вид стоит рисования и треугольников</li>
+        </ul>
+      </div>
+    </div>
+
+    <p><strong>Как сложить:</strong> первый путь сразу — он ничего не ломает и даёт демке смысл. Третий понемногу параллельно, по строке за раз. Второй — когда станет ясно, что задачника мало.</p>
+
+    <h3>Первые три уровня, каждый учит одному</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Уровень</th><th>Цель</th><th>Чему учит</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Подушка</strong></td><td>Вырастить двадцать кочек мха</td><td>Посадка, кисть роста, что сад живёт сам</td></tr>
+          <tr><td><strong>Наверх</strong></td><td>Довести лозу до вершины скалы</td><td>Лозе нужна опора. Рельеф решает, куда она полезет</td></tr>
+          <tr><td><strong>Знакомство</strong></td><td>Получить лиамох</td><td>Виды реагируют. Надо свести двоих в одном месте</td></tr>
+          <tr><td>Дальше</td><td>Лиамох на вершине · покрыть скалу, не тронув луг · два пятна по разные стороны скалы</td><td>Уже комбинации</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Чего для уровней не хватает помимо целей</h3>
+    <ul>
+      <li><strong>Отмотки.</strong> Уровень надо уметь начать заново одной кнопкой. Сейчас есть только отмена мазка.</li>
+      <li><strong>Счёта.</strong> Ограничить посадки или мазки — иначе любая цель берётся перебором, и головоломки не выйдет.</li>
+      <li><strong>Показа условий — и это важнее двух предыдущих.</strong> Игрок должен <em>видеть</em>, где есть опора, где тень, где влага. Без этого комбинирование остаётся угадыванием. Стоит дёшево: шейдер всё это уже считает, нужен переключатель, красящий поверхность по одному условию.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ================= ОПЫТ ИГРОКА ================= -->
+<section>
+  <div class="rail"></div>
+  <div class="body">
+    <h2>Как сделать игру приятнее</h2>
+    <p class="kicker">Отдельно от уровней — это нужно в любом случае</p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Что добавить</th><th>Что это меняет</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Карта условий</strong></td><td>Переключатель, красящий землю по опоре, тени, крутизне и влаге. Самое дешёвое из всего списка и самое сильное: игрок наконец видит, по каким правилам живёт сад.</td></tr>
+          <tr><td><strong>Сохранение и открытка</strong></td><td>Сад переживает вкладку, а красивый кадр можно показать. Съёмка уже умеет всё, нужна кнопка в игре.</td></tr>
+          <tr><td><strong>Первый шаг</strong></td><td>Три строки и одна задача при первом запуске. Разница между «поиграл минуту» и «поиграл двадцать».</td></tr>
+          <tr><td><strong>Звук</strong></td><td>Ветер, шорох земли, стук камня, шелест листвы. Четыре звука.</td></tr>
+          <tr><td><strong>Перемотка роста</strong></td><td>Кнопка «тридцать секунд вперёд» вместо ожидания. Сейчас взрослая лоза растёт полторы минуты реального времени.</td></tr>
+          <tr><td><strong>Отмена и наклон с пальца</strong></td><td>Телефон перестаёт быть урезанной версией.</td></tr>
+          <tr><td><strong>Зерно мира в настройках</strong></td><td>Новый остров каждый раз — реиграбельность из одной строки.</td></tr>
+          <tr><td><strong>Объяснить кисть роста</strong></td><td>Всплеск виден, но не назван. Игрок не понимает, что именно он только что сделал.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Порядок, если делать по одному</h3>
+    <ol>
+      <li>Сохранение сада — без него всё остальное теряет смысл.</li>
+      <li>Первый шаг и одна задача.</li>
+      <li>Звук.</li>
+      <li>Отзывчивость мазка.</li>
+      <li>Задачник уровней.</li>
+      <li>Карта условий.</li>
+      <li>Влага.</li>
+      <li>Дерево видов — дальше уже бесконечно.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ================= НОВОЕ В РЕПОЗИТОРИИ ================= -->
+<section>
+  <div class="rail" data-mark="new"></div>
+  <div class="body">
+    <h2>Что появилось в репозитории</h2>
+    <p class="kicker">Всё переносится вместе с проектом</p>
+
+    <div class="files">
+      <div class="file"><code>ПАРАМЕТРЫ.md</code><span><strong>Пульт управления игрой.</strong> Все главные числа таблицами: мир, камень, мох, лиана, лиамох, встречи, рост. Меняете число в колонке «Сейчас», сохраняете, пишете «примени ПАРАМЕТРЫ.md» — я вношу правки в код и отчитываюсь замерами. Метки предупреждают, где число двигается только в паре и где у него замеренный потолок.</span></div>
+      <div class="file"><code>.claude/agents/frame-critic.md</code><span><strong>Агент-критик кадра.</strong> Смотрит снимки игры глазами и называет изъяны. Не пишет код, не хвалит, честно говорит «не видно на этом кадре». Умеет сравнивать «до» и «после» — кадры глыбы воспроизводимы точка в точку.</span></div>
+      <div class="file"><code>КРИТЕРИИ-КАДРА.md</code><span><strong>Чек-лист для него и для вас.</strong> Пятьдесят с лишним изъянов по разделам: летающее и вросшее, треугольники решётки, камень, лоза, лист, мох, лиамох, покраска, интерфейс. Каждая строка — как это выглядит, как называется, что обычно крутят. Файл живой: нашли новое — дописали.</span></div>
+      <div class="file"><code>CLAUDE.md</code><span>Правила работы: вы ведёте игру как автор, код целиком на мне, технические решения не обсуждаются. Плюс сжатая выжимка всего README — законы решётки, устройство камня и растений, все грабли.</span></div>
+      <div class="file"><code>README-mac.md</code><span>Та же книга с маковскими путями и командами. Источник правды остаётся <code>README.md</code>.</span></div>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<footer>Собрано 31 августа 2026 · Godot 4.7.1 · самопроверка пройдена на этой машине</footer>
+
+</div>

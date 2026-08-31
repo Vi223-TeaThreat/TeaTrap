@@ -1,0 +1,65 @@
+#!/bin/sh
+# Заслон: демку нельзя залить, не прогнав самопроверку.
+#
+# Срабатывает ТОЛЬКО когда в отправляемых коммитах тронута папка docs/ —
+# то есть пересобрана веб-демка. Обычные пуши кода идут без задержки:
+# самопроверка стоит четыре минуты, и на каждый пуш её не навесить.
+#
+# Обойти сознательно: SKIP_SELFTEST=1 git push
+
+[ "$SKIP_SELFTEST" = "1" ] && exit 0
+
+# Отправляется ли docs/?
+touches_docs=0
+while read local_ref local_sha remote_ref remote_sha; do
+	[ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+	if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+		range="$local_sha"
+	else
+		range="$remote_sha..$local_sha"
+	fi
+	if git diff --name-only "$range" 2>/dev/null | grep -q '^docs/'; then
+		touches_docs=1
+	fi
+done
+[ "$touches_docs" = "0" ] && exit 0
+
+# Где движок. Свой путь можно задать переменной GODOT.
+if [ -n "$GODOT" ] && [ -x "$GODOT" ]; then
+	godot="$GODOT"
+elif [ -x "/Applications/Godot.app/Contents/MacOS/Godot" ]; then
+	godot="/Applications/Godot.app/Contents/MacOS/Godot"
+elif [ -x "/e/vi/Godot/Godot_v4.7.1-stable_win64_console.exe" ]; then
+	godot="/e/vi/Godot/Godot_v4.7.1-stable_win64_console.exe"
+else
+	echo "pre-push: движок не найден — самопроверку не прогнать." >&2
+	echo "Укажите путь: GODOT=/путь/к/godot git push, или пропустите: SKIP_SELFTEST=1" >&2
+	exit 1
+fi
+
+root="$(git rev-parse --show-toplevel)"
+echo "В пуше пересобранная демка (docs/) — идёт самопроверка, около четырёх минут..."
+log="$(mktemp)"
+"$godot" --headless --path "$root" --quit-after 2000 -- --selftest --audit >"$log" 2>&1
+status=$?
+
+bad=""
+[ $status -ne 0 ] && bad="движок вышел с ошибкой $status"
+grep -q "SCRIPT ERROR" "$log" && bad="${bad:+$bad; }ошибки скриптов"
+if ! grep -q "вывернутых — 0, незамкнутых — 0" "$log"; then
+	bad="${bad:+$bad; }поверхность не замкнута"
+fi
+if grep -q "^Шипы:" "$log" && ! grep -q "^Шипы: за 90° всего 0" "$log"; then
+	bad="${bad:+$bad; }шипы на камне"
+fi
+
+if [ -n "$bad" ]; then
+	echo "" >&2
+	echo "САМОПРОВЕРКА НЕ ПРОШЛА: $bad" >&2
+	echo "Полный вывод: $log" >&2
+	echo "Пуш демки остановлен. Сознательный обход: SKIP_SELFTEST=1 git push" >&2
+	exit 1
+fi
+echo "Самопроверка чистая — демка едет."
+rm -f "$log"
+exit 0

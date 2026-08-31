@@ -1,10 +1,16 @@
-# Pilot Garden — прототип
+# Pilot Garden — прототип (маковская копия)
+
+> **Это копия README под мак.** Источник правды — `README.md`; здесь изменены
+> только пути, команды и то, что из них следует. Всё содержательное — про мир,
+> растения, камень, стенды и решения — слово в слово то же. Правки по существу
+> вносить в `README.md` и переносить сюда.
 
 Игра-песочница про растения, вдохновлённая **Cloud Gardens** (рост от
 окружения) и **Townscaper** (простое интуитивное строительство).
 
 ## Оглавление
 
+- [Что поставить на мак](#что-поставить-на-мак)
 - [Как запустить](#как-запустить)
 - [Управление](#управление)
 - [Управление с пальца](#управление-с-пальца)
@@ -31,11 +37,56 @@
 - [Густота зарослей — открыто, ждёт её выбора](#густота-зарослей--открыто-ждёт-её-выбора)
 - [Что дальше](#что-дальше)
 
+## Что поставить на мак
+
+Движок нужен **ровно 4.7.1**. Числа стендов и кадры сравниваются с теми, что
+сняты на другом устройстве, а разная сборка движка их разводит: то, что покажется
+правкой, окажется сменой версии. `brew install --cask godot` даёт свежую (4.7.2)
+— не она.
+
+```bash
+curl -L -o /tmp/godot.zip https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_macos.universal.zip
+unzip -q -o /tmp/godot.zip -d /Applications
+xattr -dr com.apple.quarantine /Applications/Godot.app
+```
+
+Шаблоны экспорта — отдельным файлом; без них не собрать веб-демку:
+
+```bash
+curl -L -o /tmp/tpz.zip https://github.com/godotengine/godot/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz
+unzip -q -o /tmp/tpz.zip -d /tmp/godot-tpl
+mkdir -p ~/Library/Application\ Support/Godot/export_templates
+rm -rf ~/Library/Application\ Support/Godot/export_templates/4.7.1.stable
+mv /tmp/godot-tpl/templates ~/Library/Application\ Support/Godot/export_templates/4.7.1.stable
+```
+
+Проверить, что встало то самое:
+
+```bash
+/Applications/Godot.app/Contents/MacOS/Godot --version
+```
+
+Должно напечатать `4.7.1.stable.official`.
+
+**Отдельного `_console.exe` на маке нет.** На винде это была вторая сборка
+движка, печатавшая в консоль; на маке единственный бинарь
+`/Applications/Godot.app/Contents/MacOS/Godot` пишет в терминал сам — его и
+зовут все команды ниже, и с `--headless`, и без.
+
 ## Как запустить
 
-1. Открыть Godot (`E:\vi\Godot\Godot_v4.7.1-stable_win64.exe`).
-2. Если проекта нет в списке — **Import** → `E:\vi\pilot\project.godot`.
+1. Открыть Godot: `open -a Godot` (или из Launchpad).
+2. Если проекта нет в списке — **Import** → `~/Desktop/TeaTrap/project.godot`.
 3. Нажать **▶** (или **F5**). Остров достраивается около двух секунд.
+
+Первое открытие дольше обычного: папки `.godot/` в репозитории нет намеренно
+(она в `.gitignore`), и движок переимпортирует картинки заново.
+
+Без редактора, прямо из терминала:
+
+```bash
+/Applications/Godot.app/Contents/MacOS/Godot --path ~/Desktop/TeaTrap
+```
 
 ## Управление
 
@@ -102,10 +153,21 @@
 архив честнее показывает картинку: в браузере нет SSAO и всё считается в
 один поток.
 
-Пересобрать обе после правок — две команды:
+Пересобрать веб-демку после правок — одна команда:
+
+```bash
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --export-release "Web" ~/Desktop/TeaTrap/docs/index.html
+```
+
+**Windows-сборку с мака собирать не стоит.** В пресете стоит
+`application/modify_resources=true` — движок правит иконку и версию внутри
+готового `.exe`, а делает это сторонним `rcedit`, которому на маке нужен ещё и
+wine. Ни того, ни другого здесь нет: экспорт либо оборвётся руганью на rcedit,
+либо выдаст `.exe` без иконки и версии. Гасить флаг ради мака не надо — это
+правка пресета, которая молча испортит сборку и на винде. Пока Windows-архив
+собирают там же, где и раньше:
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --export-release "Web" E:\vi\pilot\docs\index.html
 E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --export-release "Windows Desktop" E:\vi\pilot\build\windows\PilotGarden.exe
 ```
 
@@ -1266,7 +1328,7 @@ git config core.hooksPath .githooks
 другую можно ключом:
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64.exe --path E:\vi\pilot -- --scene=bare
+/Applications/Godot.app/Contents/MacOS/Godot --path ~/Desktop/TeaTrap -- --scene=bare
 ```
 
 Незнакомое имя не молчит, а печатает, какую сцену взяло вместо него: опечатка в
@@ -2317,7 +2379,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64.exe --path E:\vi\pilot -- --scene=bare
 ### Стенд встречи (`--meetbench`)
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --quit-after 4000 -- --meetbench
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --quit-after 4000 -- --meetbench
 ```
 
 В обычном саду стык — дело случая: мох сеется подальше от камня, лоза сидит у
@@ -2424,7 +2486,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 ## Стенд лианы (`--vinebench`)
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --quit-after 4000 -- --vinebench
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --quit-after 4000 -- --vinebench
 ```
 
 **Зачем он есть.** У лианы разброс огромный: на одних и тех же числах она даёт
@@ -2545,7 +2607,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 когда правится рост, смотреть надо на обе строки.
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --quit-after 4000 -- --growbench
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --quit-after 4000 -- --growbench
 ```
 
 ### Арки при спуске — и как их искали
@@ -2863,7 +2925,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 ## Проверка без запуска игры
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --quit-after 2000 -- --selftest --audit
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --quit-after 2000 -- --selftest --audit
 ```
 
 `--audit` считает целостность поверхности: у замкнутой каждое направленное
@@ -2883,7 +2945,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 десятками прогонов, меняя по одному числу. Стенд укладывается в пять секунд.
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot -- --rockbench
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap -- --rockbench
 ```
 
 Числа берутся с ключа, чтобы не править файл ради каждой пробы: `--facet=`
@@ -2927,7 +2989,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 нельзя, пока оно не станет файлом:
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --script res://Sheet.gd
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --script res://Sheet.gd
 ```
 
 Кладёт в `art/` три файла: `moss_base.png` — сам лист, точка в точку как в игре
@@ -2940,7 +3002,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 ## Проверка достижимости
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot --script res://Reach.gd
+/Applications/Godot.app/Contents/MacOS/Godot --headless --path ~/Desktop/TeaTrap --script res://Reach.gd
 ```
 
 Показывает, что написано, но никем не вызывается. В проекте так пряталось три
@@ -2956,11 +3018,11 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --headless --path E:\vi\pilot 
 запускает **пользователь**: визуальную оценку даёт она, а не помощник.
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolution 1280x720 -- --shot
+/Applications/Godot.app/Contents/MacOS/Godot --path ~/Desktop/TeaTrap --resolution 1280x720 -- --shot
 ```
 
 Кадры попадают в
-`C:\Users\Виктория\AppData\Roaming\Godot\app_userdata\Pilot Garden\`:
+`~/Library/Application Support/Godot/app_userdata/Pilot Garden/`:
 `space.png`, `space_close.png`, `space_macro.png` и три кадра глыбы —
 `space_cliff.png`, `space_cliff_b.png`, `space_cliff_c.png`.
 
@@ -2977,7 +3039,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolutio
 Остаётся серая поверхность под обычным светом.
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolution 1280x720 -- --shot --plain
+/Applications/Godot.app/Contents/MacOS/Godot --path ~/Desktop/TeaTrap --resolution 1280x720 -- --shot --plain
 ```
 
 Нужен он для одного дела: **отличить кривую форму от кривой покраски**. На
@@ -3003,7 +3065,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolutio
 это плата именно за простоту пробы, вариант с чётким интерфейсом стоит дороже.
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot -- --pixel
+/Applications/Godot.app/Contents/MacOS/Godot --path ~/Desktop/TeaTrap -- --pixel
 ```
 
 **Мох без рельефа** — `--flatmoss`. Холмики на теле кочки остаются
@@ -3012,7 +3074,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot -- --pixel
 за минуту. Кадры получают добавку `_flat` и первый набор не затирают.
 
 ```
-E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolution 1280x720 -- --shot --flatmoss
+/Applications/Godot.app/Contents/MacOS/Godot --path ~/Desktop/TeaTrap --resolution 1280x720 -- --shot --flatmoss
 ```
 
 ## История изменений
@@ -3020,7 +3082,7 @@ E:\vi\Godot\Godot_v4.7.1-stable_win64_console.exe --path E:\vi\pilot --resolutio
 Проект — репозиторий git. Посмотреть историю:
 
 ```bash
-git -C E:/vi/pilot log --oneline
+git -C ~/Desktop/TeaTrap log --oneline
 ```
 
 ## Густота зарослей — открыто, ждёт её выбора
