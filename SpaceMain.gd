@@ -1588,7 +1588,8 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 			armed[0] = now
 			rb.text = " точно? "
 			get_tree().create_timer(3.0).timeout.connect(func():
-				rb.text = " заново "))
+				if is_instance_valid(rb):
+					rb.text = " заново "))
 	row.add_child(rb)
 
 	var nb := _list_button(-1, true)
@@ -1603,7 +1604,8 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 			armed_n[0] = now
 			nb.text = " точно? "
 			get_tree().create_timer(3.0).timeout.connect(func():
-				nb.text = " новый остров "))
+				if is_instance_valid(nb):
+					nb.text = " новый остров "))
 	row.add_child(nb)
 
 	# С ПАЛЬЦА НЕТ НИ ОТМЕНЫ, НИ НАКЛОНА: Ctrl+Z на стекле не нажать, а тангаж
