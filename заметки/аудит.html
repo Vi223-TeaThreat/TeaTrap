@@ -1,0 +1,192 @@
+<title>Кисть, которой никто не найдёт</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Alegreya:ital,wght@0,500;0,700;1,500&family=Golos+Text:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+:root{
+  --paper:#E7EAE4; --card:#F4F6F1; --card-2:#DDE2D6;
+  --ink:#1D211B; --ink-2:#535B4E; --ink-3:#7C8474; --rule:#C6CCBE;
+  --accent:#4F6821; --accent-soft:#D9E2C4;
+  --ochre:#8A6020; --ochre-soft:#EFE2C9;
+  --oxide:#8C4326; --oxide-soft:#F0DAD1;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#15180F; --card:#1E2318; --card-2:#2A3022;
+    --ink:#E4E8DC; --ink-2:#A2AA94; --ink-3:#79816C; --rule:#333A2A;
+    --accent:#A2C361; --accent-soft:#2A3319;
+    --ochre:#D5A661; --ochre-soft:#332917;
+    --oxide:#D4835F; --oxide-soft:#332017;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#15180F; --card:#1E2318; --card-2:#2A3022;
+  --ink:#E4E8DC; --ink-2:#A2AA94; --ink-3:#79816C; --rule:#333A2A;
+  --accent:#A2C361; --accent-soft:#2A3319;
+  --ochre:#D5A661; --ochre-soft:#332917;
+  --oxide:#D4835F; --oxide-soft:#332017;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font-family:"Golos Text","Helvetica Neue",Arial,sans-serif;font-size:16px;line-height:1.62;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:940px;margin:0 auto;padding:0 20px 96px}
+.masthead{padding:60px 0 36px;border-bottom:1px solid var(--rule)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 16px}
+h1{font-family:Alegreya,Georgia,serif;font-weight:700;font-size:clamp(36px,5.6vw,58px);
+  line-height:1.05;margin:0 0 16px;letter-spacing:-.015em;text-wrap:balance}
+.standfirst{font-family:Alegreya,Georgia,serif;font-size:clamp(18px,2.2vw,21px);
+  line-height:1.5;color:var(--ink-2);max-width:60ch;margin:0}
+.standfirst em{color:var(--ink);font-style:italic}
+section{padding:44px 0 0;border-top:1px solid var(--rule);margin-top:44px}
+section:first-of-type{border-top:0;margin-top:0}
+h2{font-family:Alegreya,Georgia,serif;font-weight:700;font-size:clamp(25px,3.2vw,32px);
+  line-height:1.15;margin:0 0 6px;letter-spacing:-.01em;text-wrap:balance}
+.kicker{font-family:"IBM Plex Mono",monospace;font-size:11.5px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--ink-3);margin:0 0 22px}
+h3{font-family:"Golos Text",sans-serif;font-weight:600;font-size:17px;margin:30px 0 8px}
+p{margin:0 0 16px;max-width:66ch}
+ul,ol{margin:0 0 16px;padding-left:22px;max-width:66ch}
+li{margin:0 0 8px}
+strong{font-weight:600}
+code{font-family:"IBM Plex Mono",monospace;font-size:.87em;background:var(--card-2);
+  padding:.1em .34em;border-radius:3px;word-break:break-word}
+.scroll{overflow-x:auto;margin:0 0 24px;border:1px solid var(--rule);background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:520px;font-size:14.5px}
+th,td{text-align:left;padding:11px 14px;border-bottom:1px solid var(--rule);vertical-align:top}
+th{font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:11px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--ink-3);background:var(--card-2);white-space:nowrap}
+tr:last-child td{border-bottom:0}
+td.n{font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums;white-space:nowrap}
+/* находки */
+.find{border:1px solid var(--rule);background:var(--card);padding:18px 20px;margin:0 0 14px}
+.find-head{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px}
+.find h4{font-family:Alegreya,Georgia,serif;font-weight:700;font-size:20px;margin:0;line-height:1.25}
+.find p{font-size:15px;margin-bottom:10px}
+.find p:last-child{margin-bottom:0}
+.chip{display:inline-block;font-family:"IBM Plex Mono",monospace;font-size:10.5px;
+  letter-spacing:.08em;text-transform:uppercase;padding:2px 8px;border-radius:2px;white-space:nowrap}
+.chip.crit{background:var(--oxide-soft);color:var(--oxide);border:1px solid var(--oxide)}
+.chip.imp{background:var(--ochre-soft);color:var(--ochre);border:1px solid var(--ochre)}
+.chip.note{background:var(--accent-soft);color:var(--accent);border:1px solid var(--accent)}
+.where{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink-3);
+  border-top:1px dotted var(--rule);padding-top:8px;margin-top:10px}
+.fix{border-left:2px solid var(--accent);padding-left:12px;color:var(--ink-2);font-size:14.5px}
+.big{display:flex;gap:28px;flex-wrap:wrap;margin:0 0 24px}
+.big div{flex:1 1 150px}
+.big b{display:block;font-family:"IBM Plex Mono",monospace;font-weight:500;font-size:34px;
+  line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums;margin-bottom:6px;color:var(--accent)}
+.big span{font-size:13px;color:var(--ink-2);line-height:1.35;display:block}
+footer{border-top:1px solid var(--rule);margin-top:52px;padding-top:18px;font-size:13px;
+  color:var(--ink-3);font-family:"IBM Plex Mono",monospace}
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="eyebrow">Глубокий аудит · 31 августа 2026 · десять подсистем</p>
+  <h1>Кисть, которой никто не найдёт</h1>
+  <p class="standfirst">В игре уже есть главная механика — кисть роста. Она <em>в шестьдесят восемь раз</em> мощнее бегущего времени, но включается только при остановленном времени, молчит при работающем и обесценена соседней кнопкой. Игрок её не найдёт.</p>
+</header>
+
+<section>
+  <h2>Замер, который объясняет остальное</h2>
+  <p class="kicker">Стенд роста, одна и та же лоза, два пути</p>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Путь</th><th class="n">Звеньев</th><th class="n">Развилок на звено</th><th class="n">Листьев на звено</th><th class="n">Дальний порядок</th></tr></thead>
+      <tbody>
+        <tr><td>Рост <strong>временем</strong></td><td class="n">31</td><td class="n">0.097</td><td class="n">2.13</td><td class="n">2</td></tr>
+        <tr><td>Рост <strong>кистью</strong></td><td class="n">2 107</td><td class="n">0.085</td><td class="n">1.48</td><td class="n">21</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Разница в шестьдесят восемь раз</strong> — и при этом рисунок ветвления держится: развилок на звено почти столько же. То есть кисть не ломает лозу, а разгоняет её честно. Это уже не «заготовка главного способа», как записано в README, — это единственный способ увидеть взрослое растение за разумное время.</p>
+  <p>И ровно этот способ спрятан за условием, которого никто не объяснил.</p>
+</section>
+
+<section>
+  <h2>Пять поломок игровой петли</h2>
+  <p class="kicker">В порядке того, скольких игроков теряет каждая</p>
+
+  <div class="find">
+    <div class="find-head"><span class="chip crit">критично</span><h4>Кисть роста молча мертва при идущем времени</h4></div>
+    <p>Время по умолчанию идёт. Игрок выбирает «Рост» в разделе «Уход», ведёт по мху — и не происходит ничего: ни подсказки, ни автостопа, ни объяснения. По кадру это неотличимо от сломанной игры. Ровно тот сценарий, из-за которого уже пришлось спрятать раздел «Объекты».</p>
+    <p class="fix">Чинится одной строкой: при выборе карточки ухода само жать «стоп» и подсвечивать это в панели времени. Либо снять запрет вовсе — решение «только при остановленном» писалось, когда время ещё считалось основным.</p>
+    <p class="where">SpaceMain.gd:991 — <code>if plants == null or not is_zero_approx(time_scale): return</code></p>
+  </div>
+
+  <div class="find">
+    <div class="find-head"><span class="chip imp">важно</span><h4>Кнопка «+30с» обесценивает кисть</h4></div>
+    <p>Бесплатная кнопка дарит саду тридцать секунд и проливает их со скоростью восемь к одному — всему саду разом. Кисть за одно действие даёт шесть секунд и только тому, что попало в круг. Рационально играющий человек будет жать кнопку и никогда не возьмёт кисть, а кисть — задуманная главная механика.</p>
+    <p class="fix">Дать кнопке откат или заряды. Тогда кисть — бесплатная, но требует руки; перемотка — редкая выручалочка. Я её и добавил сегодня, и она же вышла боком: это цена быстрых удобств.</p>
+    <p class="where">SpaceMain.gd, обработчик «+30с» в панели времени; SpacePlants.gd — <code>FAST_K = 8.0</code> против <code>BURST_MAX = 6.0</code></p>
+  </div>
+
+  <div class="find">
+    <div class="find-head"><span class="chip imp">важно</span><h4>Первая встреча видов может тихо не случиться</h4></div>
+    <p>У кочки мха ровно одна проверка встречи за жизнь, и бросок с долей 0.6 срезает почти половину шансов. Если фронт лозы уже прошёл мимо, стык потерян навсегда. Для системного события это нормально; для <strong>первого в игре</strong> — нет: игрок честно сводит мох и лозу и не получает ничего. А рождение лиамоха — единственное событие-награда во всей игре.</p>
+    <p class="fix">Пока рождений ноль, считать бросок гарантированным. Счётчик уже есть, условие — одна строка.</p>
+    <p class="where">SpacePlants.gd — флаг встречи ставится раз за жизнь; Plants.gd, <code>MEETS</code>: <code>rate 0.6</code></p>
+  </div>
+
+  <div class="find">
+    <div class="find-head"><span class="chip imp">важно</span><h4>Лоза упирается в камень чаще, чем растёт</h4></div>
+    <p>Свежий стенд по семи посевам: середина <strong>206 звеньев</strong>, размах от 70 до 982. Но интереснее не разброс, а причины отказов. На эталонном посеве лоза дала 329 звеньев — и получила <strong>1336 отказов «путь в породе»</strong> против 172 по излому. Она вчетверо чаще утыкается в камень, чем делает шаг. Это не поломка (лоза лезет по скале, ей положено тереться), но это и есть настоящий потолок роста — не ветвление и не длина.</p>
+    <p class="fix">Не чинить вслепую. Замерить, сколько отказов приходится на попытку у разных посевов, и решать, стоит ли смягчать проверку пути или это честная плата за лазание.</p>
+    <p class="where">Стенд <code>--vinebench</code>, строка отказов; причин семь</p>
+  </div>
+
+  <div class="find">
+    <div class="find-head"><span class="chip imp">важно</span><h4>Сейв пишется поверх себя, без страховки</h4></div>
+    <p>Снимок сада ложится прямо в файл: упади игра посреди записи — на диске останется огрызок, и сад пропадёт целиком. Уже сейчас файл весит <strong>266 КБ на почти пустом саде</strong> и растёт вместе с ним; пишется он после каждого мазка (не чаще раза в пять секунд). В браузере хуже: сигнала о закрытии вкладки там не бывает, спасает только таймер в полминуты.</p>
+    <p class="fix">Писать во временный файл и переименовывать поверх — переименование мгновенно и не рвётся. В вебе добавить запись при потере фокуса страницы.</p>
+    <p class="where">SpaceMain.gd — <code>_save_garden</code>, <code>store_var</code> в открытый файл; <code>_notification</code> ловит только закрытие окна</p>
+  </div>
+</section>
+
+<section>
+  <h2>Что уже готово к врезке</h2>
+  <p class="kicker">Найденные точки, а не пожелания</p>
+
+  <h3>Задачник уровней — счётчики написаны и заперты в стендах</h3>
+  <p>Всё, что нужно для первых целей, уже считается на живых данных: число растений вида, рождения лиамоха, высота подъёма лозы, её длина и цветки, смыкание ковра, «лоза прислонилась к камню». Ни одна из этих функций не вызывается в игре — только в стендах.</p>
+  <p><strong>Важная оговорка:</strong> счётчики встреч не попадают в сейв. Цели надо мерить по самим растениям — они загрузку переживают.</p>
+
+  <h3>Влага — четвёртое поле по кальке камня</h3>
+  <p>У каменистости есть ровно четыре узла, которые нужно повторить: хранение, чтение с обрезкой, запись мазком с отдельной дельтой для отмены, строка в сейве. Маршрут для карточки «Полив» тоже готов — карточки ухода уже идут отдельной веткой. Потребление врезается в одно место такта роста, где уже стоит комментарий про сырость. Новый только один механизм — <strong>испарение</strong>: ни одно поле сейчас не затухает со временем.</p>
+
+  <h3>Карта условий — один uniform</h3>
+  <p>Тень и крутизна уже целиком в шейдере: порода и впадина едут в вершинах, нормаль есть, формула тени тривиальна. Прецедент режима показа тоже есть — ключ голой формы. Не хватает только опоры: её меряют лучом, в шейдер не занести, но растения запоминают её при рождении — для карты хватит кэша по ячейкам.</p>
+</section>
+
+<section>
+  <h2>Что изменилось за сегодня</h2>
+  <p class="kicker">Цифры на конец дня</p>
+
+  <div class="big">
+    <div><b>×68</b><span>во столько раз кисть роста мощнее времени</span></div>
+    <div><b>206</b><span>звеньев — середина лозы по семи посевам</span></div>
+    <div><b>0.05</b><span>арки при спуске на сто звеньев (было 1.13)</span></div>
+    <div><b>0</b><span>шипов на камне, вывернутых рёбер, вросших звеньев</span></div>
+  </div>
+
+  <p>Механика цела и померена. Сломана не она, а <strong>вход в неё</strong>: главная механика невидима, событие-награда случайно, страховки у сохранения нет. Это и есть разница между «хорошим симулятором» и «игрой» — и она чинится не месяцами, а тремя правками из списка выше.</p>
+
+  <h3>Порядок, если делать по одному</h3>
+  <ol>
+    <li><strong>Кисть роста при выборе сама останавливает время</strong> — одна строка, снимает критическую поломку.</li>
+    <li><strong>Первая встреча гарантирована</strong> — одна строка, спасает единственное событие-награду.</li>
+    <li><strong>Сейв через временный файл</strong> — полчаса, страхует всё остальное.</li>
+    <li><strong>Откат у «+30с»</strong> — возвращает кисти смысл.</li>
+    <li><strong>Задачник</strong> на готовых счётчиках — и только потом влага и карта условий.</li>
+  </ol>
+</section>
+
+<footer>Аудит десяти подсистем · стенды прогнаны на этой машине · Godot 4.7.1 · 31 августа 2026</footer>
+
+</div>
