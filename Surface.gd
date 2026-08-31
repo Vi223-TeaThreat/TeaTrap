@@ -253,7 +253,12 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 	# ровно там, где была, а свет по ней течёт мягче: у решётки в 0.67 м любая
 	# вылепленная форма набрана из считаных граней, и резкий свет выдаёт каждую.
 	var slopes: PackedVector3Array = grid.shade_slope
+	# РАЗГЛАЖЕННАЯ, а не сырая: сырая ступенчата (пять значений с шагом в
+	# четверть) и даёт на камне треугольные выносы травы по граням сетки.
 	var rest: PackedFloat32Array = grid.under
+	# ГЛУБИНА ТРЕЩИНЫ — вторым числом второго набора. По ней шейдер кладёт тень
+	# в яму: см. `crack_cut` в `SpaceGrid.gd`.
+	# Второе число второго набора свободно: тень по трещинам убрана.
 	for i in range(1, cut.size() - 1):
 		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
 		if tri.is_empty():
@@ -291,6 +296,9 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 			# может ли тут что-то осесть: на потолке пещеры и на нависающем
 			# краю оседать нечему.
 			var cc2: Dictionary = tri[k]
+			# Второе число второго набора СВОБОДНО. По нему шла тень в трещинах,
+			# и она убрана по кадру пользователя — см. «ТЁМНЫХ ТРЕЩИН НЕТ» в
+			# `Terrain.gdshader`.
 			st.set_uv2(Vector2(lerpf(rest[int(cc2["a"])], rest[int(cc2["b"])],
 				float(cc2["t"])), 0.0))
 			st.set_normal(n)

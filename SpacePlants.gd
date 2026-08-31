@@ -87,6 +87,8 @@ var _burst_left: float = 0.0
 var _burst_accum: float = 0.0
 var _next: int = 1
 var _rng := RandomNumberGenerator.new()
+# Волна, которой коробочки сбиваются в кучки. См. `_spore_count`.
+var _pod_drift: FastNoiseLite
 var _blade_mat: ShaderMaterial
 var _bump_spread: float = 0.0     # замеренный уклон образца, девятая десятая
 var _bump_tilt: float = 0.0       # и во сколько градусов он обошёлся
@@ -138,6 +140,11 @@ var _met_deny: int = 0                  # ... а сколько сорвалос
 func setup(main_ref: Node3D) -> void:
 	main = main_ref
 	_rng.seed = 20260811
+	_pod_drift = FastNoiseLite.new()
+	_pod_drift.seed = 20260811 + 4711
+	_pod_drift.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	# 1 / 0.65 = полтора метра: кучка с ладонь-две, между кучками чистый мох.
+	_pod_drift.frequency = 0.65
 	# Материал пучков — СВОЙ шейдер, не встроенный. Встроенный переворачивал
 	# нормаль у изнанки дощечки, и половина квадратов в пучке чернела; и свет
 	# у него ложится жёстко, с резкой границей тени. Подробности в `Blades.gdshader`.
@@ -1312,10 +1319,18 @@ func vine_stats() -> Dictionary:
 		for leaf in here:
 			var tip: Vector3 = Vector3(leaf["at"]) \
 				+ Vector3(leaf["along"]) * float(leaf["long"])
-			var land: Dictionary = main.grid.surface_near(tip)
+			var land: Dictionary = main.grid.calm_surface_near(tip)
 			if land.is_empty():
 				continue
-			if (tip - Vector3(land["pos"])).dot(land["nrm"]) < -0.02:
+			# КАСАНИЕ — НЕ БЕДА, решение пользователя: «если листья немного
+			# касаются породу, то окей, ничего страшного». Порог был два
+			# сантиметра, и на гранёном камне с трещинами в него попадали
+			# обычные касания — проверка кричала на пустом месте.
+			#
+			# Ловить надо ПРОГЛОЧЕННЫЙ лист, а не притёршийся. Восемь
+			# сантиметров — это больше половины листа (он 13.5 см): столько
+			# уйти в камень он может только по-настоящему.
+			if (tip - Vector3(land["pos"])).dot(land["nrm"]) < -0.08:
 				leaf_in += 1
 		# ЦВЕТКИ — тем же порядком и с тем же сторожем. Метёлка висит свободно,
 		# и в породу ей войти проще, чем листу: лист хоть отходит от опоры, а
@@ -1328,10 +1343,12 @@ func vine_stats() -> Dictionary:
 			for bud in buds:
 				var btip: Vector3 = Vector3(bud["at"]) \
 					+ Vector3(bud["along"]) * float(bud["long"])
-				var soil: Dictionary = main.grid.surface_near(btip)
+				var soil: Dictionary = main.grid.calm_surface_near(btip)
 				if soil.is_empty():
 					continue
-				if (btip - Vector3(soil["pos"])).dot(soil["nrm"]) < -0.02:
+				# Цветок мельче листа (5.5 см против 13.5), поэтому и порог свой,
+				# но правило то же: касание не беда, беда — проглоченный камнем.
+				if (btip - Vector3(soil["pos"])).dot(soil["nrm"]) < -0.035:
 					flower_in += 1
 			# ДЛИНА И СВЕС — по самой дальней точке метёлки. Свес меряем от её
 			# начала, поднявшись по цепи, пока идут звенья цветоноса: длина в
@@ -1378,7 +1395,7 @@ func vine_stats() -> Dictionary:
 				for k in [0.2, 0.4, 0.6, 0.8]:
 					var probe: Vector3 = Vector3(up_ring["at"]).lerp(
 						Vector3(ring["at"]), k)
-					var land: Dictionary = main.grid.surface_near(probe)
+					var land: Dictionary = main.grid.calm_surface_near(probe)
 					if land.is_empty():
 						continue
 					sunk = maxf(sunk,
@@ -1660,7 +1677,7 @@ func _process(delta: float) -> void:
 func plant_at(pos: Vector3, id: String) -> int:
 	if not PlantsData.is_plant(id):
 		return -1
-	var spot: Dictionary = main.grid.surface_near(pos)
+	var spot: Dictionary = main.grid.calm_surface_near(pos)
 	if spot.is_empty():
 		return -1
 	if not _fits_surface(spot["nrm"], PlantsData.ITEMS[id]):
@@ -1952,6 +1969,13 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		# дальше от главной плети, тем шире надо расти, иначе дальние порядки
 		# сбиваются в метлу у самой опоры.
 		"from": from, "kids": 0, "order": _order_after(from),
+		# КОРЕНЬ СВОЕЙ ЛОЗЫ. Нужен ровно за одним: чтобы звено могло спросить,
+		# докуда доросла ЛОЗА ЦЕЛИКОМ, а не его собственная веточка. По этому
+		# числу лоза и одревесневает — см. `_bark_of`. Наследуется от родителя,
+		# у корня им становится он сам; ходить по цепочке `from` на каждую
+		# вершину меша было бы слишком дорого.
+		"root": (int(patches[from].get("root", from)) if patches.has(from)
+			else pid),
 	}
 	if _is_stem(def):
 		patches[pid].merge(_stem_traits(from, def))
@@ -2222,7 +2246,7 @@ func _meet_born(a: Dictionary, b: Dictionary, rule: Dictionary) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[born]
 	# Землю ищем тем же прибором, каким её ищет всякая посадка: середина отрезка
 	# висит между двумя точками поверхности и на самой поверхности не лежит.
-	var spot: Dictionary = main.grid.surface_near(
+	var spot: Dictionary = main.grid.calm_surface_near(
 		(Vector3(a["pos"]) + Vector3(b["pos"])) * 0.5)
 	if spot.is_empty() or not _fits_surface(spot["nrm"], def):
 		return false
@@ -2240,6 +2264,16 @@ func _meet_born(a: Dictionary, b: Dictionary, rule: Dictionary) -> bool:
 	# «в том числе при появлении реакции между растениями с появлением нового»).
 	# Ему он нужнее прочих: рождается оно ростом с ноготь, и без толчка первая
 	# трансформация в игре проходила бы незамеченной.
+	#
+	# ЭТО ПРАВИЛО ЗАКРЕПЛЕНО ЗА ВСЕМИ РЕАКЦИЯМИ, а не только за лиамохом
+	# (решение пользователя 2026-08-31: «это должно закрепляться за всеми
+	# растениями, полученными в реакциях»). Держится оно тем, что рождение на
+	# стыке идёт ЧЕРЕЗ ОДНО МЕСТО — эту самую строку: заведёшь новую реакцию,
+	# и она получит толчок, не спрашивая. Если когда-нибудь появится второй путь
+	# рождения от реакции, толчок надо ставить и там, иначе правило разъедется.
+	#
+	# Толчок НЕ ЗАВИСИТ ОТ ВРЕМЕНИ: он тратится собственным насосом всплеска,
+	# который идёт и при остановленных часах. Тем же подарком, что раздаёт рука.
 	gift_to(pid)
 	_met_born += 1
 	return true
@@ -2718,7 +2752,7 @@ func _path_clear(from: Vector3, to: Vector3) -> bool:
 	# проверке не мешает.
 	for k in [0.2, 0.4, 0.6, 0.8, 1.0]:
 		var probe: Vector3 = from.lerp(to, k)
-		var land: Dictionary = main.grid.surface_near(probe)
+		var land: Dictionary = main.grid.calm_surface_near(probe)
 		if land.is_empty():
 			continue                 # поверхности рядом нет — значит, чистый воздух
 		if (probe - Vector3(land["pos"])).dot(land["nrm"]) < -PATH_DEEP:
@@ -2883,7 +2917,7 @@ func _one_sprout(pid: int, p: Dictionary, def: Dictionary) -> Dictionary:
 					and _ground_below(to, HANG_OVER):
 				return {"pos": to, "nrm": nrm, "cell": c, "air": true}
 
-	var spot: Dictionary = main.grid.surface_near(p["pos"] + dir * step)
+	var spot: Dictionary = main.grid.calm_surface_near(p["pos"] + dir * step)
 	if spot.is_empty():
 		return _no_spot(def, WHY_NOLAND)
 	# Отросток обязан сесть РЯДОМ и на СВОЙ ЛАД повёрнутую землю. Проверка не
@@ -3067,9 +3101,9 @@ func hang_spots(id: String) -> Dictionary:
 		if not main.grid.in_play(cell):
 			continue
 		var at: Vector3 = main.grid.seeds[cell]
-		if main.grid.surface_gap(at) < 0.0:
+		if main.grid.calm_surface_gap(at) < 0.0:
 			continue
-		var land: Dictionary = main.grid.surface_near(at)
+		var land: Dictionary = main.grid.calm_surface_near(at)
 		if land.is_empty():
 			continue
 		var nrm: Vector3 = land["nrm"]
@@ -3260,7 +3294,7 @@ func _bloom_ready(p: Dictionary, def: Dictionary) -> bool:
 const BURIED_DEEP: float = 0.05
 
 func _buried(at: Vector3) -> bool:
-	var land: Dictionary = main.grid.surface_near(at)
+	var land: Dictionary = main.grid.calm_surface_near(at)
 	if land.is_empty():
 		return false
 	return (at - Vector3(land["pos"])).dot(land["nrm"]) < -BURIED_DEEP
@@ -3319,7 +3353,7 @@ func _bloom_room(def: Dictionary, at: Vector3) -> bool:
 		# Меряем ОТВЕСОМ, а не путём кисти: точный путь ещё не известен, а висит
 		# она в основном вниз. Прибавка `deep` — тот же венчик под звеном.
 		var probe: Vector3 = at + Vector3.DOWN * (step * float(i) + deep)
-		var land: Dictionary = main.grid.surface_near(probe)
+		var land: Dictionary = main.grid.calm_surface_near(probe)
 		if not land.is_empty() \
 				and (probe - Vector3(land["pos"])).dot(land["nrm"]) < 0.0:
 			return false
@@ -3349,7 +3383,7 @@ func _bloom_clear(at: Vector3, hang: float, def: Dictionary) -> bool:
 				continue
 			probe = probe.normalized()
 		var under: Vector3 = at + probe * hang
-		var land: Dictionary = main.grid.surface_near(under)
+		var land: Dictionary = main.grid.calm_surface_near(under)
 		if not land.is_empty() \
 				and (under - Vector3(land["pos"])).dot(land["nrm"]) < 0.0:
 			return false
@@ -3446,7 +3480,7 @@ func _hang_room(def: Dictionary, at: Vector3, way: Vector3, step: float,
 		# выпуклом боку глыбы падение и склон уходят вниз почти вровень, и без
 		# этой мерки такое место сошло бы за кромку.
 		if free > 0.0:
-			var land: Dictionary = main.grid.surface_near(to)
+			var land: Dictionary = main.grid.calm_surface_near(to)
 			if not land.is_empty() \
 					and (to - Vector3(land["pos"])).dot(land["nrm"]) < free:
 				return i
@@ -3963,7 +3997,7 @@ func surface_changed(cells: Array = []) -> void:
 			if _buried(Vector3(p["pos"])):
 				doomed.append(pid)
 			continue
-		var spot: Dictionary = main.grid.surface_near(p["pos"])
+		var spot: Dictionary = main.grid.calm_surface_near(p["pos"])
 		# Ушла дальше половины ячейки — значит, землю из-под растения вынули
 		# или засыпали его с головой.
 		if spot.is_empty() \
@@ -4437,7 +4471,7 @@ func tilt_stats() -> Vector2:
 			continue                 # у стебля купола нет, мерить нечего
 		axis = maxf(axis, acos(clampf(Vector3(p["body"]["up"]).dot(Vector3.UP),
 			-1.0, 1.0)))
-		var spot: Dictionary = main.grid.surface_near(p["pos"])
+		var spot: Dictionary = main.grid.calm_surface_near(p["pos"])
 		if not spot.is_empty():
 			land = maxf(land, acos(clampf(Vector3(spot["nrm"]).dot(Vector3.UP),
 				-1.0, 1.0)))
@@ -4568,7 +4602,7 @@ const GROUND_TURN: float = 0.55             # и как круто может з
 const MID_RING: float = 0.58                # где щупаем середину бока
 
 func _ground_at(centre: Vector3, nrm: Vector3, dir: Vector3, want: float) -> Vector3:
-	var on: Dictionary = main.grid.surface_near(centre + dir * want)
+	var on: Dictionary = main.grid.calm_surface_near(centre + dir * want)
 	if on.is_empty():
 		return Vector3.ZERO
 	var off: Vector3 = Vector3(on["pos"]) - centre
@@ -4785,6 +4819,95 @@ func _stem_max(def: Dictionary = {}) -> float:
 # нём сходятся, берут одно и то же кольцо и сходятся точно — как столярный ус.
 # Для исходящего колена кольцо выходит косым, но это и правильно: у гнутой трубы
 # срез на изгибе косой.
+# Насколько тоньше каждое следующее поколение побегов и докуда это доходит.
+const GEN_STEP: float = 0.90
+const GEN_FLOOR: float = 0.45
+
+# КОНЦЫ ПОБЕГОВ ЗЕЛЕНЕЕ — решение пользователя: «концы всех последних побегов
+# должны быть зеленее (они слишком молоды, чтобы одревеснеть)».
+#
+# Так оно и есть у живой лозы: побег этого года травянистый и зелёный, кора на
+# нём появляется только к осени. У нас же вся плеть шла одним цветом коры до
+# самого кончика, и молодой прирост читался сухой веткой.
+#
+# ЧЕМ МЕРИТЬ МОЛОДОСТЬ. Не зрелостью звена: она набирается за десяток секунд, и
+# зелёными были бы только те звенья, что выросли секунду назад. Мерим НОШЕЙ —
+# сколько звеньев висит ниже по течению. У кончика она ноль, и он зелен; у
+# основания вся лоза, и там кора. Той же меркой считается и толщина, так что
+# цвет с нею сходится сам собой: где тонко, там и зелено.
+const TIP_LOAD: float = 12.0      # при какой ноше зелень уже сошла на нет
+const TIP_GREEN := Color(0.33, 0.44, 0.20)
+
+#
+# ЛОЗА ДЕРЕВЕНЕЕТ НЕ СРАЗУ, А ПО ПОКОЛЕНИЯМ — решение пользователя: «пусть вся
+# лиана будет зелёной, пока не начнёт выпускать побеги 4 поколения, потом будет
+# постепенно одревесневать, начиная с 1 поколения».
+#
+# Это и есть жизнь настоящей лозы: молодое растение всё травянистое, кора
+# появляется у основания и только когда есть чему её держать. Пока лоза короткая,
+# ей незачем ствол.
+#
+# СПРАШИВАЕМ У ЛОЗЫ ЦЕЛИКОМ, а не у своей веточки. У каждого звена записан
+# корень, а у корня — самое дальнее поколение всей лозы (`kidorder` копится вверх
+# по цепочке при каждом новом звене). Иначе одревеснение шло бы у каждой ветви
+# сама по себе, и лоза вышла бы пятнистой.
+#
+# Одревеснение идёт ВОЛНОЙ от основания: как только появилось четвёртое
+# поколение, начинает буреть первое; появилось пятое — подтягивается второе.
+# Ширина волны — два поколения, чтобы переход не был щелчком.
+const WOOD_FROM: int = 3          # поколение (от нуля), с которого начинается
+const WOOD_SPAN: float = 2.0      # за сколько поколений звено буреет дочерна
+# Докуда доходит одревеснение: 2 значит «первое и второе поколение дочерна,
+# третье наполовину, дальше зелень».
+const WOOD_LAST: int = 2
+
+# НАСКОЛЬКО ЗВЕНО ОДРЕВЕСНЕЛО: 0 — травянистый побег, 1 — бурый ствол.
+#
+# Спрашивают это двое — цвет коры и лист, — и спрашивать они обязаны ОДНО И ТО
+# ЖЕ: зелёный побег облиствен, забуревший гол. Разойдись мерки, и на кадре
+# появился бы бурый ствол с листьями или зелёный прут без них.
+func _wood_of(p: Dictionary) -> float:
+	# Докуда доросла ЛОЗА. Ноль значит «корня не нашли» — тогда звено считается
+	# молодым, и это верный запас: голым оно точно не будет.
+	var deepest: int = 0
+	var r: int = int(p.get("root", -1))
+	if patches.has(r):
+		deepest = int(patches[r].get("kidorder", 0))
+	var order: int = int(p.get("order", 0))
+	var wood: float = clampf((float(deepest - WOOD_FROM) - float(order))
+		/ WOOD_SPAN, 0.0, 1.0)
+	# ПОЛНОСТЬЮ ДЕРЕВЕНЕЮТ ТОЛЬКО ПЕРВЫЕ ДВА ПОКОЛЕНИЯ — решение пользователя:
+	# «пусть полностью одревесневают и теряют листья только стебли первых двух
+	# поколений».
+	#
+	# Без этого предела волна одревеснения шла по лозе всё дальше: у взрослой
+	# лозы дальний порядок ветви доходит до девяти, и голыми становились пять
+	# поколений из девяти. На кадре это читалось голым деревом с зеленью на
+	# самых кончиках, а лоза — не дерево: у неё ствол и первое ветвление
+	# деревянные, а дальше идёт зелёный облиственный побег.
+	#
+	# Третье поколение деревенеет наполовину, чтобы переход не был щелчком;
+	# дальше не деревенеет вовсе.
+	return wood * clampf(float(WOOD_LAST) - float(order) + 0.5, 0.0, 1.0)
+
+
+func _bark_of(p: Dictionary, def: Dictionary) -> Color:
+	var bark: Color = def.get("stem_color", Color(0.34, 0.26, 0.17))
+	# У цветоноса своя жизнь, его не трогаем: он и так весь молодой.
+	if int(p.get("bloom", 0)) > 0:
+		return bark
+	var wood: float = _wood_of(p)
+	# КОНЦЫ ВСЁ РАВНО ЗЕЛЕНЕЕ. Правило по ноше не отменяется правилом по
+	# поколениям, а складывается с ним: у старой лозы ствол бурый, а свежий
+	# прирост на нём по-прежнему травянистый. Берём то, что зеленее.
+	var young: float = 1.0 - clampf(float(p.get("load", 0)) / TIP_LOAD, 0.0, 1.0)
+	var green: float = maxf(1.0 - wood, young * young)
+	if green <= 0.0:
+		return bark
+	# Не в чистую зелень: даже молодой побег к основанию буреет, и резкий переход
+	# читался бы двумя приклеенными кусками.
+	return bark.lerp(TIP_GREEN, green * 0.85)
+
 func _stem_ring(p: Dictionary, def: Dictionary) -> Dictionary:
 	var nrm: Vector3 = p["nrm"]
 	# ТОЛЩИНУ ДАЁТ НЕ ВОЗРАСТ, А НОША. Прежде радиус шёл от зрелости звена, и
@@ -4796,6 +4919,21 @@ func _stem_ring(p: Dictionary, def: Dictionary) -> Dictionary:
 	var t: float = pow(clampf(float(p.get("load", 0)) / full, 0.0, 1.0), 0.35)
 	var r: float = lerpf(float(def.get("stem_thin", 0.005)),
 		float(def.get("stem_thick", 0.030)), t)
+	# У КАЖДОГО СЛЕДУЮЩЕГО ПОКОЛЕНИЯ ПОТОЛОК НИЖЕ — решение пользователя: «побеги
+	# лианы 2 поколения никогда не станут такими же толстыми, как побеги 1
+	# поколения, побеги 3 поколения не станут такими же толстыми, как побеги 2.
+	# Разница в 10% между поколениями».
+	#
+	# Это и в природе так: боковая ветвь не догоняет ствол, от которого отошла,
+	# сколько бы ни жила. По одной ноше этого не выходит — ноша говорит лишь,
+	# сколько висит НИЖЕ, и молодая ветвь, набрав своих потомков, догоняла
+	# основание. Теперь у поколения свой потолок, и рисунок ветвления читается
+	# сам собой: чем дальше от корня, тем тоньше, даже у толстых ветвей.
+	#
+	# ПОЛ У МНОЖИТЕЛЯ ЕСТЬ. Порядок ветви доходит до девяти (замерено), и без
+	# пола девятое поколение вышло бы вчетверо тоньше первого — а оно и по ноше
+	# уже тонкое, вместе получилась бы паутина.
+	r *= maxf(GEN_FLOOR, pow(GEN_STEP, float(p.get("order", 0))))
 	# У ЦВЕТОНОСА ТОЛЩИНА СВОЯ, А НЕ ПО НОШЕ (решение пользователя 2026-08-28:
 	# ось метёлки в 10–15% от самой толстой части лозы и сужается к концу).
 	#
@@ -4884,7 +5022,7 @@ func _emit_root(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var t1: Vector3 = out_dir * (span * 1.5)
 	var stage: int = clampi(int(float(p["m"]) * float(STAGES)), 0, STAGES - 1)
 	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
-	var bark: Color = def.get("stem_color", Color(0.34, 0.26, 0.17))
+	var bark: Color = _bark_of(p, def)
 	st.set_color((bark * float(p["body"]["shade"])).srgb_to_linear())
 	var rings: Array = []
 	var ref: Vector3 = nrm
@@ -5066,7 +5204,7 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 	var v_far: float = span / maxf(round_len, 0.0001)
 	var stage: int = clampi(int(float(p["m"]) * float(STAGES)), 0, STAGES - 1)
 	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
-	var bark: Color = def.get("stem_color", Color(0.34, 0.26, 0.17))
+	var bark: Color = _bark_of(p, def)
 	st.set_color((bark * float(p["body"]["shade"])).srgb_to_linear())
 
 	var ring_a: Array = []
@@ -5193,6 +5331,9 @@ const LEAF_GRID: int = 2                    # клеток у дощечки п�
 const LEAF_SINK: float = 0.9                # насколько черешок утоплен в стебель
 const LEAF_APART: float = 0.3               # на сколько колена отступают листья друг от друга
 
+# Каким комочком сидит нераспустившаяся почка, долей взрослого листа.
+const BUD_SIZE: float = 0.13
+
 func _leaf_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 		back: Dictionary) -> Array:
 	if not def.has("leaf_long"):
@@ -5202,11 +5343,24 @@ func _leaf_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 	# У живой лозы на цветоносе тоже не листья, а мелкие прицветники.
 	if int(p.get("bloom", 0)) > 0:
 		return []
-	# И НА ПОБЕГАХ ПЕРВЫХ ДВУХ ПОКОЛЕНИЙ ТОЖЕ (решение пользователя 2026-08-28 по
-	# кадру). Это стволы: у живой лозы старая толстая древесина гола, лист сидит
-	# на молодом приросте. Лист, торчащий прямо из ствола в ладонь толщиной,
-	# читался приклеенным.
-	if int(p.get("order", 0)) < int(def.get("leaf_from", 0)):
+	# ЛИСТ СИДИТ НА ЗЕЛЁНОМ, А НЕ НА ПОКОЛЕНИИ.
+	#
+	# Прежде первые два поколения были голыми по номеру (решение 2026-08-28):
+	# это стволы, у живой лозы старая толстая древесина гола, и лист, торчащий
+	# из ствола в ладонь толщиной, читался приклеенным.
+	#
+	# ПРАВИЛО БЫЛО ВЕРНЫМ, А МЕРКА НЕТ, и это стало видно, когда лоза перестала
+	# деревенеть сразу. Теперь она зелёная, пока не пойдёт четвёртое поколение
+	# (см. `_bark_of`), — и молодая лоза выходила голым зелёным прутом с пучком
+	# листьев на самом конце. Кадр пользователя: «листья начинают появляться
+	# поздно».
+	#
+	# Спрашивать надо не номер поколения, а ОДРЕВЕСНЕЛО ЛИ ЗВЕНО. Зелёный побег
+	# облиствен по всей длине, сколько бы ему ни было поколений; забуревший
+	# ствол лист сбрасывает. Мерка та же, что у цвета коры, и они сходятся сами
+	# собой: где зелено, там и лист.
+	var wood: float = _wood_of(p)
+	if wood >= 0.98:
 		return []
 	# ЛИСТ РАЗВОРАЧИВАЕТСЯ, А НЕ ВЫСКАКИВАЕТ. Звено рождается голым, и лист на нём
 	# растёт вместе с ним: иначе на кончике плети лист возникал бы целиком за один
@@ -5214,13 +5368,27 @@ func _leaf_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 	var at: float = float(def.get("leaf_at", 0.15))
 	var grown: float = clampf((float(p["m"]) - at) / maxf(1.0 - at, 0.0001),
 		0.0, 1.0)
-	if grown <= 0.001:
-		return []
 	grown = grown * grown * (3.0 - 2.0 * grown)
+	# ПОБЕГ НЕ ПОЯВЛЯЕТСЯ ГОЛЫМ — решение пользователя: «побеги 3 поколения и
+	# новее не появляются голыми, как сейчас. Они должны иметь небольшие почки,
+	# которые потом заменяются листьями».
+	#
+	# Отдельного тела для почки заводить не пришлось: почка — это и есть лист,
+	# ещё не развернувшийся. Даём размеру ПОЛ, и на новом звене сидит комочек в
+	# одну восьмую листа, который потом просто дорастает. Так оно и в жизни:
+	# лист не возникает, а разворачивается из почки, и заменять одно другим
+	# нечем — это одно и то же.
+	#
+	# Раньше здесь стоял выход «пока не дорос — ничего нет», и звено выходило
+	# голым прутом до самой зрелости.
+	grown = maxf(grown, BUD_SIZE)
 	var load: float = clampf(float(p.get("load", 0))
 		/ maxf(1.0, float(def.get("leaf_shed", 45.0))), 0.0, 1.0)
 	var want: float = lerpf(float(def.get("leaf_young", 2.6)),
 		float(def.get("leaf_old", 0.35)), load)
+	# И РЕДЕЕТ ПО МЕРЕ ОДРЕВЕСНЕНИЯ, а не обрывается разом: ствол оголяется
+	# постепенно, снизу вверх, вместе с тем как буреет.
+	want *= 1.0 - wood
 	var salt: int = int(p["salt"])
 	var many: int = int(floor(want))
 	# Дробный остаток — не «полтора листа», а вероятность лишнего. Считаем от
@@ -5451,7 +5619,7 @@ func _emit_stalks(st: SurfaceTool, plan: Array, p: Dictionary, def: Dictionary,
 	if r_foot <= 0.0:
 		return
 	var stage: int = clampi(int(float(p["m"]) * float(STAGES)), 0, STAGES - 1)
-	var bark: Color = def.get("stem_color", Color(0.34, 0.26, 0.17))
+	var bark: Color = _bark_of(p, def)
 	bark = bark * float(p["body"]["shade"])
 	for it in plan:
 		var span: float = float(it.get("stalk", 0.0))
@@ -6089,6 +6257,11 @@ func _emit_rim_fuzz(st: SurfaceTool, def: Dictionary, ring: Array, norms: Array,
 # же при каждой пересборке, иначе коробочки прыгали бы по кочке на каждой ступени
 # роста.
 const POD_SIDES: int = 4
+# Насколько густа кучка коробочек в самой её середине. Ниже единицы — значит
+# коробочек стало меньше и в среднем по ковру: пользователь просила «немного
+# меньше», а кучки сами по себе среднего не убавляют.
+const POD_TOP: float = 2.0
+
 const POD_RINGS := [0.0, 0.32, 0.68, 1.0]      # доли длины
 const POD_WIDE := [0.0, 0.86, 1.0, 0.0]        # и толщина на них
 
@@ -6098,6 +6271,22 @@ func _spore_count(p: Dictionary, def: Dictionary) -> int:
 	if not def.has("spore_at") or float(p["m"]) < float(def["spore_at"]):
 		return 0
 	var want: float = float(def.get("spore_many", 2.0)) * float(p.get("bulk", 1.0))
+	# КОРОБОЧКИ СИДЯТ КУЧКАМИ, А НЕ РОВНО ПО КОВРУ — решение пользователя: «пусть
+	# коробочек будет немного меньше, и они будут концентрироваться в хаотично
+	# расположенных кучках».
+	#
+	# Так оно и у настоящего мха: спороносит не весь ковёр разом, а пятнами — где
+	# посырее, где постарше. Ровная россыпь по всей куртине читается не мхом, а
+	# щетиной, и это ровно то, что было видно на кадре.
+	#
+	# Волна берётся ОТ МЕСТА В МИРЕ, а не от кочки: кучка должна захватывать
+	# соседок, иначе выйдет не кучка, а та же россыпь, только реже. Длина волны
+	# около полутора метров — кучка получается с ладонь-две, а между кучками
+	# чистый мох.
+	if _pod_drift != null:
+		var at: Vector3 = p["pos"]
+		var n: float = _pod_drift.get_noise_3d(at.x, at.y, at.z)
+		want *= POD_TOP * smoothstep(-0.32, 0.28, n)
 	var many: int = int(floor(want))
 	# Дробный остаток — вероятность лишней, и берётся она от соли кочки: иначе
 	# число коробочек менялось бы при каждой пересборке.

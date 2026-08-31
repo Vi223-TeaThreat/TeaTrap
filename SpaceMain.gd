@@ -92,7 +92,6 @@ var fill_done: float = 0.0        # насколько мир достроен
 var plants: Node3D
 var props: Node3D
 var buildings: Node3D
-var rocks: Node3D
 var current_tool: String = "block"
 var branch_open: Dictionary = {}
 var branch_headers: Dictionary = {}
@@ -219,9 +218,23 @@ func _ready() -> void:
 		await _fill_world()
 		_meet_stand()
 		get_tree().quit()
+	elif "--rockbench" in args:
+		# Только камень, без растений: подбор облика идёт десятками прогонов.
+		await _fill_world()
+		_rock_bench(args)
+		# `--stay` оставляет мир стоять. Нужно оно ровно за одним: вхолостую
+		# (`--headless`) шейдеры не собираются вовсе, и поломка в покраске
+		# молчит до самого запуска игры. С `--stay` и `--quit-after` мир
+		# рисуется по-настоящему, и сборка шейдеров идёт в отчёт.
+		if not "--stay" in args:
+			get_tree().quit()
 	else:
-		# Без ожидания: мир достраивается сам, а игра уже отвечает.
-		_fill_world()
+		# СЦЕНУ СТАВИМ ПОСЛЕ ТОГО, КАК МИР ДОСТРОЕН. Она лепит скалы мазками, а
+		# мазок спрашивает у сетки поверхность: по недостроенному миру он положил
+		# бы камень в пустоту.
+		scene_id = _arg_word(args, "--scene", scene_id)
+		await _fill_world()
+		_seed_scene()
 
 
 # =============================================================================
@@ -558,8 +571,6 @@ func _flush_chunks() -> void:
 	# ячейку — меняется вся группа, поэтому пересобираем их разом.
 	if buildings != null:
 		buildings.rebuild_all()
-	if rocks != null:
-		rocks.rebuild_all()
 	# Растениям отдаём СПИСОК задетых ячеек. Без него пришлось бы на каждый
 	# мазок пересаживать весь сад: заросшая карта — это тысячи кочек, а мазок
 	# трогает три десятка ячеек.
@@ -614,8 +625,13 @@ const STROKE: float = 0.75        # сколько добавляет один �
 #
 # Считаем от узкой кисти: ей достаётся полная сила, широким — тем меньше, чем
 # они шире. Узкая осталась ровно такой, какой была.
+# Сила одного мазка. `stroke_gain` — только для стенда: укорачивая мазок, силу
+# приходится убавлять в ту же меру, иначе край его становится круче. В игре
+# всегда единица.
+var stroke_gain: float = 1.0
+
 func _stroke_amount(erase: bool = false) -> float:
-	return STROKE * (CELL_SPACING * 2.4) / _brush_radius(erase)
+	return STROKE * stroke_gain * (CELL_SPACING * 2.4) / _brush_radius(erase)
 # Насколько один проход кисти размывания подтягивает ячейку к соседям. Держим
 # небольшим: размывание должно набираться повторами, как и лепка, — иначе один
 # щелчок слизывает форму начисто и вернуть её можно только отменой.
@@ -732,8 +748,14 @@ func _dab(at: Vector3, amount: float, material: String, record: bool = true) -> 
 	var rad := _brush_radius(amount < 0.0)
 	_stroke(at, rad, amount, material, _stone_push(amount, material))
 	if record:
-		history.append({"at": at, "rad": rad, "amount": amount, "mat": material,
-			"group": _group})
+		# КЛАДЁМ В ИСТОРИЮ САМУ ПРАВКУ, а не приказ повторить мазок. Повтор с
+		# обратным знаком не годится с тех пор, как мазок стал смотреть на то,
+		# что под ним: земля на камне ложится тоньше, а смена породы идёт
+		# быстро — при повторе обе величины считались бы уже от другого
+		# состояния. Так же давно устроено размывание.
+		history.append({"field": grid.last_edit_delta,
+			"stone": grid.last_stone_delta, "at": at, "rad": rad,
+			"amount": amount, "mat": material, "group": _group})
 
 
 # Куда мазок ведёт каменистость: кладём камень — к камню, кладём землю — от
@@ -823,9 +845,15 @@ func _undo_one() -> void:
 		# Размывание снимается вычитанием ровно тех прибавок, которые оно
 		# положило: заново их не вычислить — они зависели от прежнего рельефа.
 		_after_field_change(grid.apply_delta(a["blur"], -1.0))
-	elif a.has("at"):
-		_stroke(a["at"], float(a["rad"]), -float(a["amount"]), "",
-			-_stone_push(float(a["amount"]), String(a["mat"])))
+	elif a.has("field"):
+		# ГЛЫБУ РАЗМАТЫВАЕМ ОТДЕЛЬНО. Она не поле и не краска: это счёт масс по
+		# мазкам, из которого считается шов между глыбами, а шов входит в поле.
+		# Забудь про неё — и после отмены остаётся живая глыба с массой, а вместе
+		# с нею и остаток поля (замерено: 0.014 при норме ноль).
+		var back: float = -_stone_push(float(a["amount"]), String(a["mat"]))
+		if back * -float(a["amount"]) > 0.0:
+			grid._claim_lump(a["at"], float(a["rad"]), -float(a["amount"]))
+		_after_field_change(grid.apply_delta(a["field"], -1.0, a["stone"]))
 	elif a.has("plant"):
 		plants.remove_at(int(a["plant"]))
 	elif a["added"]:
@@ -1958,6 +1986,9 @@ func _selftest() -> void:
 	# те же грабли, что уже записаны: проверка должна трогать то, что проверяет.
 	_seed_structures()
 	_flush_chunks()
+	# Теперь, и только теперь, есть что мерить: настоящий массив из четырёх
+	# колонн стоит в мире, и облик камня судят по нему.
+	_stone_surface_check(_cliff_focus, 4.5)
 	_reach_check()
 	_seed_vine()
 	_seed_vine_on_rock()
@@ -2182,9 +2213,23 @@ func _reach_check() -> void:
 		snappedf(steep_top[1], 0.001), " — по этой мерке и судят лиану")
 
 
-func _stone_surface_check(at: Vector3) -> void:
-	var node: Vector3i = grid.node_of(grid.cell_at(at))
-	var span := int(ceil(_brush_radius() * 2.0 / CELL_SPACING)) + 2
+# ПРОВЕРКА МЕРЯЕТ НАСТОЯЩИЙ МАССИВ, а не временный блин.
+#
+# ГРАБЛИ, СВОИ ЖЕ. Она лепила три мазка на ровном месте — выходил низкий блин, —
+# и по нему докладывала «самое острое ребро 34.4°». Успокаивающая неправда: та
+# глыба, что видна в кадре (`_seed_structures` — четыре колонны по четыре
+# уровня), даёт числа заметно хуже. Пока проверка мерила блин, беда была на
+# виду, а числа молчали.
+#
+# `reach` — сколько метров вокруг точки осматриваем. Массив из четырёх колонн
+# шириной с широкую кисть занимает около четырёх метров от середины.
+func _stone_surface_check(at: Vector3, reach: float) -> void:
+	var home: int = grid.cell_at(at)
+	if home < 0:
+		print("Поверхность камня: мерить нечего — глыбы в этом месте нет")
+		return
+	var node: Vector3i = grid.node_of(home)
+	var span := int(ceil(reach / CELL_SPACING)) + 2
 	var edge := Vector3i(span, span, span)
 	var edges: Dictionary = {}
 	var stats: Dictionary = {}
@@ -2193,15 +2238,51 @@ func _stone_surface_check(at: Vector3) -> void:
 	for k in edges:
 		if int(edges[k]) > 1:
 			twice += 1
-	var sharp := _sharpest(node - edge, node + edge)
+	var e: Dictionary = _edge_stats(node - edge, node + edge)
+	var total: float = maxf(1.0, float(e["edges"]))
+	var alive := 0
+	for l in grid.lumps:
+		if float(l["mass"]) > 0.0:
+			alive += 1
+	print("Глыб в массиве: ", alive, " — столько же, сколько было мазков камня",
+		" врозь (ближе ", grid.LUMP_MERGE, " м мазки лепят одну и ту же)")
+	_bodies_report(at, reach)
 	print("Поверхность камня: вывернутых рёбер ", twice, ", вывернутых тетраэдров ",
-		int(stats.get("inverted", 0)), ", самое острое ребро ",
-		snappedf(sharp, 0.1), "° (за 90° — шип)")
+		int(stats.get("inverted", 0)), ", рёбер по камню — ", int(e["edges"]))
+	print("Грани камня: плоских рёбер (тише 5°) ",
+		snappedf(100.0 * float(e["flat"]) / total, 0.1), "%, заломов круче 20°: выпуклых ",
+		snappedf(100.0 * float(e["ridge_bend"]) / total, 0.1), "%, вогнутых ",
+		snappedf(100.0 * float(e["cave_bend"]) / total, 0.1),
+		"% — у гладкого кома плоских мало, а заломов нет вовсе")
+	print("Рёбра камня: вогнутых круче 45° — ",
+		snappedf(100.0 * float(e["cave_sharp"]) / total, 0.01),
+		"% (щели и зубцы), худшее ", snappedf(float(e["cave_worst"]), 0.1),
+		"°; выпуклых — ", snappedf(100.0 * float(e["ridge_sharp"]) / total, 0.01),
+		"% (гребни, камню идут), худшее ", snappedf(float(e["ridge_worst"]), 0.1),
+		"° — за 90° шип с любым знаком")
+	print("Шипы: за 90° всего ", int(e["spike"]), ", из них на швах между глыбами ",
+		int(e["spike_seam"]), "; резких за 45° всего ", int(e["sharp"]),
+		", на швах ", int(e["sharp_seam"]),
+		" — шов и край мазка лечатся разным")
 
 
-# Самый острый угол между соседними гранями в области. Считаем только там, где
-# есть порода: у земли своя мерка, а тут спрашиваем про камень.
-func _sharpest(lo: Vector3i, hi: Vector3i) -> float:
+# РЁБРА КАМНЯ, ПОРОЗНЬ ПО ЗНАКУ. Общая мерка «излом круче 45°» валит в одну кучу
+# две разные вещи, и по ней не видно, что чинить:
+#
+#   ВОГНУТОЕ ребро — прорезь, зубец, щель. Грань в такой щели смотрит вниз,
+#     света не получает и читается чёрным клином. Глаз цепляется за него.
+#   ВЫПУКЛОЕ ребро — гребень, кромка, скол. Камню оно ИДЁТ: без выпуклых рёбер
+#     глыба остаётся гладким комом.
+#
+# Мерка нужна именно теперь: швы между глыбами вогнуты по своей природе, и
+# судить их надо не по общему числу изломов, а следя, чтобы среди них не
+# завелось настоящих шипов.
+#
+# ЗНАК БЕРЁМ ПО ЦЕНТРАМ ДВУХ ГРАНЕЙ: ушёл сосед в ту сторону, куда СМОТРИТ
+# первая грань, — поверхность заворачивается внутрь, это щель; ушёл против —
+# гребень. Грани для этого уже развёрнуты лицом наружу, иначе знак был бы
+# случайным.
+func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 	var faces: Dictionary = {}
 	var idx := PackedInt32Array()
 	idx.resize(8)
@@ -2242,6 +2323,16 @@ func _sharpest(lo: Vector3i, hi: Vector3i) -> float:
 						if n.length() < 0.0000001:
 							continue
 						n = n.normalized()
+						var mid: Vector3 = (tri[0]["p"] + tri[1]["p"]
+							+ tri[2]["p"]) / 3.0
+						# НА ШВЕ ЛИ ЭТОТ ТРЕУГОЛЬНИК. Без этого не отличить
+						# шипы, которые делает шов, от шипов, которые делает
+						# край мазка, — а лечатся они разным.
+						var on_seam: float = 0.0
+						for v in range(3):
+							on_seam = maxf(on_seam,
+								maxf(grid.seam[int(tri[v]["a"])],
+									grid.seam[int(tri[v]["b"])]))
 						for pair in [[0, 1], [1, 2], [2, 0]]:
 							var a: int = mini(int(tri[pair[0]]["a"]), int(tri[pair[0]]["b"]))
 							var b: int = maxi(int(tri[pair[0]]["a"]), int(tri[pair[0]]["b"]))
@@ -2250,15 +2341,512 @@ func _sharpest(lo: Vector3i, hi: Vector3i) -> float:
 							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
 								maxi(a, c2), maxi(b, d)]
 							if faces.has(key):
-								faces[key].append(n)
+								faces[key].append({"n": n, "c": mid, "s": on_seam})
 							else:
-								faces[key] = [n]
-	var worst := 0.0
+								faces[key] = [{"n": n, "c": mid, "s": on_seam}]
+	var out := {"edges": 0, "flat": 0, "cave_worst": 0.0, "ridge_worst": 0.0,
+		"cave_sharp": 0, "ridge_sharp": 0, "cave_bend": 0, "ridge_bend": 0,
+		"sharp": 0, "sharp_seam": 0, "spike": 0, "spike_seam": 0}
 	for key in faces:
 		var list: Array = faces[key]
-		if list.size() == 2:
-			worst = maxf(worst, rad_to_deg(list[0].angle_to(list[1])))
-	return worst
+		if list.size() != 2:
+			continue
+		var n0: Vector3 = list[0]["n"]
+		var n1: Vector3 = list[1]["n"]
+		var bend: float = rad_to_deg(n0.angle_to(n1))
+		out["edges"] = int(out["edges"]) + 1
+		# ГЛАДКИЙ КОМ И ГРАНЁНАЯ ГЛЫБА РАЗЛИЧАЮТСЯ НЕ ТОЛЬКО ШИПАМИ. У кома все
+		# рёбра гнутся понемногу и одинаково; у гранёной глыбы середина грани
+		# ПЛОСКАЯ (ребро круче 5° там взяться неоткуда), а весь излом собран в
+		# считаных рёбрах между гранями. Поэтому меряем оба конца: сколько
+		# рёбер плоских и сколько заломлено круче 20°.
+		if bend < 5.0:
+			out["flat"] = int(out["flat"]) + 1
+		# Резкие рёбра порознь: сколько их сидит НА ШВЕ между глыбами, а сколько
+		# в другом месте. Шов и край мазка лечатся разным, и валить их в одну
+		# кучу — значит крутить не тот винт.
+		if bend > 45.0:
+			var seamy: bool = maxf(float(list[0]["s"]), float(list[1]["s"])) > 0.4
+			out["sharp"] = int(out["sharp"]) + 1
+			if seamy:
+				out["sharp_seam"] = int(out["sharp_seam"]) + 1
+			if bend > 90.0:
+				out["spike"] = int(out["spike"]) + 1
+				if seamy:
+					out["spike_seam"] = int(out["spike_seam"]) + 1
+		if (Vector3(list[1]["c"]) - Vector3(list[0]["c"])).dot(n0) > 0.0:
+			out["cave_worst"] = maxf(float(out["cave_worst"]), bend)
+			if bend > 20.0:
+				out["cave_bend"] = int(out["cave_bend"]) + 1
+			if bend > 45.0:
+				out["cave_sharp"] = int(out["cave_sharp"]) + 1
+		else:
+			out["ridge_worst"] = maxf(float(out["ridge_worst"]), bend)
+			if bend > 20.0:
+				out["ridge_bend"] = int(out["ridge_bend"]) + 1
+			if bend > 45.0:
+				out["ridge_sharp"] = int(out["ridge_sharp"]) + 1
+	return out
+
+
+# =============================================================================
+#  СТЕНД КАМНЯ  (`--rockbench`)
+# =============================================================================
+#
+#  Ставит настоящий массив и меряет его облик — и только. Без растений, без
+#  остальной самопроверки: та идёт четыре минуты, а облик камня приходится
+#  крутить десятками прогонов подряд, меняя по одному числу.
+#
+#  Числа берутся С КЛЮЧА, чтобы не править файл ради каждой пробы:
+#    --facet=  сила шума огранки (доли камня)
+#    --bed=    тяга к плоскостям ПЛАСТОВ
+#    --side=   тяга к плоскостям ПОПЕРЕЧНЫХ семейств
+#    --deep=   глубина шва между глыбами
+#    --wide=   полуширина шва, м
+#  В игре все они те, что записаны в `SpaceGrid`; ключ действует только здесь.
+# НА СКОЛЬКО ОТДЕЛЬНЫХ ТЕЛ РАСПАЛСЯ МАССИВ.
+#
+# Это и есть та самая мерка, ради которой всё затевалось: «чтобы в массивах
+# читались целые крупные камни». Все прочие числа — про качество поверхности, а
+# это про то, разделилась ли порода вообще.
+#
+# Считаем по-честному: ходим по ячейкам породы через шестерых соседей и смотрим,
+# сколько вышло не связанных между собой кусков. Прорезала трещина насквозь —
+# кусков стало больше; осталась щелью — кусок один.
+#
+# Печатаем и РАЗМЕРЫ: три десятка одинаковых камешков — это не то, о чём
+# просили. Просили крупные и очень крупные, то есть размах.
+func _bodies_report(at: Vector3, reach: float) -> void:
+	var mine: Dictionary = {}
+	for c in grid.seeds_near(at, reach):
+		var j := int(c)
+		if grid.stone_of(j) > 0.02 and grid.fill_of(j) > 0.5:
+			mine[j] = true
+	var seen: Dictionary = {}
+	var sizes: Array = []
+	for start in mine:
+		if seen.has(start):
+			continue
+		var queue: Array = [start]
+		seen[start] = true
+		var size := 0
+		while not queue.is_empty():
+			var j: int = queue.pop_back()
+			size += 1
+			for s in grid.neighbors_of(j):
+				var n := int(s)
+				if mine.has(n) and not seen.has(n):
+					seen[n] = true
+					queue.append(n)
+		sizes.append(size)
+	sizes.sort()
+	sizes.reverse()
+	var big: Array = []
+	for i in range(mini(5, sizes.size())):
+		big.append(sizes[i])
+	print("Тел в породе: ", sizes.size(), ", ячеек в них по убыванию ", big,
+		" — одно тело значит, что массив не раскололся вовсе")
+
+
+func _rock_bench(args: PackedStringArray) -> void:
+	grid.facet_amp = _arg_num(args, "--facet", grid.facet_amp)
+	grid.bed_pull = _arg_num(args, "--bed", grid.bed_pull)
+	grid.side_pull = _arg_num(args, "--side", grid.side_pull)
+	grid.crack_deep = _arg_num(args, "--deep", grid.crack_deep)
+	grid.crack_floor = _arg_num(args, "--floor", grid.crack_floor)
+	grid.crack_wall = _arg_num(args, "--wall", grid.crack_wall)
+	grid.joint_span = _arg_num(args, "--span", grid.joint_span)
+	# Семейства заведены при постройке мира, до того как стенд прочёл ключи, —
+	# значит, при смене шага их надо завести заново, иначе ключ ничего не сделает.
+	grid._build_joints(WORLD_SEED)
+	grid.crack_thru = _arg_num(args, "--thru", grid.crack_thru)
+	grid.seam_deep = _arg_num(args, "--seam", grid.seam_deep)
+	grid.stroke_reach = _arg_num(args, "--skirt", grid.stroke_reach)
+	stroke_gain = _arg_num(args, "--gain", stroke_gain)
+	grid.use_blocks = not "--noblock" in args
+	grid.block_round = _arg_num(args, "--round", grid.block_round)
+	grid.block_faces = int(_arg_num(args, "--faces", float(grid.block_faces)))
+	grid.block_tall = _arg_num(args, "--tall", grid.block_tall)
+	print("Стенд камня: огранка ", grid.facet_amp, ", тяга пластов ",
+		grid.bed_pull, ", тяга поперечных ", grid.side_pull, ", шов трещин ",
+		grid.crack_deep, ", дно ", grid.crack_floor, " м, стенка ",
+		grid.crack_wall, " м, шов между глыбами ",
+		grid.seam_deep, ", вылет мазка ", grid.stroke_reach)
+	_stroke_spread_report()
+	# МАССИВ БЫВАЕТ КРУПНЕЕ ПРОБНОГО. У пробного 6.5 м, а глыбы 3–3.6 м: по оси
+	# их умещается ДВЕ, и всему, что работает на стыках глыб, негде себя
+	# показать. Ключ `--big` кладёт массив вдвое шире — такой игрок и построит,
+	# если захочет скалу, а не валун.
+	var reach: float = 4.5
+	if "--big" in args:
+		reach = 7.5
+		_seed_massif(_test_spot(), 3, 5)
+	else:
+		_seed_structures()
+	_flush_chunks()
+	_stone_surface_check(_cliff_focus, reach)
+	_rock_cavity_report(reach)
+
+
+# Массив из колонн: `wide`×`wide` подошв, каждая на `levels` уровней вверх.
+# Лепим ровно так, как это делал бы игрок, — той же кистью и теми же мазками.
+# =============================================================================
+#  СТАРТОВЫЕ СЦЕНЫ
+# =============================================================================
+#
+#  Мир строится всегда одинаково — голое поле, — и до сих пор игрок начинал с
+#  чистого листа. Сцена это то, что стоит на поле К НАЧАЛУ ИГРЫ: не другой мир,
+#  а другая обстановка в том же мире.
+#
+#  Заводится сцена одной строкой в `SCENES` и одной веткой в `_seed_scene`.
+#  Порядок в списке — это и порядок в игре: первая идёт по умолчанию.
+#
+#  СТЕНДЫ СЦЕНУ НЕ СТАВЯТ. Все они (`--selftest`, `--rockbench` и прочие) идут
+#  своими ветками и получают голое поле, как и раньше: иначе всякое число,
+#  замеренное за полгода, пришлось бы перезамерять из-за скал, которых там
+#  никогда не было.
+const SCENES := [
+	{"id": "rocks", "name": "Поле со скалами"},
+	{"id": "bare", "name": "Чистое поле"},
+]
+
+var scene_id: String = String(SCENES[0]["id"])
+
+
+# Что стоит на поле к началу игры. Зовётся ТОЛЬКО из игровой ветки запуска.
+func _seed_scene() -> void:
+	if scene_id == "bare":
+		print("Сцена: чистое поле")
+		return
+	var started := Time.get_ticks_msec()
+	if scene_id == "rocks":
+		_scene_rocks()
+	_flush_chunks()
+	# Считаем ячейки с породой: ноль значил бы, что мазки легли мимо земли, а по
+	# кадру это не отличить от «скалы просто мелкие».
+	var stony := 0
+	# ВЫСОТА — то, ради чего скалы и подняты: лозе нужна отвесная стена. Меряем
+	# от земли под скалой, а не от нуля мира: остров и сам неровный, и высота
+	# «над уровнем моря» ничего не сказала бы про то, есть ли куда лезть.
+	var top: float = -1000.0
+	var foot: float = 1000.0
+	var steep := 0
+	for c in solid:
+		if grid.stone_of(c) <= 0.5:
+			continue
+		stony += 1
+		var y: float = grid.seeds[c].y
+		top = maxf(top, y)
+		foot = minf(foot, y)
+		if grid.steepness_of(c) > 0.75:
+			steep += 1
+	if stony == 0:
+		print("Сцена: ", scene_id, " — породы не встало вовсе")
+		return
+	print("Сцена: ", scene_id, ", ячеек с породой — ", stony, ", высота скал ",
+		snappedf(top - foot, 0.1), " м, отвесных мест ",
+		snappedf(100.0 * float(steep) / float(stony), 0.1),
+		"% — по ним и лазает лоза; поставлена за ",
+		Time.get_ticks_msec() - started, " мс")
+
+
+# ПОЛЕ СО СКАЛАМИ. Несколько обнажений разной величины, разнесённых по острову.
+#
+# ГЛЫБУ ДЕЛАЕТ ОДИН МАЗОК, А НЕ СОТНЯ. С тех пор как камень кладётся
+# многогранником, одного мазка широкой кистью хватает на гранёный валун метров в
+# шесть. Стенд (`_seed_massif`) лепит колоннами по три повтора на уровень —
+# ему нужна заведомо крупная глыба со швами, — но для обстановки это лишние
+# сотни мазков и лишние секунды на запуске.
+#
+# Разнос по острову НЕ СЛУЧАЙНЫЙ ПОЛНОСТЬЮ: скалы ставятся по кругу с разбросом,
+# иначе они сходятся в кучу или лезут за край. Середина острова оставлена
+# свободной — игроку надо где-то начать.
+const SCENE_ROCKS: int = 4        # сколько обнажений
+const SCENE_NEAR: float = 4.5     # ближе этого к середине не ставим, м
+const SCENE_FAR: float = 9.5      # и дальше этого тоже, м
+# Насколько высоки обнажения, в уровнях подъёма (уровень — 0.6 ячейки, то есть
+# 40 см). Разброс нужен: скалы одной высоты читаются забором.
+const SCENE_LOW: int = 3
+const SCENE_HIGH: int = 6
+# На сколько ячеек поднимается каждый уровень.
+const SCENE_RISE: float = 0.9
+# Во сколько раз мазок сцены сильнее обычного: ей нужен готовый камень сразу.
+const SCENE_FORCE: float = 6.0
+
+func _scene_rocks() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = WORLD_SEED + 31337
+	var was_brush := brush
+	brush = 3
+	var turn: float = rng.randf_range(0.0, TAU)
+	for i in range(SCENE_ROCKS):
+		# По кругу с разбросом: доля оборота своя у каждого, плюс качание.
+		var ang: float = turn + TAU * float(i) / float(SCENE_ROCKS) \
+			+ rng.randf_range(-0.5, 0.5)
+		var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
+		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
+		if at == Vector3.ZERO:
+			continue
+		# ОБНАЖЕНИЯ РАЗНОЙ ВЕЛИЧИНЫ. Одинаковые читаются расставленными, а не
+		# выросшими: на снимках обнажений рядом с крупным всегда есть мелкое.
+		var dabs: int = rng.randi_range(1, 3)
+		for k in range(dabs):
+			var off := Vector3(rng.randf_range(-1.6, 1.6), 0.0,
+				rng.randf_range(-1.6, 1.6))
+			var head: Vector3 = at + off
+			# СКАЛЫ ВЫСОКИЕ — решение пользователя: «сделай скалы повыше, чтобы
+			# было проще тестировать на них растения». Лозе нужна отвесная
+			# стена: на плоской глыбе ей нечего искать, и половина её правил
+			# (перелаз через кромку, свисающая плеть, поиск опоры) на кадре
+			# просто не показывается.
+			#
+			# Разброс оставлен: часть глыб по-прежнему пониже. Скалы одной
+			# высоты читаются забором, а не обнажением, — и на них не видно,
+			# как лоза выбирает, куда лезть.
+			var up: int = rng.randi_range(SCENE_LOW, SCENE_HIGH)
+			# ШАГ КРУПНЫЙ, А МАЗКОВ МАЛО. Высоту можно набрать двумя путями:
+			# частыми мазками мелким шагом или редкими крупным. Первый путь
+			# стоил 3.7 с на запуске — при радиусе кисти в 3.27 м мазки лежали
+			# один на другом почти целиком, и девять десятых работы уходило
+			# впустую. Шаг в две ячейки они всё ещё перекрывают с запасом.
+			for level in range(up + 1):
+				var cell: int = grid.cell_at(head
+					+ Vector3(0, CELL_SPACING * SCENE_RISE, 0))
+				if cell < 0 or not grid.in_play(cell):
+					break
+				head = grid.seeds[cell]
+				# КЛАДЁМ ЗА РАЗ БОЛЬШЕ, А НЕ ЧАЩЕ. Сцена — не рука: ей не нужно
+				# набирать форму постепенно, ей нужен готовый камень к первому
+				# кадру. Один мазок обычной силы не лепит вовсе (проверено:
+				# 123 ячейки и ни одного отвесного места), а повторы стоят
+				# времени запуска. Предел правки держит мягкое насыщение, так
+				# что тройная сила ничего не ломает.
+				var mass: float = _stroke_amount() * SCENE_FORCE
+				_stroke(head, _brush_radius(), mass, "cliff",
+					_stone_push(mass, "cliff"))
+	brush = was_brush
+
+
+# Точка на видимой земле над заданным местом. Ноль значит «там земли нет».
+func _ground_at(x: float, z: float) -> Vector3:
+	var best := INF
+	var at := Vector3.ZERO
+	for i in range(grid.seeds.size()):
+		if not grid.in_play(i) or absf(grid.fill_of(i) - 0.5) > 0.08:
+			continue
+		var p: Vector3 = grid.seeds[i]
+		if p.y < 0.0:
+			continue
+		var d: float = Vector2(p.x - x, p.z - z).length_squared()
+		if d < best:
+			best = d
+			at = p
+	return at
+
+
+func _seed_massif(at: Vector3, wide: int, levels: int) -> void:
+	var was_brush := brush
+	brush = 3
+	# ПОДОШВЫ РАЗНОСИМ ПО-НАСТОЯЩЕМУ. При тесном шаге все мазки сливаются в одну
+	# глыбу — и правильно делают, — но тогда стенду нечего показать по швам
+	# между глыбами. Здесь шаг заведомо больше расстояния слияния.
+	var pitch: float = CELL_SPACING * 3.6
+	for ix in range(wide):
+		for iz in range(wide):
+			var foot: Vector3 = at + Vector3(
+				(float(ix) - float(wide - 1) * 0.5) * pitch, 0.0,
+				(float(iz) - float(wide - 1) * 0.5) * pitch)
+			var head: Vector3 = foot
+			for level in range(levels):
+				var up: int = grid.cell_at(head + Vector3(0, CELL_SPACING * 0.6, 0))
+				if up < 0 or not grid.in_play(up):
+					break
+				head = grid.seeds[up]
+				for _again in range(3):
+					_stroke(head, _brush_radius(), _stroke_amount(), "cliff",
+						_stone_push(_stroke_amount(), "cliff"))
+	_cliff_focus = at + Vector3(0, CELL_SPACING * 1.8, 0)
+	brush = was_brush
+
+
+# ДОКУДА НА САМОМ ДЕЛЕ ДОТЯГИВАЕТСЯ ОДИН МАЗОК.
+#
+# Жалоба с кадра — «мазок выходит за свои границы» — до сих пор ничем не
+# мерилась. Меряем прямо: кладём один мазок на нетронутое место и смотрим, на
+# каком расстоянии от середины прибавка поля падает до сотой доли от своей
+# наибольшей. Это и есть настоящий край мазка, в отличие от радиуса кисти,
+# который лишь говорит, докуда кисть смотрит.
+#
+# ВАЖНО, ЧТО МЕРИМ ПОСЛЕ РАСТУШЁВКИ. Мазок не только кладёт массу, но и
+# растушёвывает её в кольцо соседей, а кольцо лежит уже ЗА краем кисти. Мерка,
+# считающая один профиль, этого не увидит.
+func _stroke_spread_report() -> void:
+	var at: Vector3 = _test_spot()
+	var was_brush := brush
+	brush = 3
+	var r: float = _brush_radius()
+	var near: Array = grid.seeds_near(at, r * 2.2)
+	var before: Dictionary = {}
+	for c in near:
+		before[c] = grid.fill_of(c)
+	_dab(at, _stroke_amount(), "ground")
+	var top := 0.0
+	for c in near:
+		top = maxf(top, absf(grid.fill_of(c) - float(before[c])))
+	var far := 0.0
+	for c in near:
+		if absf(grid.fill_of(c) - float(before[c])) > top * 0.01:
+			far = maxf(far, grid.seeds[c].distance_to(at))
+	_undo()
+	_flush_chunks()
+	print("Вылет мазка: кисть смотрит на ", snappedf(r, 0.01),
+		" м, а масса доходит до ", snappedf(far, 0.01), " м — это ",
+		snappedf(far / maxf(r, 0.01), 0.01),
+		" радиуса; наибольшая прибавка поля ", snappedf(top, 0.01))
+
+	# И ОТДЕЛЬНО — ДОКУДА ДОХОДИТ КРАСКА КАМНЯ. Она кладётся тем же мазком, но
+	# живёт своей жизнью: цвет берёт сырую долю породы, а складки, трещины и швы
+	# — разглаженную по соседям, и та расходится ЗАМЕТНО ШИРЕ. Если камнем
+	# мажется место, куда не наводили, спрашивать надо здесь, а не с профиля.
+	var stone_far := 0.0
+	var soft_far := 0.0
+	_dab(at, _stroke_amount(), "cliff")
+	for c in near:
+		var d: float = grid.seeds[c].distance_to(at)
+		if grid.stone_of(c) > 0.02:
+			stone_far = maxf(stone_far, d)
+		if grid.stone_soft[c] > 0.02:
+			soft_far = maxf(soft_far, d)
+	_undo()
+	_flush_chunks()
+	brush = was_brush
+	print("Вылет краски камня: сырая доходит до ", snappedf(stone_far, 0.01),
+		" м (", snappedf(stone_far / maxf(r, 0.01), 0.01),
+		" радиуса), разглаженная — до ", snappedf(soft_far, 0.01), " м (",
+		snappedf(soft_far / maxf(r, 0.01), 0.01),
+		" радиуса) — по разглаженной работают складки, трещины и швы")
+
+
+func _arg_num(args: PackedStringArray, name: String, fallback: float) -> float:
+	for a in args:
+		if a.begins_with(name + "="):
+			var tail: String = a.substr(name.length() + 1)
+			if tail.is_valid_float():
+				return tail.to_float()
+	return fallback
+
+
+# То же для слова, а не числа: `--scene=rocks`. Незнакомое имя не молчит —
+# иначе опечатка в ключе тихо давала бы сцену по умолчанию.
+func _arg_word(args: PackedStringArray, name: String, fallback: String) -> String:
+	for a in args:
+		if a.begins_with(name + "="):
+			var tail: String = a.substr(name.length() + 1)
+			for s in SCENES:
+				if String(s["id"]) == tail:
+					return tail
+			print("Сцены «", tail, "» нет; беру ", fallback)
+			return fallback
+	return fallback
+
+
+# НАСКОЛЬКО ГЛУБОКИ ШВЫ — глазами той величины, которой их видит ПОКРАСКА.
+#
+# Форма и краска судят швы порознь, и одного без другого мало. Шейдер темнит
+# стык и пускает в него зелень по «впадине», а пороги у него 0.12…0.36. Пока
+# впадина на камне ниже, швов на кадре не будет, сколько бы их ни было в форме:
+# они останутся серой ложбиной на сером теле.
+func _rock_cavity_report(reach: float) -> void:
+	var vals := PackedFloat32Array()
+	for c in grid.seeds_near(_cliff_focus, reach):
+		if grid.stone_of(c) > 0.5 and grid.surface_gap(grid.seeds[c]) >= 0.0:
+			vals.append(grid.cavity_of(c))
+	if vals.is_empty():
+		print("Впадина на камне: мерить нечего")
+		return
+	vals.sort()
+	print("Впадина на камне: мест ", vals.size(), ", середина ",
+		snappedf(vals[vals.size() / 2], 0.001), ", девять из десяти до ",
+		snappedf(vals[int(vals.size() * 0.9)], 0.001), ", наибольшая ",
+		snappedf(vals[vals.size() - 1], 0.001),
+		" — покраска ждёт 0.12…0.36, ниже швов на кадре не увидеть")
+	_crack_line_report(reach)
+	_crack_depth_report(reach)
+
+
+# ЧЕРТА ТРЕЩИНЫ ГЛАЗАМИ ЧИСЕЛ. Сама черта рисуется краской, и на кадре её видно,
+# а вот в числах — только здесь. Спрашиваем две вещи.
+#
+# ПЕРВОЕ, ДОХОДИТ ЛИ ЧЕРТА ДО КАМНЯ ВООБЩЕ. Ноль мест под чертой значит, что она
+# не появится ни при какой настройке краски, и крутить `crack_ink` бесполезно.
+#
+# ВТОРОЕ, НЕ СЛИШКОМ ЛИ ЕЁ МНОГО. Если под чертой окажется половина камня, это
+# уже не трещины, а сетка поверх глыбы. По снимкам обнажений на трещины
+# приходится малая доля площади — считаные проценты.
+# НАСКОЛЬКО ГЛУБОКА ТРЕЩИНА — В САНТИМЕТРАХ, а не в долях поля.
+#
+# Все прежние мерки говорили о поле: глубина вычета, впадина, доля резких рёбер.
+# По ним выходило, что трещины глубоки, — а на кадре камень оставался гладким.
+# Сила поля и глубина ямы это РАЗНЫЕ вещи: вычет из поля превращается в
+# сантиметры через наклон поля, а он у камня крутой, и та же сила даёт вмятину
+# втрое меньше, чем на земле.
+#
+# Меряем честно и прямо: у нас есть ДВЕ поверхности — настоящая и спокойная (та
+# же порода без трещин, по ней ходят растения). Спрашиваем обе в одной точке и
+# смотрим, насколько разошлись ответы. Это и есть глубина ямы в метрах.
+func _crack_depth_report(reach: float) -> void:
+	var deep := PackedFloat32Array()
+	for c in grid.seeds_near(_cliff_focus, reach):
+		var j := int(c)
+		if grid.stone_of(j) <= 0.5 or grid.surface_gap(grid.seeds[j]) < 0.0:
+			continue
+		var here: Dictionary = grid.surface_near(grid.seeds[j])
+		var calm: Dictionary = grid.calm_surface_near(grid.seeds[j])
+		if here.is_empty() or calm.is_empty():
+			continue
+		deep.append(Vector3(here["pos"]).distance_to(Vector3(calm["pos"])))
+	if deep.is_empty():
+		print("Глубина трещин: мерить нечего")
+		return
+	deep.sort()
+	var sum := 0.0
+	for d in deep:
+		sum += d
+	print("Глубина трещин: мест ", deep.size(), ", в среднем ",
+		snappedf(sum / float(deep.size()) * 100.0, 0.1), " см, у девяти из десяти до ",
+		snappedf(deep[int(deep.size() * 0.9)] * 100.0, 0.1), " см, наибольшая ",
+		snappedf(deep[deep.size() - 1] * 100.0, 0.1),
+		" см — при глыбе в 6.5 м яма мельче десяти сантиметров на кадре не видна")
+
+
+# ЧТО ИЗ КАМНЯ ПОТЕМНЕЕТ. Величина в вершинах теперь говорит, насколько глубоко в
+# ЯДРЕ трещины сидит точка: ноль на теле, единица на самом дне. По ней шейдер и
+# кладёт тень, а порог у него `notch_core`.
+#
+# Спрашиваем два числа. Сколько камня попадёт под тень — на снимках обнажений на
+# трещины приходятся считаные проценты, и если тут выйдет треть, это уже не
+# трещины, а сетка. И сколько попадает в само углубление — эта доля много больше,
+# и такова цена решётки: раскрыв держит она, уже метра его не сделать.
+func _crack_line_report(reach: float) -> void:
+	var seen := 0
+	var inked := 0
+	var wide := 0
+	for c in grid.seeds_near(_cliff_focus, reach):
+		if grid.stone_of(c) <= 0.5 or grid.surface_gap(grid.seeds[c]) < 0.0:
+			continue
+		seen += 1
+		var d: float = grid.crack_line[int(c)]
+		if d > 0.55:
+			inked += 1                     # столько потемнеет: ядро трещины
+		if d > 0.08:
+			wide += 1                      # столько лежит в углублении
+	if seen == 0:
+		print("Ядро трещин: мерить нечего")
+		return
+	print("Ядро трещин: мест на камне ", seen, ", потемнеет ",
+		snappedf(100.0 * float(inked) / float(seen), 0.1), "%, в углублении ",
+		snappedf(100.0 * float(wide) / float(seen), 0.1),
+		"% — на снимках на трещины приходятся считаные проценты")
 
 
 # МЕСТО ДЛЯ ПРОВЕРОК — НА ЗЕМЛЕ, а не в воздухе над островом.
@@ -2382,7 +2970,9 @@ func _stone_report() -> void:
 		snappedf(stone_max, 0.01), ", подъём поля до ", snappedf(lift_max, 0.01),
 		", огранка ", snappedf(facet_lo, 0.01), "…", snappedf(facet_hi, 0.01),
 		", крутизна до ", snappedf(steep_max, 0.01))
-	_stone_surface_check(at)
+	# Про ПОВЕРХНОСТЬ камня здесь не спрашиваем: три мазка на ровном месте дают
+	# низкий блин, и судить по нему облик глыбы нельзя. Настоящий массив ставит
+	# `_seed_structures`, и проверка поверхности идёт после него.
 
 	for _i in range(3):
 		_undo()
@@ -2393,8 +2983,18 @@ func _stone_report() -> void:
 		left_fill = maxf(left_fill, absf(grid.fill_of(c) - float(before_fill[c])))
 		left_stone = maxf(left_stone,
 			absf(float(grid.stone.get(c, 0.0)) - float(before_stone[c])))
+	# ГЛЫБЫ ТОЖЕ ОБЯЗАНЫ ОТМЕНЯТЬСЯ. У каждой копится масса, простая сумма
+	# положенного; отмена вычитает ту же самую и гасит глыбу в ноль. Собьётся
+	# это — и на отменённом месте останется шов, режущий пустое место.
+	var alive := 0
+	var mass := 0.0
+	for l in grid.lumps:
+		mass += absf(float(l["mass"]))
+		if float(l["mass"]) > 0.0:
+			alive += 1
 	print("Отмена камня: осталось поля ", snappedf(left_fill, 0.001),
-		", каменистости ", snappedf(left_stone, 0.001))
+		", каменистости ", snappedf(left_stone, 0.001), ", живых глыб ", alive,
+		", массы в них ", snappedf(mass, 0.001), " — всё должно быть нулями")
 	brush = was_brush
 
 
@@ -2612,8 +3212,8 @@ func _vine_grown_check() -> void:
 	# кончиком в камень.
 	print("Лиана взрослая: листьев — ", big["leaves"], " на ", big["links"],
 		" звеньев, то есть ", snappedf(float(big["leaves"]) / links, 0.01),
-		" на звено; вошло кончиком в породу ", big["leaf_in"],
-		" — норма ноль")
+		" на звено; ушло в породу глубже половины листа ", big["leaf_in"],
+		" — норма ноль; лёгкие касания камня не считаются и не беда")
 	# ЦВЕТЕНИЕ. Ноль метёлок значил бы, что цветоносы не заводятся вовсе — а
 	# завестись им положено с третьего поколения ветвей, и на взрослой лозе таких
 	# ветвей сотни. Свес меньше длины — это норма: метёлка сперва отходит наружу.
@@ -2627,7 +3227,8 @@ func _vine_grown_check() -> void:
 		big["flowers"], ", самая длинная ", big["spray_len"],
 		" звеньев и свесилась на ",
 		snappedf(float(big["spray_drop"]) * 100.0, 0.1),
-		" см; вошло цветком в породу ", big["flower_in"], " — норма ноль")
+		" см; ушло цветком в породу глубже половины ", big["flower_in"],
+		" — норма ноль; касание камня не в счёт")
 	# ЧЕМ ЛИСТВА ОБХОДИТСЯ. Дощечка листа — восемь треугольников, а листьев у
 	# взрослой лианы больше, чем звеньев: это самая дорогая её часть, и держать
 	# её цену на виду стоит с самого начала.
