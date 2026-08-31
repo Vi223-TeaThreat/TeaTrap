@@ -1,0 +1,51 @@
+{
+	"bark": {
+		"dark": 0.0,
+		"groove": 1.0,
+		"rough": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0
+	},
+	"bloom": {
+		"dark": 0.0,
+		"sharp": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0,
+		"wide": 1.0
+	},
+	"body": {
+		"clump": 1.0,
+		"dark": 0.0,
+		"mottle": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0
+	},
+	"leaf": {
+		"cut": 1.0,
+		"dark": 0.0,
+		"edge": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0
+	},
+	"liabody": {
+		"dark": 0.0,
+		"long": 1.0,
+		"many": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0
+	},
+	"liafuzz": {
+		"dark": 0.0,
+		"long": 1.0,
+		"many": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0
+	},
+	"moss": {
+		"dark": 0.0,
+		"edge": 1.0,
+		"puff": 1.0,
+		"vivid": 0.0,
+		"warm": 0.0
+	}
+}

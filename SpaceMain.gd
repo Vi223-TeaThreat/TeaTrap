@@ -197,6 +197,16 @@ func _ready() -> void:
 	_setup_camera()
 	_setup_frame()
 	_setup_hint()
+	# Зерно этого мака живёт в user://world.cfg — его пишет кнопка «новый
+	# остров». Ключ --seed=N сильнее файла, но файл не переписывает: ключ —
+	# разовая проба, а не переезд.
+	if FileAccess.file_exists(SEED_PATH):
+		var sf := FileAccess.open(SEED_PATH, FileAccess.READ)
+		if sf != null:
+			var kept: int = int(sf.get_line().strip_edges().to_int())
+			sf.close()
+			if kept != 0:
+				world_seed = kept
 	world_seed = int(_arg_num(OS.get_cmdline_user_args(), "--seed", float(world_seed)))
 	_build_world()
 	_setup_toolbar()
@@ -279,6 +289,24 @@ func _ready() -> void:
 # хранилище браузера. Сейв с чужим зерном молча не подкладываем: мир другой,
 # и сад повис бы в воздухе.
 var save_path := "user://garden.save"   # самопроверка подменяет на свой файл
+const SEED_PATH := "user://world.cfg"
+
+
+# НОВЫЙ ОСТРОВ: случайное зерно записывается в user://world.cfg, сад стирается,
+# сцена перечитывается. Зерно остаётся и на следующие запуски — остров не
+# прыгает от каждого открытия игры. Вернуть исходный остров: удалить файл или
+# запуститься с --seed=20260811.
+func _new_island() -> void:
+	_game_on = false
+	var sf := FileAccess.open(SEED_PATH, FileAccess.WRITE)
+	if sf != null:
+		var rng := RandomNumberGenerator.new()
+		rng.randomize()
+		sf.store_line(str(rng.randi_range(1, 2147483646)))
+		sf.close()
+	if FileAccess.file_exists(save_path):
+		DirAccess.remove_absolute(save_path)
+	get_tree().reload_current_scene()
 const SAVE_EVERY: float = 30.0
 var _game_on: bool = false
 var _save_in: float = SAVE_EVERY
@@ -1267,6 +1295,7 @@ func _fit_menu() -> void:
 		ui_scale = clampi(want, 1, ui_scale - 1)
 		_clear_toolbar()
 		_setup_toolbar()
+		_setup_hint()
 
 
 func _clear_toolbar() -> void:
@@ -1562,6 +1591,21 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 				rb.text = " заново "))
 	row.add_child(rb)
 
+	var nb := _list_button(-1, true)
+	nb.text = " новый остров "
+	nb.tooltip_text = "Случайное зерно: другой остров той же породы. Сад стирается"
+	var armed_n: Array = [0.0]
+	nb.pressed.connect(func():
+		var now: float = float(Time.get_ticks_msec()) / 1000.0
+		if now - armed_n[0] < 3.0:
+			_new_island()
+		else:
+			armed_n[0] = now
+			nb.text = " точно? "
+			get_tree().create_timer(3.0).timeout.connect(func():
+				nb.text = " новый остров "))
+	row.add_child(nb)
+
 	# С ПАЛЬЦА НЕТ НИ ОТМЕНЫ, НИ НАКЛОНА: Ctrl+Z на стекле не нажать, а тангаж
 	# живёт на вертикали ПКМ. Свободных жестов не осталось (см. README,
 	# «Управление с пальца») — поэтому кнопки, и только на сенсорном стекле:
@@ -1722,9 +1766,14 @@ func _update_frame_spot() -> void:
 		frame_node.visible = false
 
 
+var hint_layer: CanvasLayer
+
 func _setup_hint() -> void:
-	var layer := CanvasLayer.new()
-	add_child(layer)
+	if hint_layer != null:
+		hint_layer.queue_free()
+	hint_layer = CanvasLayer.new()
+	add_child(hint_layer)
+	var layer := hint_layer
 	var label := Label.new()
 	# На стекле подсказка ДРУГАЯ, а не та же вдвое крупнее: четыре мышиные
 	# строки там не только занимают пол-экрана, но и врут — ни Shift, ни
@@ -1736,12 +1785,12 @@ func _setup_hint() -> void:
 		label.add_theme_font_size_override("font_size", 11 * ui_scale)
 	else:
 		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
-		# На мыши кегль от плотности экрана: на ретине дефолтные 13 физических
-		# пикселей нечитаемы. От `ui_scale` брать нельзя — в момент постройки
-		# он ещё потолок, его только потом ужимает правило доли окна.
-		label.add_theme_font_size_override("font_size",
-			13 * clampi(int(round(_screen_density())), 1, 3))
-	var hint_px: int = ui_scale if _touch_ui() else clampi(int(round(_screen_density())), 1, 3)
+		# КЕГЛЬ ПОДСКАЗКИ — ТОТ ЖЕ, ЧТО У ПАНЕЛИ. Плотность экрана тут не
+		# угадываем (на внешних мониторах она врёт): подсказка пересобирается
+		# после ужатия меню и берёт готовый `ui_scale` — один размер на весь
+		# интерфейс.
+		label.add_theme_font_size_override("font_size", UI_FONT * ui_scale)
+	var hint_px: int = ui_scale
 	label.position = Vector2(16 * hint_px, 16 * hint_px)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.add_theme_color_override("font_outline_color", Color.BLACK)
@@ -1752,9 +1801,9 @@ func _setup_hint() -> void:
 	fill_label = Label.new()
 	# Под подсказкой: на стекле она в две строки, и место под неё считаем от
 	# того же кегля, иначе на плотном экране надпись уезжала бы на середину.
-	fill_label.position = Vector2(16 * hint_px, 52 * hint_px if _touch_ui() else 112 * hint_px / 2)
+	fill_label.position = Vector2(16 * hint_px, 52 * hint_px if _touch_ui() else 76 * hint_px)
 	fill_label.add_theme_font_size_override("font_size",
-		11 * ui_scale if _touch_ui() else 13 * hint_px)
+		11 * ui_scale if _touch_ui() else UI_FONT * ui_scale)
 	fill_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
 	fill_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	fill_label.add_theme_constant_override("outline_size", 4)
@@ -2862,6 +2911,110 @@ func _scene_rocks() -> void:
 	rng.seed = world_seed + 31337
 	var was_brush := brush
 	brush = 3
+	# НА ПРЕЖНЕМ ЗЕРНЕ — ПРЕЖНЯЯ ПОСТАНОВКА, слово в слово: на ней стоят все
+	# воспроизводимые кадры, и сравнение «до/после» живо, пока эта ветка цела.
+	if world_seed == WORLD_SEED:
+		_scene_rocks_classic(rng)
+		brush = was_brush
+		return
+	# НОВЫЙ ОСТРОВ СТАВИТСЯ РАЗНООБРАЗНО (решение пользователя 2026-08-31:
+	# «4 глыбы и масса земли — не нерушимое правило»). Формы произвольные, но
+	# два правила держатся всегда:
+	#   1. Скала не появляется в воздухе — всякий столб растёт от найденной
+	#      земли вверх, мазок прибавляет к живому полю.
+	#   2. В скалах и земле бывают ямы, арки и гроты — их выедает мазок
+	#      снятия, тот же, что у руки; решётка держит проём шириной кисти.
+	var forms: int = rng.randi_range(2, 5)
+	var turn: float = rng.randf_range(0.0, TAU)
+	for i in range(forms):
+		var ang: float = turn + TAU * float(i) / float(forms) \
+			+ rng.randf_range(-0.5, 0.5)
+		var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
+		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
+		if at == Vector3.ZERO:
+			continue
+		var kind: float = rng.randf()
+		if kind < 0.40:
+			_scene_column(rng, at)
+		elif kind < 0.75:
+			_scene_ridge(rng, at, false)
+		else:
+			_scene_ridge(rng, at, true)
+	# Ямы в земле — отдельно от скал, на свободных местах.
+	for i in range(rng.randi_range(0, 2)):
+		var ang: float = rng.randf_range(0.0, TAU)
+		var far: float = rng.randf_range(SCENE_NEAR * 0.5, SCENE_FAR * 0.8)
+		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
+		if at != Vector3.ZERO:
+			_carve(at + Vector3(0, CELL_SPACING, 0), rng.randf_range(1.0, 1.8))
+	brush = was_brush
+
+
+# Одиночное обнажение: кучка столбов, как в классической постановке.
+func _scene_column(rng: RandomNumberGenerator, at: Vector3) -> void:
+	var dabs: int = rng.randi_range(1, 3)
+	for k in range(dabs):
+		var off := Vector3(rng.randf_range(-1.6, 1.6), 0.0,
+			rng.randf_range(-1.6, 1.6))
+		_scene_tower(at + off, rng.randi_range(SCENE_LOW, SCENE_HIGH))
+
+
+# ГРЯДА: цепочка столбов, идущая ломаной с инерцией, — крупный скальный массив
+# произвольной формы. С аркой или гротом: в готовое тело бьёт мазок снятия —
+# насквозь понизу выходит арка, вбок на средней высоте — грот.
+func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void:
+	var links: int = rng.randi_range(3, 6)
+	var dir: float = rng.randf_range(0.0, TAU)
+	var head: Vector3 = at
+	var spine: Array = []
+	for k in range(links):
+		var ground: Vector3 = _ground_at(head.x, head.z)
+		if ground == Vector3.ZERO:
+			break
+		spine.append(ground)
+		_scene_tower(ground, rng.randi_range(SCENE_LOW, SCENE_HIGH))
+		dir += rng.randf_range(-0.7, 0.7)
+		head = ground + Vector3(cos(dir), 0.0, sin(dir)) * rng.randf_range(1.8, 2.6)
+	if not hollow or spine.size() < 2:
+		return
+	var mid: Vector3 = spine[spine.size() / 2]
+	if rng.randf() < 0.5:
+		# АРКА: проём выедается насквозь у подножия, двумя ударами в одно
+		# место, — камень над ним остаётся висеть сводом. Это не «скала в
+		# воздухе»: свод держится телом гряды по обе стороны.
+		var spot: Vector3 = mid + Vector3(0, CELL_SPACING * 1.2, 0)
+		_carve(spot, 2.2)
+		_carve(spot, 2.2)
+	else:
+		# ГРОТ: ниша в боку, не насквозь — один удар послабее, смещённый от
+		# оси гряды.
+		var side := Vector3(cos(dir + PI * 0.5), 0.0, sin(dir + PI * 0.5))
+		_carve(mid + side * 1.4 + Vector3(0, CELL_SPACING * 1.6, 0), 1.5)
+
+
+# Столб камня от земли вверх — только от найденной земли: скала не появляется
+# в воздухе по построению.
+func _scene_tower(at: Vector3, up: int) -> void:
+	var head: Vector3 = at
+	for level in range(up + 1):
+		var cell: int = grid.cell_at(head
+			+ Vector3(0, CELL_SPACING * SCENE_RISE, 0))
+		if cell < 0 or not grid.in_play(cell):
+			break
+		head = grid.seeds[cell]
+		var mass: float = _stroke_amount() * SCENE_FORCE
+		_stroke(head, _brush_radius(), mass, "cliff",
+			_stone_push(mass, "cliff"))
+
+
+# Мазок снятия — тот же, каким копает рука. Снятие ничего не красит.
+func _carve(at: Vector3, force: float) -> void:
+	_stroke(at, _brush_radius(), -_stroke_amount() * SCENE_FORCE * force, "", 0.0)
+
+
+# Классическая постановка: четыре обнажения по кругу. Не трогать — на ней
+# стоят все записанные кадры и строка сцены в отчётах.
+func _scene_rocks_classic(rng: RandomNumberGenerator) -> void:
 	var turn: float = rng.randf_range(0.0, TAU)
 	for i in range(SCENE_ROCKS):
 		# По кругу с разбросом: доля оборота своя у каждого, плюс качание.
@@ -2871,44 +3024,11 @@ func _scene_rocks() -> void:
 		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
 		if at == Vector3.ZERO:
 			continue
-		# ОБНАЖЕНИЯ РАЗНОЙ ВЕЛИЧИНЫ. Одинаковые читаются расставленными, а не
-		# выросшими: на снимках обнажений рядом с крупным всегда есть мелкое.
 		var dabs: int = rng.randi_range(1, 3)
 		for k in range(dabs):
 			var off := Vector3(rng.randf_range(-1.6, 1.6), 0.0,
 				rng.randf_range(-1.6, 1.6))
-			var head: Vector3 = at + off
-			# СКАЛЫ ВЫСОКИЕ — решение пользователя: «сделай скалы повыше, чтобы
-			# было проще тестировать на них растения». Лозе нужна отвесная
-			# стена: на плоской глыбе ей нечего искать, и половина её правил
-			# (перелаз через кромку, свисающая плеть, поиск опоры) на кадре
-			# просто не показывается.
-			#
-			# Разброс оставлен: часть глыб по-прежнему пониже. Скалы одной
-			# высоты читаются забором, а не обнажением, — и на них не видно,
-			# как лоза выбирает, куда лезть.
-			var up: int = rng.randi_range(SCENE_LOW, SCENE_HIGH)
-			# ШАГ КРУПНЫЙ, А МАЗКОВ МАЛО. Высоту можно набрать двумя путями:
-			# частыми мазками мелким шагом или редкими крупным. Первый путь
-			# стоил 3.7 с на запуске — при радиусе кисти в 3.27 м мазки лежали
-			# один на другом почти целиком, и девять десятых работы уходило
-			# впустую. Шаг в две ячейки они всё ещё перекрывают с запасом.
-			for level in range(up + 1):
-				var cell: int = grid.cell_at(head
-					+ Vector3(0, CELL_SPACING * SCENE_RISE, 0))
-				if cell < 0 or not grid.in_play(cell):
-					break
-				head = grid.seeds[cell]
-				# КЛАДЁМ ЗА РАЗ БОЛЬШЕ, А НЕ ЧАЩЕ. Сцена — не рука: ей не нужно
-				# набирать форму постепенно, ей нужен готовый камень к первому
-				# кадру. Один мазок обычной силы не лепит вовсе (проверено:
-				# 123 ячейки и ни одного отвесного места), а повторы стоят
-				# времени запуска. Предел правки держит мягкое насыщение, так
-				# что тройная сила ничего не ломает.
-				var mass: float = _stroke_amount() * SCENE_FORCE
-				_stroke(head, _brush_radius(), mass, "cliff",
-					_stone_push(mass, "cliff"))
-	brush = was_brush
+			_scene_tower(at + off, rng.randi_range(SCENE_LOW, SCENE_HIGH))
 
 
 # Точка на видимой земле над заданным местом. Ноль значит «там земли нет».

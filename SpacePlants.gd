@@ -914,14 +914,19 @@ func _paint_lia_fuzz_cell(img: Image, ox: int, oy: int, s: int,
 			var t: float = float(j) / float(steps - 1)
 			# Волосок клонится тем сильнее, чем ближе к кончику: прямая щетина
 			# читается щёткой, а не ворсом.
+			#
+			# КРАЁВ КЛЕТКИ ВОЛОСОК НЕ КАСАЕТСЯ — ни боков, ни верха. По краю
+			# дощечки картинка тянется от соседнего столбца, и волосок, легший в
+			# крайнюю точку, рисует по силуэту черту чужого цвета (та же грабля,
+			# что белая кайма у листа). Низ — можно: им фигурка растёт из тела.
 			var px: int = int(round(x0 + lean * reach * t * t))
 			var py: int = TILE - 1 - int(round(reach * t))
-			if px < 0 or px >= TILE or py < 0 or py >= TILE:
+			if px < 1 or px >= TILE - 1 or py < 1 or py >= TILE:
 				continue
 			var c: Color = root.lerp(tip, t)
 			for w in range(wide):
 				var qx: int = px + w
-				if qx < 0 or qx >= TILE:
+				if qx < 1 or qx >= TILE - 1:
 					continue
 				# Кончик тоньше и прозрачнее — от этого ворс на кадре мягкий, а
 				# не нарисованный по линейке.
