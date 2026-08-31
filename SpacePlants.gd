@@ -75,6 +75,42 @@ const SIT_JITTER: float = 0.22
 var main: Node3D
 var patches: Dictionary = {}      # номер -> {pos, nrm, id, m, step, cell, salt}
 var by_cell: Dictionary = {}      # ячейка -> {номер: true}
+# ГРУБАЯ СЕТКА РАСТЕНИЙ — указатель для всего, что работает кистью по месту.
+# `by_cell` бьёт сад по ячейкам решётки (0.67 м), и чтобы собрать растения в
+# круге кисти, пришлось бы обойти тысячи ячеек, почти все пустые. Здесь клетка
+# крупная, и в ней лежат СРАЗУ растения — обход идёт по сотне клеток вместо
+# тысяч, а перебирать весь сад не надо вовсе.
+const COARSE: float = 1.8         # сторона клетки, м
+var _coarse: Dictionary = {}      # клетка Vector3i -> {номер: true}
+# Сколько растений кисть просмотрела за последний мазок — только для замеров.
+var _burst_seen: int = 0
+# Где прошёл последний мазок кисти — по нему пересборка выбирает, что срочнее.
+var _burst_spot: Vector3 = Vector3.ZERO
+
+func _coarse_key(pos: Vector3) -> Vector3i:
+	return Vector3i(floori(pos.x / COARSE), floori(pos.y / COARSE),
+		floori(pos.z / COARSE))
+
+
+# Растение встало на место: записать в клетку и запомнить, в какую именно —
+# при переезде и гибели снимать его надо из ТОЙ ЖЕ клетки, а место к тому
+# времени уже другое.
+func _coarse_add(pid: int, p: Dictionary) -> void:
+	var k: Vector3i = _coarse_key(Vector3(p["pos"]))
+	p["ck"] = k
+	if not _coarse.has(k):
+		_coarse[k] = {}
+	_coarse[k][pid] = true
+
+
+func _coarse_drop(pid: int, p: Dictionary) -> void:
+	if not p.has("ck"):
+		return
+	var k: Vector3i = p["ck"]
+	if _coarse.has(k):
+		_coarse[k].erase(pid)
+		if _coarse[k].is_empty():
+			_coarse.erase(k)
 var cell_nodes: Dictionary = {}   # ячейка -> меш со всеми её растениями
 var time_scale: float = 1.0
 # Запас перемотки, в игровых секундах: кнопка «+30 с» прибавляет сюда, кадр
@@ -1844,6 +1880,7 @@ func remove_at(pid: int) -> void:
 	_unlink(pid)
 	var cell: int = int(patches[pid]["cell"])
 	_touch_kids(pid, true)
+	_coarse_drop(pid, patches[pid])
 	patches.erase(pid)
 	if by_cell.has(cell):
 		by_cell[cell].erase(pid)
@@ -1859,6 +1896,7 @@ func remove_at(pid: int) -> void:
 func clear_all() -> void:
 	patches.clear()
 	by_cell.clear()
+	_coarse.clear()
 	_dirty.clear()
 	for cell in cell_nodes:
 		cell_nodes[cell].queue_free()
@@ -2062,6 +2100,7 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 	if not by_cell.has(cell):
 		by_cell[cell] = {}
 	by_cell[cell][pid] = true
+	_coarse_add(pid, patches[pid])
 	_link_near(pid)
 	_dirty[cell] = true
 	# НЕ СОШЁЛСЯ ЛИ ЗДЕСЬ СТЫК ДВУХ ВИДОВ. Спрашиваем последним, когда
@@ -3932,23 +3971,61 @@ func gift_to(pid: int, secs: float = PLANT_GIFT) -> void:
 	_burst_left = maxf(_burst_left, BURST_MAX / BURST_PACE + TICK)
 
 
+# ИЩЕМ ПО МЕСТУ, А НЕ ПЕРЕБОРОМ ВСЕГО САДА. Прежде кисть обходила КАЖДОЕ
+# растение на каждый повтор мазка, а при удержании их четырнадцать в секунду:
+# на саде в три тысячи кочек это сорок тысяч проверок в секунду впустую, и чем
+# гуще сад, тем медленнее кисть — ровно там, где она нужнее.
+#
+# Теперь берём ячейки решётки в шаре (`cells_near`) и смотрим только тех, кто
+# в них записан: `by_cell` для этого и заведён. Работа перестаёт зависеть от
+# размера сада вовсе — только от ширины кисти.
+#
+# Кочка живёт в ячейке, а тело её шире ячейки, поэтому шар берём с запасом на
+# радиус самой крупной кочки: иначе у края круга кочка, чья середина чуть
+# снаружи, не получила бы ничего, хотя видимо задета.
+const BURST_SPILL: float = 0.6
+
 func burst_at(at: Vector3, radius: float, gift: float = BURST_GIFT) -> void:
 	if radius <= 0.0 or patches.is_empty():
 		return
 	var touched := false
-	for pid in patches:
-		var p: Dictionary = patches[pid]
-		if not _growth_point(p, PlantsData.ITEMS[String(p["id"])]):
-			continue
-		var d: float = Vector3(p["pos"]).distance_to(at)
-		if d >= radius:
-			continue
-		# Ближе к середине мазка — щедрее. Ровный подарок по всему кругу выдал бы
-		# ступеньку на его краю: два соседних растения в сантиметре друг от друга
-		# росли бы по-разному только потому, что одно попало в круг, другое нет.
-		var share: float = gift * (1.0 - d / radius)
-		p["burst"] = minf(float(p.get("burst", 0.0)) + share, BURST_MAX)
-		touched = true
+	_burst_seen = 0
+	_burst_spot = at
+	var reach: float = radius + BURST_SPILL
+	var span: int = int(ceil(reach / COARSE))
+	var base: Vector3i = _coarse_key(at)
+	for dx in range(-span, span + 1):
+		for dy in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var bucket: Dictionary = _coarse.get(
+					base + Vector3i(dx, dy, dz), {})
+				for pid in bucket:
+					if not patches.has(pid):
+						continue
+					var p: Dictionary = patches[pid]
+					# НАСЫТИВШЕГОСЯ ПРОПУСКАЕМ ПЕРВЫМ ДЕЛОМ. При удержании мазок
+					# повторяется четырнадцать раз в секунду, и уже со второго
+					# всё под кистью стоит у потолка: дальше каждый повтор
+					# перебирал бы сотни растений, чтобы не изменить ничего.
+					if float(p.get("burst", 0.0)) >= BURST_MAX:
+						continue
+					# Расстояние — раньше разбора: оно стоит одного вычитания, а
+					# «точка ли это роста» у лозы спрашивает и развилки, и
+					# цветение. Круг отсеивает больше половины клетки.
+					var d: float = Vector3(p["pos"]).distance_to(at)
+					if d >= radius:
+						continue
+					_burst_seen += 1
+					if not _growth_point(p, PlantsData.ITEMS[String(p["id"])]):
+						continue
+					# Ближе к середине мазка — щедрее. Ровный подарок по всему
+					# кругу выдал бы ступеньку на краю: два соседних растения в
+					# сантиметре друг от друга росли бы по-разному только потому,
+					# что одно попало в круг, а другое нет.
+					var share: float = gift * (1.0 - d / radius)
+					p["burst"] = minf(float(p.get("burst", 0.0)) + share,
+						BURST_MAX)
+					touched = true
 	if not touched:
 		return
 	# Срок, на который заводится своё сердце всплеска: этого хватает, чтобы
@@ -3999,11 +4076,13 @@ func import_garden(d: Dictionary) -> void:
 	patches = d.get("patches", {})
 	_next = int(d.get("next", 1))
 	by_cell.clear()
+	_coarse.clear()
 	for pid in patches:
 		var cell: int = int(patches[pid]["cell"])
 		if not by_cell.has(cell):
 			by_cell[cell] = {}
 		by_cell[cell][pid] = true
+		_coarse_add(pid, patches[pid])
 		_dirty[cell] = true
 
 
@@ -4078,6 +4157,10 @@ func surface_changed(cells: Array = []) -> void:
 			moved.append(pid)
 		p["body"] = again
 		_link_near(pid)          # переехала — соседи у неё могли смениться
+		# Грубая клетка считается от МЕСТА, а не от ячейки: место сдвигается и
+		# тогда, когда ячейка осталась прежней.
+		_coarse_drop(pid, p)
+		_coarse_add(pid, p)
 		var now: int = int(spot["cell"])
 		if now != was:
 			if by_cell.has(was):
@@ -4171,9 +4254,17 @@ func _drain(budget: float) -> void:
 	var t0: int = Time.get_ticks_usec()
 	_worst_cell = 0.0
 	_drawn_cells = 0
-	# Порядок — в каком помечали: словарь его и держит. Кусок, помеченный раньше,
-	# и отстал раньше.
-	for cell in _dirty.keys():
+	# ПОД КИСТЬЮ СОБИРАЕМ ПЕРВЫМ. Обычный порядок — в каком помечали, и он верен:
+	# кусок, помеченный раньше, и отстал раньше. Но пока идёт всплеск от руки,
+	# игрок смотрит ровно в одно место и ждёт ответа именно там; кочка на другом
+	# конце острова подождёт кадр-другой без всякого вреда.
+	var order: Array = _dirty.keys()
+	if _burst_left > 0.0 and order.size() > 1:
+		var spot: Vector3 = _burst_spot
+		order.sort_custom(func(a, b):
+			return main.grid.seeds[a].distance_squared_to(spot) \
+				< main.grid.seeds[b].distance_squared_to(spot))
+	for cell in order:
 		var c0: int = Time.get_ticks_usec()
 		_rebuild_cell(cell)
 		_dirty.erase(cell)

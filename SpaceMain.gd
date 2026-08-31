@@ -200,7 +200,17 @@ func _ready() -> void:
 	# Зерно этого мака живёт в user://world.cfg — его пишет кнопка «новый
 	# остров». Ключ --seed=N сильнее файла, но файл не переписывает: ключ —
 	# разовая проба, а не переезд.
-	if FileAccess.file_exists(SEED_PATH):
+	#
+	# СТЕНДЫ ФАЙЛ НЕ ЧИТАЮТ, и это не мелочь: свои же грабли. Нажатая однажды
+	# кнопка «новый остров» оставляет зерно на диске, и самопроверка молча
+	# уходит на другой мир — сад в ней падает вдвое, а причину ищешь в правках.
+	# Все записанные числа сняты на эталонном зерне, стенды обязаны идти по нему.
+	var bench: bool = false
+	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
+			"--meetbench", "--rockbench"]:
+		if key in OS.get_cmdline_user_args():
+			bench = true
+	if not bench and FileAccess.file_exists(SEED_PATH):
 		var sf := FileAccess.open(SEED_PATH, FileAccess.READ)
 		if sf != null:
 			var kept: int = int(sf.get_line().strip_edges().to_int())
@@ -1651,6 +1661,15 @@ func _toggle_branch(tier: int) -> void:
 func _select_tool(id: String) -> void:
 	current_tool = id
 	frame_id = ""
+	# КИСТЬ УХОДА САМА ОСТАНАВЛИВАЕТ ВРЕМЯ. Она работает только при стоящем
+	# времени (её решение), а время по умолчанию идёт — и выбравший «Рост»
+	# игрок вёл кистью по мху, не получая НИЧЕГО и без единого объяснения.
+	# Молчащая кисть читается поломкой; пусть выбор инструмента сам приводит
+	# мир в то состояние, в котором инструмент работает.
+	if PlantsData.is_care(id) and not is_zero_approx(time_scale):
+		time_scale = 0.0
+		if plants != null:
+			plants.time_scale = 0.0
 	_refresh_toolbar()
 
 
@@ -1847,7 +1866,18 @@ func _hold_start(button: int, event: InputEventMouseButton, erase: bool) -> void
 
 
 func _hold_step() -> float:
+	# КИСТЬ РОСТА ПОВТОРЯЕТСЯ РЕЖЕ ПРОЧИХ, и это не экономия, а её устройство.
+	# Лепка обязана частить: каждый мазок кладёт землю, и от частоты зависит
+	# форма. А подарок роста НАКОПИТЕЛЬНЫЙ и льётся по своим часам — под кистью
+	# всё упирается в потолок за пару мазков, и дальше повторы перебирают сотни
+	# растений, чтобы не изменить ничего. Полный потолок выливается за две
+	# секунды, так что четыре мазка в секунду держат кисть непрерывной с запасом.
+	if PlantsData.is_care(current_tool):
+		return GROW_STEP
 	return HOLD_STEP * _brush_radius(held_erase) / (CELL_SPACING * 2.4)
+
+
+const GROW_STEP: float = 0.25
 
 var held: bool = false
 var held_erase: bool = false
@@ -3888,6 +3918,29 @@ func _meet_stand() -> void:
 	var was_moss: int = _plant_count("moss")
 	for _i in range(300):
 		plants._tick(0.15)
+	# ЦЕНА КИСТИ РОСТА НА ГУСТОМ САДЕ. Мерить её надо именно здесь: в обычной
+	# самопроверке сада полторы сотни растений, и любая цена там кажется нулевой.
+	# Кисть при удержании повторяется четырнадцать раз в секунду, поэтому важна
+	# не сумма, а цена ОДНОГО мазка — она не должна расти вместе с садом.
+	var brush_r: float = _brush_radius() * BURST_REACH
+	var live: int = _plant_count("moss") + _plant_count("liamoss")
+	# ДВА ЗАМЕРА, И ВТОРОЙ ВАЖНЕЕ. В самой куртине кисть честно накрывает почти
+	# весь сад — там от указателя толку нет, работа упирается в число растений
+	# под кистью. А вот в стороне от куртины видно, чего он стоит: обход не
+	# должен зависеть от того, сколько всего насажено на острове.
+	for pass_i in range(2):
+		var spot: Vector3 = _ground_at(0.0, 0.0) if pass_i == 0 \
+			else _ground_at(9.0, 9.0)
+		if spot == Vector3.ZERO:
+			continue
+		var t_burst: int = Time.get_ticks_usec()
+		for _i in range(50):
+			plants.burst_at(spot, brush_r)
+		print("Кисть роста, ", "в куртине" if pass_i == 0 else "в стороне",
+			": сад ", live, " растений, просмотрено ", plants._burst_seen,
+			", один мазок ",
+			snappedf(float(Time.get_ticks_usec() - t_burst) / 50000.0, 0.001),
+			" мс")
 	print("Стенд встречи: за 45 секунд лиамоха стало ",
 		_plant_count("liamoss"), " кочек (было ", was_born, "), мха ",
 		_plant_count("moss"), " (было ", was_moss,

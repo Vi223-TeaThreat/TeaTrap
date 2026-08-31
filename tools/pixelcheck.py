@@ -307,14 +307,257 @@ def check_part(img, key):
     return {"часть": ru, "клеток": len(got), "числа": worst, "нарушения": bad}
 
 
+# =============================================================================
+#  ВТОРОЙ ЯРУС МЕРОК — из сводной разведки 31.08.2026
+#
+#  Это те правила, что отличают пиксельарт от посчитанной формулой картинки
+#  вернее всего. Первое из них — самое сильное: у настоящего пиксельарта
+#  соседние точки чаще всего ОДНОГО цвета, у интерполяции — почти никогда.
+# =============================================================================
+
+def lum255(c):
+    return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+
+
+def step_stats(sub):
+    """Правило «микроступенька — улика интерполяции».
+
+    По всем парам соседей: доля равных и доля отличающихся «чуть-чуть».
+    Норма: равных не меньше 0.45, микроступенек не больше 0.05.
+    Билинейно уменьшенная фотография даёт примерно 0.05 и 0.40.
+    """
+    px = sub.load()
+    same = micro = total = 0
+    for y in range(TILE):
+        for x in range(TILE):
+            if px[x, y][3] == 0:
+                continue
+            for dx, dy in ((1, 0), (0, 1)):
+                nx, ny = x + dx, y + dy
+                if nx >= TILE or ny >= TILE or px[nx, ny][3] == 0:
+                    continue
+                total += 1
+                d = abs(lum255(px[x, y]) - lum255(px[nx, ny]))
+                if d < 0.5:
+                    same += 1
+                elif d < 8.0:
+                    micro += 1
+    if not total:
+        return None
+    return same / total, micro / total
+
+
+def flat_levels(sub):
+    """Правило «плоские ступени вместо градиента»: сколько занятых ступеней
+    яркости и какой между ними зазор."""
+    px = sub.load()
+    hist = {}
+    solid = 0
+    for y in range(TILE):
+        for x in range(TILE):
+            if px[x, y][3] == 0:
+                continue
+            solid += 1
+            b = int(round(lum255(px[x, y])))
+            hist[b] = hist.get(b, 0) + 1
+    if not solid:
+        return None
+    busy = sorted(b for b, n in hist.items() if n >= solid * 0.01)
+    covered = sum(hist[b] for b in busy) / solid
+    gaps = [busy[i + 1] - busy[i] for i in range(len(busy) - 1)]
+    return len(busy), covered, (min(gaps) if gaps else 255)
+
+
+def clump_stats(sub):
+    """Правило «кластеры, а не бросок шума на точку»: доля точек, у которых
+    меньше двух из восьми соседей своего цвета, и склейка J."""
+    px = sub.load()
+    lonely = solid = 0
+    same = pairs = 0
+    for y in range(TILE):
+        for x in range(TILE):
+            if px[x, y][3] == 0:
+                continue
+            solid += 1
+            me = px[x, y][:3]
+            kin = 0
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < TILE and 0 <= ny < TILE and px[nx, ny][3] \
+                            and px[nx, ny][:3] == me:
+                        kin += 1
+            if kin < 2:
+                lonely += 1
+            for dx, dy in ((1, 0), (0, 1)):
+                nx, ny = x + dx, y + dy
+                if nx >= TILE or ny >= TILE or px[nx, ny][3] == 0:
+                    continue
+                pairs += 1
+                if px[nx, ny][:3] == me:
+                    same += 1
+    if not solid or not pairs:
+        return None
+    return lonely / solid, same / pairs
+
+
+def pillow(sub):
+    """Правило «яркость не считать от расстояния до края»: связь яркости с
+    удалением от фона. Высокая связь — это подушка (pillow shading)."""
+    px = sub.load()
+    # Расстояние до фона считаем волной по четырём соседям.
+    INF = 999
+    d = [[0 if px[x, y][3] == 0 else INF for y in range(TILE)] for x in range(TILE)]
+    for _ in range(TILE):
+        moved = False
+        for x in range(TILE):
+            for y in range(TILE):
+                if d[x][y] == 0:
+                    continue
+                best = INF
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    v = d[nx][ny] if 0 <= nx < TILE and 0 <= ny < TILE else 0
+                    best = min(best, v)
+                if best + 1 < d[x][y]:
+                    d[x][y] = best + 1
+                    moved = True
+        if not moved:
+            break
+    xs = []
+    ys = []
+    for x in range(TILE):
+        for y in range(TILE):
+            if px[x, y][3] == 0:
+                continue
+            xs.append(d[x][y])
+            ys.append(lum255(px[x, y]))
+    n = len(xs)
+    if n < 8:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxy = sum((a - mx) * (b - my) for a, b in zip(xs, ys))
+    sxx = sum((a - mx) ** 2 for a in xs)
+    syy = sum((b - my) ** 2 for b in ys)
+    if sxx <= 0 or syy <= 0:
+        return 0.0
+    return sxy / (sxx * syy) ** 0.5
+
+
+def solidity(sub):
+    """Правило «силуэт не должен быть формулой»: доля площади маски в её
+    выпуклой оболочке. Идеальный эллипс даёт единицу — это провал."""
+    px = sub.load()
+    pts = [(x, y) for x in range(TILE) for y in range(TILE) if px[x, y][3] > 127]
+    if len(pts) < 8:
+        return None
+    pts = sorted(set(pts))
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lo = []
+    for p in pts:
+        while len(lo) >= 2 and cross(lo[-2], lo[-1], p) <= 0:
+            lo.pop()
+        lo.append(p)
+    up = []
+    for p in reversed(pts):
+        while len(up) >= 2 and cross(up[-2], up[-1], p) <= 0:
+            up.pop()
+        up.append(p)
+    hull = lo[:-1] + up[:-1]
+    if len(hull) < 3:
+        return None
+    a2 = abs(sum(hull[i][0] * hull[(i + 1) % len(hull)][1]
+                 - hull[(i + 1) % len(hull)][0] * hull[i][1]
+                 for i in range(len(hull)))) / 2.0
+    return len(pts) / a2 if a2 > 0 else None
+
+
+def deep_report(path):
+    img = Image.open(path).convert("RGBA")
+    print("%-18s %6s %6s %6s %6s %6s %6s %6s" % (
+        "часть", "равн", "микро", "ступ", "покр", "сирот", "склей", "подуш"))
+    print("-" * 72)
+    whole = set()
+    bad = 0
+    for key, (cols, ru, solid_kind) in PARTS.items():
+        got = cells(img, cols)
+        if not got:
+            continue
+        acc = {"same": [], "micro": [], "busy": [], "cov": [], "lone": [],
+               "j": [], "pil": [], "sol": []}
+        for c, s, sub in got:
+            px = sub.load()
+            for y in range(TILE):
+                for x in range(TILE):
+                    if px[x, y][3]:
+                        whole.add(px[x, y][:3])
+            st_ = step_stats(sub)
+            if st_:
+                acc["same"].append(st_[0])
+                acc["micro"].append(st_[1])
+            fl = flat_levels(sub)
+            if fl:
+                acc["busy"].append(fl[0])
+                acc["cov"].append(fl[1])
+            cl = clump_stats(sub)
+            if cl:
+                acc["lone"].append(cl[0])
+                acc["j"].append(cl[1])
+            pl = pillow(sub)
+            if pl is not None:
+                acc["pil"].append(abs(pl))
+            if not solid_kind:
+                so = solidity(sub)
+                if so:
+                    acc["sol"].append(so)
+        m = lambda k: sorted(acc[k])[len(acc[k]) // 2] if acc[k] else 0.0
+        print("%-18s %6.2f %6.2f %6.1f %6.2f %6.2f %6.2f %6.2f" % (
+            ru[:18], m("same"), m("micro"), m("busy"), m("cov"),
+            m("lone"), m("j"), m("pil")))
+        lone_cap = 0.10 if solid_kind else 0.05
+        if m("same") < 0.45:
+            bad += 1
+        if m("micro") > 0.05:
+            bad += 1
+        if not (3 <= m("busy") <= 8):
+            bad += 1
+        if m("cov") < 0.92:
+            bad += 1
+        if m("lone") > lone_cap:
+            bad += 1
+        if m("j") < 0.55:
+            bad += 1
+        if m("pil") > 0.45:
+            bad += 1
+    print("\nЦветов на всём листе: %d (норма 48)" % len(whole))
+    if len(whole) > 48:
+        bad += 1
+    print("НАРУШЕНИЙ ВТОРОГО ЯРУСА:", bad)
+    print("\nнормы: равных >= 0.45, микроступенек <= 0.05, ступеней 3..8,")
+    print("       покрытие >= 0.92, сирот <= 0.10/0.05, склейка >= 0.55,")
+    print("       подушка <= 0.45")
+
+
 def main(argv):
     path = "art/moss.png"
     as_json = False
+    deep = False
     for a in argv:
         if a == "--json":
             as_json = True
+        elif a == "--deep":
+            deep = True
         else:
             path = a
+    if deep:
+        deep_report(path)
+        return 0
     img = Image.open(path).convert("RGBA")
     out = []
     for key in PARTS:

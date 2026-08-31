@@ -2653,6 +2653,29 @@ func spacing() -> float:
 
 # --- Запросы наружу ----------------------------------------------------------
 # Ближайшая ячейка к точке — нужна, чтобы понимать, куда указывает курсор.
+# ЯЧЕЙКИ В ШАРЕ — для всего, что работает кистью по месту. Без этого искать
+# приходится перебором всего, что есть в мире: кисть роста обходила ВЕСЬ сад на
+# каждый повтор мазка, а повторов при удержании четырнадцать в секунду.
+# Хеш семян уже построен для `cell_at` — тут он же, только шире одного ключа.
+func cells_near(point: Vector3, radius: float) -> Array:
+	var out: Array = []
+	if radius <= 0.0:
+		return out
+	var span: int = int(ceil(radius / _cell_size)) + 1
+	var base := _key_of(point)
+	var r2: float = radius * radius
+	for dx in range(-span, span + 1):
+		for dy in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var key := base + Vector3i(dx, dy, dz)
+				if not _seed_hash.has(key):
+					continue
+				for i in _seed_hash[key]:
+					if seeds[i].distance_squared_to(point) <= r2:
+						out.append(i)
+	return out
+
+
 func cell_at(p: Vector3) -> int:
 	var base := _key_of(p)
 	var best := -1
