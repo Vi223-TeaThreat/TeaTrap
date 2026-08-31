@@ -239,7 +239,95 @@ func _ready() -> void:
 		# бы камень в пустоту.
 		scene_id = _arg_word(args, "--scene", scene_id)
 		await _fill_world()
-		_seed_scene()
+		# СОХРАНЁННЫЙ САД — ВМЕСТО СЦЕНЫ: его поле уже содержит её мазки.
+		# Загружается и пишется он ТОЛЬКО в игровой ветке — стенды и съёмка
+		# идут по нетронутому миру, иначе ни одно записанное число не сравнить.
+		if _load_garden():
+			print("Сад загружен: ", plants.patches.size(), " растений")
+		else:
+			_seed_scene()
+		_game_on = true
+		_save_garden()
+
+
+# =============================================================================
+#  СОХРАНЕНИЕ САДА
+# =============================================================================
+#
+# Сад переживает закрытие игры. Снимок — то, чего не пересчитать из зерна:
+# правки поля, каменистость, глыбы, краска и растения со всеми их записями.
+# Всё производное пересчитывает `grid.restore_state` тем же порядком, каким
+# идёт живой мазок.
+#
+# Пишется сам, раз в полминуты, и при закрытии окна (в браузере сигнала о
+# закрытии нет — там спасает таймер). Файл живёт в user://, у веба это
+# хранилище браузера. Сейв с чужим зерном молча не подкладываем: мир другой,
+# и сад повис бы в воздухе.
+var save_path := "user://garden.save"   # самопроверка подменяет на свой файл
+const SAVE_EVERY: float = 30.0
+var _game_on: bool = false
+var _save_in: float = SAVE_EVERY
+var _last_save: float = 0.0
+
+func _save_garden() -> void:
+	if not _game_on:
+		return
+	var f := FileAccess.open(save_path, FileAccess.WRITE)
+	if f == null:
+		return
+	f.store_var({
+		"v": 1,
+		"seed": world_seed,
+		"edits": grid.edits,
+		"stone": grid.stone,
+		"lumps": grid.lumps,
+		"paint": paint,
+		"garden": plants.export_garden(),
+	})
+	f.close()
+
+
+func _load_garden() -> bool:
+	if not FileAccess.file_exists(save_path):
+		return false
+	var f := FileAccess.open(save_path, FileAccess.READ)
+	if f == null:
+		return false
+	var data = f.get_var()
+	f.close()
+	if not (data is Dictionary) or int(data.get("v", 0)) != 1 \
+			or int(data.get("seed", 0)) != world_seed:
+		return false
+	grid.restore_state(data["edits"], data["stone"], data["lumps"])
+	paint = data["paint"]
+	# Порода пересобирается по восстановленному полю: у ячейки выше половины
+	# заполнения — краска из снимка, у прочих ничего.
+	solid = {}
+	grid.solid = {}
+	for j in range(grid.fill.size()):
+		if grid.fill[j] > 0.5:
+			solid[j] = paint.get(j, "ground")
+			grid.solid[j] = true
+	for j in solid:
+		_touch_chunks(j)
+	_flush_chunks()
+	plants.import_garden(data["garden"])
+	return true
+
+
+# Сад начинается заново: снимок стирается, игра перечитывает сцену. Кнопка
+# спрашивает подтверждение сама (см. панель времени) — сюда приходят уже
+# решившиеся.
+func _reset_garden() -> void:
+	_game_on = false
+	if FileAccess.file_exists(save_path):
+		DirAccess.remove_absolute(save_path)
+	get_tree().reload_current_scene()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		_save_garden()
 
 
 # =============================================================================
@@ -410,6 +498,11 @@ func _process(delta: float) -> void:
 			fill_label.text = "остров достраивается — %d%%" % int(fill_done * 100.0)
 	if not _dirty_chunks.is_empty():
 		_flush_chunks_some()
+	if _game_on:
+		_save_in -= delta
+		if _save_in <= 0.0:
+			_save_in = SAVE_EVERY
+			_save_garden()
 
 
 func _apply_camera() -> void:
@@ -1408,6 +1501,24 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 			plants.fast_left += 30.0)
 	row.add_child(ff)
 
+	# НАЧАТЬ ЗАНОВО. Стирает сохранённый сад и перечитывает сцену. Действие
+	# необратимое, поэтому кнопка переспрашивает сама: первое нажатие меняет
+	# подпись на «точно?», второе в ближайшие три секунды — выполняет.
+	var rb := _list_button(-1, true)
+	rb.text = " заново "
+	rb.tooltip_text = "Стереть сад и начать остров заново"
+	var armed: Array = [0.0]
+	rb.pressed.connect(func():
+		var now: float = float(Time.get_ticks_msec()) / 1000.0
+		if now - armed[0] < 3.0:
+			_reset_garden()
+		else:
+			armed[0] = now
+			rb.text = " точно? "
+			get_tree().create_timer(3.0).timeout.connect(func():
+				rb.text = " заново "))
+	row.add_child(rb)
+
 	# С ПАЛЬЦА НЕТ НИ ОТМЕНЫ, НИ НАКЛОНА: Ctrl+Z на стекле не нажать, а тангаж
 	# живёт на вертикали ПКМ. Свободных жестов не осталось (см. README,
 	# «Управление с пальца») — поэтому кнопки, и только на сенсорном стекле:
@@ -1675,6 +1786,12 @@ func _open_group() -> void:
 
 func _close_group() -> void:
 	_group = 0
+	# Мазок закончился — снимок. Не чаще раза в пять секунд: удержание рвёт
+	# группы часто, а снимок целого сада стоит десятки миллисекунд.
+	var now: float = float(Time.get_ticks_msec()) / 1000.0
+	if _game_on and now - _last_save > 5.0:
+		_last_save = now
+		_save_garden()
 
 
 func _hold_tick(delta: float) -> void:
@@ -2223,6 +2340,44 @@ func _selftest() -> void:
 		_vine_hang_check()          # он сносит все лианы — только последним
 	# СТЕНД ВСТРЕЧИ — ПОСЛЕ ВСЕГО. Он сносит сад и растит свой, поэтому мерить
 	# после него уже нечего; зато и мешать ему некому.
+
+	# САД ПЕРЕЖИВАЕТ СОХРАНЕНИЕ. Каноном считается второй круг: снимок,
+	# снятый с уже восстановленного мира, обязан восстановиться В НОЛЬ — это и
+	# есть проверка сериализации и пересчёта. Первый круг сравнивается с живым
+	# миром и сходится лишь ПОЧТИ: у мазка есть записанная грабля — огранка
+	# зависит от разглаженной каменистости, а та меняется дальше, чем мазок
+	# освежает поле. Восстановление считает честно, поэтому у кромок камня
+	# остаётся хвост порядка сотых — он печатается справкой, а не приговором.
+	var keep_path: String = save_path
+	save_path = "user://selftest_garden.save"
+	var was_fill: PackedFloat32Array = grid.fill.duplicate()
+	var was_plants: int = plants.patches.size()
+	_game_on = true
+	_save_garden()
+	_game_on = false
+	var ok_load: bool = _load_garden()
+	var live_drift: float = 0.0
+	for j in range(grid.fill.size()):
+		live_drift = maxf(live_drift, absf(grid.fill[j] - was_fill[j]))
+	var canon_fill: PackedFloat32Array = grid.fill.duplicate()
+	var canon_plants: int = plants.patches.size()
+	_game_on = true
+	_save_garden()
+	_game_on = false
+	var ok_again: bool = _load_garden()
+	var drift: float = 0.0
+	for j in range(grid.fill.size()):
+		drift = maxf(drift, absf(grid.fill[j] - canon_fill[j]))
+	print("Сохранение сада: загрузилось — ", ok_load, " и повторно — ", ok_again,
+		", растений ", plants.patches.size(), " из ", was_plants,
+		" (после первого круга ", canon_plants, ")",
+		", сдвиг поля во втором круге ", snappedf(drift, 0.0001),
+		" — норма ноль; расхождение с живым миром ", snappedf(live_drift, 0.0001),
+		" — хвосты мазка у кромок камня, беды нет до 0.02")
+	if FileAccess.file_exists(save_path):
+		DirAccess.remove_absolute(save_path)
+	save_path = keep_path
+
 	_meet_stand()
 
 	await get_tree().physics_frame

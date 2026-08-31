@@ -3983,6 +3983,25 @@ func _burst_pass(from: int, to: int) -> void:
 # Проверяем только тех, кто сидел на задетых ячейках, и их соседей: мазок
 # двигает поверхность и вокруг себя. Растение либо переезжает вслед за землёй,
 # либо гибнет, если земли под ним больше нет.
+# СНИМОК САДА — для сохранения. Внутри записей растений одни данные: числа,
+# векторы, словари и списки; нод и материалов там нет, рендер живёт отдельно
+# в `cell_nodes` и при загрузке пересобирается пометкой ячеек.
+func export_garden() -> Dictionary:
+	return {"patches": patches, "next": _next}
+
+
+func import_garden(d: Dictionary) -> void:
+	patches = d.get("patches", {})
+	_next = int(d.get("next", 1))
+	by_cell.clear()
+	for pid in patches:
+		var cell: int = int(patches[pid]["cell"])
+		if not by_cell.has(cell):
+			by_cell[cell] = {}
+		by_cell[cell][pid] = true
+		_dirty[cell] = true
+
+
 func surface_changed(cells: Array = []) -> void:
 	var suspect: Dictionary = {}
 	if cells.is_empty():

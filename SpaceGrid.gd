@@ -1810,6 +1810,46 @@ func apply_delta(delta: Dictionary, sign: float,
 	return zone.keys()
 
 
+# ВОССТАНОВЛЕНИЕ СОХРАНЁННОГО САДА. Снимок — это три вещи, которых не
+# пересчитать из зерна: правки поля, каменистость и глыбы. Всё производное
+# (обёртка складок, швы, поле, впадина, тени) пересчитывается здесь же, тем же
+# порядком, каким идёт живой мазок: обёртка → швы → поле → впадина. Порядок не
+# вкусовой — поле спрашивает и обёртку, и швы, посчитай его раньше — мир
+# тихо разойдётся с тем, что сохраняли.
+func restore_state(ed: Dictionary, st: Dictionary, lu: Array) -> Array:
+	edits = ed.duplicate()
+	stone = st.duplicate()
+	lumps = lu.duplicate(true)
+	_lump_hash.clear()
+	for i in range(lumps.size()):
+		var key: Vector3i = _lump_key(lumps[i]["pos"])
+		if not _lump_hash.has(key):
+			_lump_hash[key] = []
+		_lump_hash[key].append(i)
+	var zone: Dictionary = {}
+	for j in edits:
+		zone[int(j)] = true
+	for j in stone:
+		zone[int(j)] = true
+	if zone.is_empty():
+		return []
+	# Обёртка складок разглаживается на ДВА кольца от правки — значит, и поле
+	# надо освежить настолько же широко, иначе на дальнем кольце оно остаётся
+	# со старой огранкой (та самая грабля из `apply_delta`, только шире).
+	var edge: Dictionary = _grown(_grown(_grown(zone)))
+	_refresh_stone_soft_round(zone)
+	for j in edge:
+		_refresh_seam(int(j))
+	for j in edge:
+		fill[j] = base_fill[j] + _edit_of(j) + _facet(j)
+	for j in edge:
+		_refresh_cavity(j)
+	_smooth_cavity(edge.keys())
+	_refresh_shade_round(edge)
+	_refresh_under_round(edge)
+	return edge.keys()
+
+
 # ОГРАНЁННОСТЬ КАМНЯ. К полю возле камня добавляется крупный шум: поверхность
 # набирает широкие плосковатые грани и складки, как у окатанных глыб на
 # снимках. Шипов от этого быть не может — это плавная величина, а не отдельные
