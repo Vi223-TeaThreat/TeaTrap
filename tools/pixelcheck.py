@@ -226,8 +226,9 @@ def check_part(img, key):
                                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
                         if near and px[x, y][:3] == (0, 0, 0):
                             bleed_bad += 1
-        worst["силуэт IoU (мин)"] = round(min(ious), 3)
-        worst["потеря на открытии (макс)"] = round(max(losses), 3)
+        worst["силуэт IoU (мин)"] = round(min(ious), 3) if ious else 1.0
+        worst["потеря на открытии (макс)"] = round(max(losses), 3) \
+            if losses else 0.0
         worst["частей потеряно, клеток"] = lost_parts
         worst["полупрозрачных точек"] = semi
         worst["чёрных точек под краем"] = bleed_bad
@@ -405,8 +406,16 @@ def clump_stats(sub):
 
 def pillow(sub):
     """Правило «яркость не считать от расстояния до края»: связь яркости с
-    удалением от фона. Высокая связь — это подушка (pillow shading)."""
+    удалением от фона. Высокая связь — это подушка (pillow shading).
+
+    НА СПЛОШНОЙ КЛЕТКЕ МЕРКА НЕПРИМЕНИМА, и раньше она этого не знала: точки за
+    границей клетки объявлялись фоном, и у бесшовного образца «расстояние до
+    фона» на деле означало «расстояние до края клетки». Числа подушки для тела
+    мха, коры и тела лиамоха были не результатом, а следом реза. Теперь такая
+    клетка честно отвечает «не знаю»."""
     px = sub.load()
+    if all(px[x, y][3] != 0 for x in range(TILE) for y in range(TILE)):
+        return None
     # Расстояние до фона считаем волной по четырём соседям.
     INF = 999
     d = [[0 if px[x, y][3] == 0 else INF for y in range(TILE)] for x in range(TILE)]
@@ -478,19 +487,98 @@ def solidity(sub):
     return len(pts) / a2 if a2 > 0 else None
 
 
+# КОРИДОРЫ, ЗАМЕРЕННЫЕ ПО ЖИВОМУ ПИКСЕЛЬАРТУ (113 клеток 32x32 из наборов CC0
+# с OpenGameArt, замер 01.09.2026). Десятый и девяностый процентили.
+#
+# ЗАЧЕМ КОРИДОР, А НЕ ПОТОЛОК. Первые нормы были односторонними и выдуманными —
+# взятыми из разбора приёмов, а не замеренными. Проверка показала, чего это
+# стоит: нашу норму «сирот не больше 0.10» НЕ ПРОШЛИ БЫ 78 клеток настоящего
+# пиксельарта из 113, а «склейка не меньше 0.55» стоит ровно на его медиане, то
+# есть решает монетка. Сами же мы оказались ЗА КОРИДОРОМ С ЧИСТОЙ СТОРОНЫ:
+# вычищенная текстура глаже, чем у людей, и это не победа, а потеря фактуры.
+#
+# Отсюда правило: мерка нарушена и когда значение выше коридора, и когда ниже.
+# «Чище живого» — такой же изъян, как «грязнее».
+BAND = {
+    "склейка J": (0.41, 0.94),
+    "микроступенек": (0.00, 0.05),
+    "занятых ступеней": (4.0, 10.0),
+    "сирот": (0.01, 0.29),
+    "подушка |r|": (0.00, 0.53),
+    "плоских мест": (0.02, 0.66),
+    # Шов меряется отношением: единица — «шва не видно». Полторы даёт заметную
+    # черту при замощении. Спрашивается только у бесшовных столбцов.
+    "шов": (0.0, 1.5),
+}
+
+
+def flat_share(sub, wrap):
+    """Доля точек, у которых все четыре соседа того же цвета. У бесшовного
+    образца соседей берём с заворотом: он носится с повтором."""
+    px = sub.load()
+    flat = solid = 0
+    for y in range(TILE):
+        for x in range(TILE):
+            c = px[x, y]
+            if c[3] == 0:
+                continue
+            solid += 1
+            same = True
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + dx, y + dy
+                if wrap:
+                    nx %= TILE
+                    ny %= TILE
+                elif not (0 <= nx < TILE and 0 <= ny < TILE):
+                    continue
+                q = px[nx, ny]
+                if q[3] == 0 or q[:3] != c[:3]:
+                    same = False
+                    break
+            if same:
+                flat += 1
+    return flat / solid if solid else 0.0
+
+
+def seam(sub):
+    """БЕСШОВНОСТЬ. Образец носится по телу с повтором, значит правый край обязан
+    сходиться с левым, а нижний с верхним. Мерка: средний перепад яркости ЧЕРЕЗ
+    шов, делённый на средний перепад между соседями ВНУТРИ клетки. Единица
+    значит «шов такой же, как всякое другое место», то есть шва не видно.
+
+    Этого правила не было ни у кого: `_guards` в генераторе считает только
+    просвечивающие точки, а дырок по альфе у бесшовного образца и так нет. Шов,
+    разошедшийся по ЦВЕТУ, проходил все проверки молча.
+    """
+    px = sub.load()
+    def L(x, y):
+        c = px[x, y]
+        return 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+    sx = sum(abs(L(TILE - 1, y) - L(0, y)) for y in range(TILE)) / TILE
+    sy = sum(abs(L(x, TILE - 1) - L(x, 0)) for x in range(TILE)) / TILE
+    ix = sum(abs(L(x, y) - L(x + 1, y))
+             for y in range(TILE) for x in range(TILE - 1)) / (TILE * (TILE - 1))
+    iy = sum(abs(L(x, y) - L(x, y + 1))
+             for x in range(TILE) for y in range(TILE - 1)) / (TILE * (TILE - 1))
+    inner = (ix + iy) / 2.0
+    if inner < 0.5:
+        return 0.0
+    return (sx + sy) / 2.0 / inner
+
+
 def deep_report(path):
     img = Image.open(path).convert("RGBA")
-    print("%-18s %6s %6s %6s %6s %6s %6s %6s" % (
-        "часть", "равн", "микро", "ступ", "покр", "сирот", "склей", "подуш"))
-    print("-" * 72)
+    print("%-18s %7s %7s %7s %7s %7s %7s" % (
+        "часть", "склей", "микро", "ступ", "сирот", "плоск", "шов"))
+    print("-" * 68)
     whole = set()
-    bad = 0
+    bad = []
     for key, (cols, ru, solid_kind) in PARTS.items():
         got = cells(img, cols)
         if not got:
             continue
-        acc = {"same": [], "micro": [], "busy": [], "cov": [], "lone": [],
-               "j": [], "pil": [], "sol": []}
+        acc = {"j": [], "micro": [], "busy": [], "lone": [], "pil": [], "flat": [],
+               "seam": []}
         for c, s, sub in got:
             px = sub.load()
             for y in range(TILE):
@@ -499,12 +587,10 @@ def deep_report(path):
                         whole.add(px[x, y][:3])
             st_ = step_stats(sub)
             if st_:
-                acc["same"].append(st_[0])
                 acc["micro"].append(st_[1])
             fl = flat_levels(sub)
             if fl:
                 acc["busy"].append(fl[0])
-                acc["cov"].append(fl[1])
             cl = clump_stats(sub)
             if cl:
                 acc["lone"].append(cl[0])
@@ -512,36 +598,35 @@ def deep_report(path):
             pl = pillow(sub)
             if pl is not None:
                 acc["pil"].append(abs(pl))
-            if not solid_kind:
-                so = solidity(sub)
-                if so:
-                    acc["sol"].append(so)
+            acc["flat"].append(flat_share(sub, solid_kind))
+            if solid_kind:
+                acc["seam"].append(seam(sub))
         m = lambda k: sorted(acc[k])[len(acc[k]) // 2] if acc[k] else 0.0
-        print("%-18s %6.2f %6.2f %6.1f %6.2f %6.2f %6.2f %6.2f" % (
-            ru[:18], m("same"), m("micro"), m("busy"), m("cov"),
-            m("lone"), m("j"), m("pil")))
-        lone_cap = 0.10 if solid_kind else 0.05
-        if m("same") < 0.45:
-            bad += 1
-        if m("micro") > 0.05:
-            bad += 1
-        if not (3 <= m("busy") <= 8):
-            bad += 1
-        if m("cov") < 0.92:
-            bad += 1
-        if m("lone") > lone_cap:
-            bad += 1
-        if m("j") < 0.55:
-            bad += 1
-        if m("pil") > 0.45:
-            bad += 1
-    print("\nЦветов на всём листе: %d (норма 48)" % len(whole))
-    if len(whole) > 48:
-        bad += 1
-    print("НАРУШЕНИЙ ВТОРОГО ЯРУСА:", bad)
-    print("\nнормы: равных >= 0.45, микроступенек <= 0.05, ступеней 3..8,")
-    print("       покрытие >= 0.92, сирот <= 0.10/0.05, склейка >= 0.55,")
-    print("       подушка <= 0.45")
+        print("%-18s %7.2f %7.2f %7.1f %7.3f %7.2f %7s" % (
+            ru[:18], m("j"), m("micro"), m("busy"), m("lone"), m("flat"),
+            ("%.2f" % m("seam")) if acc["seam"] else "—"))
+        checks = [("склейка J", m("j")), ("микроступенек", m("micro")),
+                  ("занятых ступеней", m("busy")), ("сирот", m("lone")),
+                  ("плоских мест", m("flat"))]
+        if acc["pil"]:
+            checks.append(("подушка |r|", m("pil")))
+        if acc["seam"]:
+            checks.append(("шов", m("seam")))
+        for name, val in checks:
+            lo, hi = BAND[name]
+            if val < lo:
+                bad.append("%s: %s %.3f — ЧИЩЕ живого (коридор %.2f…%.2f)"
+                           % (ru, name, val, lo, hi))
+            elif val > hi:
+                bad.append("%s: %s %.3f — ГРЯЗНЕЕ живого (коридор %.2f…%.2f)"
+                           % (ru, name, val, lo, hi))
+    print("\nЦветов на всём листе: %d (у живых наборов 11…55, середина 27)"
+          % len(whole))
+    if not (11 <= len(whole) <= 55):
+        bad.append("цветов на листе %d вне живого разброса 11…55" % len(whole))
+    print("\nВЫХОДОВ ЗА КОРИДОР: %d" % len(bad))
+    for b in bad:
+        print("  " + b)
 
 
 def main(argv):

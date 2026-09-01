@@ -74,19 +74,31 @@ def sheet_cells(path, cols):
 
 
 def ref_cells(folder):
-    """Референсы: каждый файл целиком, но если он крупный — режем на клетки
-    32x32 и берём непустые. Настоящие спрайтовые листы так и устроены."""
+    """Референсы: каждый файл целиком, но если он крупный — режем на клетки и
+    берём непустые. Настоящие спрайтовые листы так и устроены.
+
+    РАЗМЕР КЛЕТКИ У РАЗНЫХ НАБОРОВ РАЗНЫЙ, и резать всё по 32 нельзя: набор,
+    размеченный по 16, при таком резе даёт в каждой «клетке» четыре чужих друг
+    другу спрайта, и число цветов у эталона выходит завышенным. Отсюда и вывод
+    «у референсов 8 цветов, а у нас 6» держался на резе, а не на рисунке.
+    Размер берём из имени файла, если он там назван."""
     out = []
     for path in sorted(glob.glob(os.path.join(folder, "*.png"))):
         img = load(path)
+        step = TILE
+        low = os.path.basename(path).lower()
+        for size in (8, 16, 24, 48, 64):
+            if "%dx%d" % (size, size) in low:
+                step = size
+                break
         if img.width <= 64 and img.height <= 64:
             out.append(measure(img, os.path.basename(path)))
             continue
-        cols = img.width // TILE
-        rows = img.height // TILE
+        cols = img.width // step
+        rows = img.height // step
         for c in range(cols):
             for r in range(rows):
-                sub = crop_cell(img, TILE, c, r)
+                sub = crop_cell(img, step, c, r)
                 if sub.getbbox() is None:
                     continue
                 px = sub.load()
@@ -94,7 +106,7 @@ def ref_cells(folder):
                             if px[x, y][3] > 0)
                 # Клетка, занятая меньше чем на четверть, — это край спрайта, а
                 # не картинка: мерить по ней палитру нечестно.
-                if solid < TILE * TILE * 0.25:
+                if solid < step * step * 0.25:
                     continue
                 out.append(measure(sub, "%s[%d,%d]" % (os.path.basename(path), c, r)))
     return out

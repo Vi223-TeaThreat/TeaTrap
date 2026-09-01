@@ -799,9 +799,17 @@ func _field() -> PackedFloat32Array:
 
 # Уложить поле цветом: доли превращаются в номера ступеней клетчатым порогом,
 # затем чистятся одиночки, и только потом ложится краска.
+# `rim` — на сколько СТУПЕНЕЙ темнеет точка у края силуэта. Мера в ступенях, а не
+# в долях: окна пандуса у столбцов разной длины, и одна и та же доля означала бы
+# у лепестка неполную ступень (то есть каёмку, которой на трети контура нет), а у
+# листа — почти две.
+#
+# `wrap` — заворот по клетке для бесшовных образцов: у них соседом левого края
+# служит правый, и чистить сор надо с этим же заворотом, иначе при замощении
+# вычищенная середина сходится с невычищенной рамкой.
 func _finish(img: Image, ox: int, oy: int, lv: PackedFloat32Array,
 		ramp: PackedColorArray, dither: float, tidy: int = 1,
-		alpha: PackedFloat32Array = PackedFloat32Array()) -> void:
+		rim: int = 0, wrap: bool = false) -> void:
 	var top: int = ramp.size() - 1
 	var idx := PackedInt32Array()
 	idx.resize(TILE * TILE)
@@ -823,33 +831,67 @@ func _finish(img: Image, ox: int, oy: int, lv: PackedFloat32Array,
 				gate = lerpf(0.5, bay, clampf(dither, 0.0, 1.0))
 			idx[p] = clampi(i + (1 if frac > gate else 0), 0, top)
 	for _pass in range(tidy):
-		idx = _declutter(idx)
+		idx = _declutter(idx, wrap)
+	# КАЁМКА — ПОСЛЕ ЧИСТКИ. Прежде она наводилась до неё, и чистка видела в
+	# обводе цепочку точек, у которых меньше двух родных соседей, и притягивала
+	# её обратно к телу фигурки: у лепестка и у ворсинки лиамоха обвода не
+	# оставалось на большей половине контура.
+	if rim > 0:
+		var was := idx.duplicate()
+		for y in range(TILE):
+			for x in range(TILE):
+				var q: int = y * TILE + x
+				if was[q] < 0:
+					continue
+				var edge := false
+				for n in [[1, 0], [-1, 0], [0, 1], [0, -1]]:
+					var nx: int = x + int(n[0])
+					var ny: int = y + int(n[1])
+					# Низ не в счёт: им фигурка растёт из тела, и каёмка там
+					# рисовала бы черту поперёк стыка.
+					if ny >= TILE:
+						continue
+					if nx < 0 or nx >= TILE or ny < 0 or was[ny * TILE + nx] < 0:
+						edge = true
+						break
+				if edge:
+					idx[q] = maxi(0, was[q] - rim)
 	for y in range(TILE):
 		for x in range(TILE):
 			var p: int = y * TILE + x
 			if idx[p] < 0:
 				continue
 			var c: Color = ramp[idx[p]]
-			var a: float = 1.0
-			if alpha.size() == TILE * TILE:
-				a = alpha[p]
-			img.set_pixel(ox + x, oy + y, Color(c.r, c.g, c.b, a))
+			img.set_pixel(ox + x, oy + y, Color(c.r, c.g, c.b, 1.0))
 	_bleed(img, ox, oy, idx, ramp)
 
 
-# КРАСКА ЗАХОДИТ ПОД ПРОЗРАЧНОЕ. Прозрачная точка хранит не только прозрачность,
-# но и цвет, и по краю фигурки этот цвет обычно чёрный. В игре картинка ложится
-# на дощечку и читается с ФИЛЬТРОМ: движок мешает соседние точки, тянет чёрное
-# из-за края — и по силуэту листа идёт тёмная кайма, которой никто не рисовал.
+# КРАСКА ЗАХОДИТ ПОД ПРОЗРАЧНОЕ — ЗАПАС, А НЕ ЛЕЧЕНИЕ.
 #
-# Лечится тем, что прозрачным точкам у края отдаётся цвет ближайшего соседа.
-# Прозрачность у них остаётся нулевой, на картинке ничего не меняется, а фильтру
-# больше нечего оттуда тянуть.
+# ЧЕСТНО О ТОМ, ЗАЧЕМ ЭТО (перепроверка 01.09.2026). Сперва здесь было написано,
+# что без такой заливки по силуэту листа в игре идёт тёмная кайма. ЭТО БЫЛО
+# НЕВЕРНО, и проверка показала почему: лист читается `filter_nearest` (см.
+# `Blades.gdshader`), мипмапы у него выключены (`mipmaps/generate=false` в
+# `art/moss.png.import`), а сам Godot при ввозе заливает край сам
+# (`process/fix_alpha_border=true`) — и делает это на четыре кольца, глубже нас.
+# Никакой каймы не было и быть не могло: при выборке ближайшей точки цвет из-под
+# прозрачного не берётся вовсе.
+#
+# Почему оставлено. Стоит это доли миллисекунды, а держит ровно один случай:
+# если фильтр когда-нибудь станет линейным или включатся мипмапы, чёрное из-под
+# края полезет наружу. Пусть лежит запасом — но называть это починкой нельзя.
 func _bleed(img: Image, ox: int, oy: int, idx: PackedInt32Array,
 		ramp: PackedColorArray) -> void:
 	for y in range(TILE):
 		for x in range(TILE):
 			if idx[y * TILE + x] >= 0:
+				continue
+			# НЕ ТРОГАТЬ ЧУЖОЕ. У ворсинки мха `_finish` зовётся дважды —
+			# зеленью и ржавчиной, — и заливка второго прохода СТИРАЛА
+			# нарисованное первым: всё, чего нет в ржавом поле, объявлялось
+			# пустым и получало нулевую прозрачность. Мохнатый край съедался
+			# начисто, а замеры силуэта делались по выеденной картинке.
+			if img.get_pixel(ox + x, oy + y).a > 0.0:
 				continue
 			var near: int = -1
 			for n in [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1],
@@ -872,7 +914,7 @@ func _bleed(img: Image, ox: int, oy: int, idx: PackedInt32Array,
 # самому частому соседу — не к среднему, иначе родится новый оттенок и одиночка
 # просто переедет. Обход идёт по образу, снятому до правки: иначе исправленная
 # точка тут же начинает влиять на следующую, и чистка ползёт волной.
-func _declutter(src: PackedInt32Array) -> PackedInt32Array:
+func _declutter(src: PackedInt32Array, wrap: bool = false) -> PackedInt32Array:
 	var out := src.duplicate()
 	for y in range(TILE):
 		for x in range(TILE):
@@ -890,7 +932,10 @@ func _declutter(src: PackedInt32Array) -> PackedInt32Array:
 						continue
 					var nx: int = x + dx
 					var ny: int = y + dy
-					if nx < 0 or nx >= TILE or ny < 0 or ny >= TILE:
+					if wrap:
+						nx = posmod(nx, TILE)
+						ny = posmod(ny, TILE)
+					elif nx < 0 or nx >= TILE or ny < 0 or ny >= TILE:
 						continue
 					var q: int = src[ny * TILE + nx]
 					if q < 0:
@@ -909,6 +954,33 @@ func _declutter(src: PackedInt32Array) -> PackedInt32Array:
 					best = int(k)
 			out[p] = best
 	return out
+
+
+# МЯГКИЕ ПЯТНА, СТЫКУЮЩИЕСЯ САМИ С СОБОЙ. Решётка `cells` на клетку, значения в
+# узлах от хеша, между узлами — сглаженная доля. Заворот по решётке делает
+# образец бесшовным.
+#
+# Зачем понадобилось. У фактуры бесшовного образца есть две ямы, и обе мы прошли:
+# крупинка НА КАЖДУЮ ТОЧКУ читается телевизионным снегом (а линейный хеш вдобавок
+# рисует диагональную рябь), ровная же заливка — клеёнкой. Замер: у тела лиамоха
+# доля совершенно плоских мест дошла до 0.82 при 0.66 у верхней границы
+# настоящего пиксельарта. Верное между ними — ПЯТНА размером в несколько точек:
+# после укладки ступенями они дают острова соседних тонов, то есть ту самую
+# фактуру, какую рисуют рукой.
+func _blobs(x: int, y: int, cells: int, seed: int) -> float:
+	var fx: float = float(x) / float(TILE) * float(cells)
+	var fy: float = float(y) / float(TILE) * float(cells)
+	var x0: int = int(floorf(fx))
+	var y0: int = int(floorf(fy))
+	var tx: float = fx - float(x0)
+	var ty: float = fy - float(y0)
+	tx = tx * tx * (3.0 - 2.0 * tx)
+	ty = ty * ty * (3.0 - 2.0 * ty)
+	var at := func(ax: int, ay: int) -> float:
+		return _hash01(posmod(ax, cells) * 374761393
+			+ posmod(ay, cells) * 668265263 + seed * 1442695041)
+	return lerpf(lerpf(at.call(x0, y0), at.call(x0 + 1, y0), tx),
+		lerpf(at.call(x0, y0 + 1), at.call(x0 + 1, y0 + 1), tx), ty)
 
 
 func _hash01(n: int) -> float:
@@ -1001,7 +1073,7 @@ func _moss(img: Image, ox: int, oy: int, s: int, kind: int,
 	var base := Color(0.33, 0.47, 0.22).lerp(Color(0.29, 0.42, 0.19), age)
 	var gp: PackedColorArray = _palette(rec)["green"]
 	var sh: int = int(round(age * 2.0))
-	_finish(img, ox, oy, lv, _slice(gp, 2 - sh, 9 - sh), 0.16, 2)
+	_finish(img, ox, oy, lv, _slice(gp, 2 - sh, 9 - sh), 0.16, 2, 1)
 	_finish(img, ox, oy, rust, _palette(rec)["rust"], 0.0, 0)
 
 
@@ -1141,7 +1213,7 @@ func _body(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator,
 	# высота берётся из яркости, — и клетчатый порог превратил бы ровный склон в
 	# частокол игл. Чистка одиночек, наоборот, включена: без неё образец читался
 	# рябью (склейка 0.36 при норме 0.55).
-	_finish(img, ox, oy, lv, _slice(gp2, 2 - sh2, 8 - sh2), 0.0, 1)
+	_finish(img, ox, oy, lv, _slice(gp2, 2 - sh2, 8 - sh2), 0.0, 1, 0, true)
 
 
 # --- КОРА: волокно вдоль стебля ---------------------------------------------
@@ -1178,7 +1250,7 @@ func _bark(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator,
 				0.0, 1.0)
 	# Волокно идёт СТОЛБЦАМИ, и клетчатый порог рвал бы их поперёк. Поэтому у
 	# коры дизеринга нет вовсе, а одиночки чистятся: волокно — это полосы.
-	_finish(img, ox, oy, lv, _palette(rec)["bark"], 0.0, 1)
+	_finish(img, ox, oy, lv, _palette(rec)["bark"], 0.0, 1, 0, true)
 
 
 # --- ЛИСТ ЛИАНЫ: три формы, ступенчатая окраска -------------------------------
@@ -1212,14 +1284,13 @@ func _leaf(img: Image, ox: int, oy: int, s: int, kind: int,
 		_:
 			_leaf_grape(lv, age, kind, wob_a, wob_b, rec)
 	# Каёмка была у листа и прежде: без неё два листа внахлёст сливаются в одно
-	# зелёное пятно. Теперь она наводится по силуэту, а не по расстоянию до
-	# края, — оттого ложится ровно в одну точку толщиной.
-	_rim(lv, 0.30 * rec["edge"], false)
+	# зелёное пятно. Наводится она теперь ВНУТРИ `_finish`, после чистки, и
+	# меряется ступенями пандуса.
 
 	var base := Color(0.31, 0.44, 0.20).lerp(Color(0.26, 0.37, 0.17), age)
 	var gp3: PackedColorArray = _palette(rec)["green"]
 	var sh3: int = int(round(age * 2.0))
-	_finish(img, ox, oy, lv, _slice(gp3, 2 - sh3, 8 - sh3), 0.26)
+	_finish(img, ox, oy, lv, _slice(gp3, 2 - sh3, 8 - sh3), 0.26, 1, 2)
 
 
 # Виноградный: пять лопастей, вырез у черешка, зубчатый край.
@@ -1281,7 +1352,12 @@ func _leaf_grape(lv: PackedFloat32Array, age: float, kind: int,
 			var up: float = clampf((base_y - py) / maxf(rad * 1.4, 1.0), 0.0, 1.0)
 			var level: float = 0.10 + 0.60 * clampf(up * 1.55, 0.0, 1.0)
 			if far > edge * 0.55:
-				level += 0.28 * (far / edge - 0.55) / 0.45
+				level += 0.28 * (far / edge - 0.55) / 0.45 \
+					+ 0.12 * (-dx / maxf(edge, 0.001))
+			# ОДИН СВЕТ НА ВЕСЬ ЛИСТ. Прежде боковую подсветку имел только
+			# лепесток, а лист светился ровно от середины к краю — на кадре лист
+			# и цветок одной лозы оказывались освещены по-разному. Свет идёт
+			# сверху-слева у всех.
 			level += _vein(Vector2(px, py), Vector2(base_x, base_y), tips,
 				far / maxf(edge, 0.001))
 			lv[y * TILE + x] = clampf(level, 0.0, 1.0)
@@ -1328,7 +1404,12 @@ func _leaf_ivy(lv: PackedFloat32Array, age: float, kind: int,
 			var up: float = clampf((base_y - py) / maxf(rad * 1.4, 1.0), 0.0, 1.0)
 			var level: float = 0.10 + 0.60 * clampf(up * 1.55, 0.0, 1.0)
 			if far > edge * 0.5:
-				level += 0.26 * (far / edge - 0.5) / 0.5
+				level += 0.26 * (far / edge - 0.5) / 0.5 \
+					+ 0.12 * (-dx / maxf(edge, 0.001))
+			# ОДИН СВЕТ НА ВЕСЬ ЛИСТ. Прежде боковую подсветку имел только
+			# лепесток, а лист светился ровно от середины к краю — на кадре лист
+			# и цветок одной лозы оказывались освещены по-разному. Свет идёт
+			# сверху-слева у всех.
 			level += _vein(Vector2(px, py), Vector2(base_x, base_y), tips,
 				far / maxf(edge, 0.001))
 			lv[y * TILE + x] = clampf(level, 0.0, 1.0)
@@ -1404,31 +1485,6 @@ func _vein(p: Vector2, a: Vector2, tips: Array, out: float) -> float:
 	return 0.17 * best
 
 
-# КАЁМКА ПО СИЛУЭТУ. Точка, у которой сосед пуст или за краем клетки, темнеет на
-# `deep` ступени. Нижний край не в счёт: им фигурка растёт из тела, и каёмка там
-# рисовала бы черту поперёк стыка. `all_sides` включает и низ — для образцов,
-# у которых низ такой же край, как прочие.
-func _rim(lv: PackedFloat32Array, deep: float, all_sides: bool) -> void:
-	var was := lv.duplicate()
-	for y in range(TILE):
-		for x in range(TILE):
-			var p: int = y * TILE + x
-			if was[p] < 0.0:
-				continue
-			var edge := false
-			for n in [[1, 0], [-1, 0], [0, 1], [0, -1]]:
-				var nx: int = x + int(n[0])
-				var ny: int = y + int(n[1])
-				if ny >= TILE and not all_sides:
-					continue
-				if nx < 0 or nx >= TILE or ny < 0 or ny >= TILE \
-						or was[ny * TILE + nx] < 0.0:
-					edge = true
-					break
-			if edge:
-				lv[p] = maxf(0.0, was[p] - deep)
-
-
 # --- ЛЕПЕСТОК: узкое донце, круглый свободный край ---------------------------
 # --- ЛЕПЕСТОК: узкое донце, круглый свободный край ---------------------------
 #
@@ -1490,7 +1546,6 @@ func _bloom(img: Image, ox: int, oy: int, s: int, kind: int,
 			if side > 0.55:
 				level -= 0.34 * (side - 0.55) / 0.45
 			lv[y * TILE + x] = clampf(level, 0.0, 1.0)
-	_rim(lv, 0.16, false)
 
 	# Чистый белый не берём — на солнце он выжигается в плоское пятно без формы.
 	# Цветок ТЕПЛЕЕТ к свету, потому сдвиг тона у него со знаком плюс: у зелени
@@ -1498,7 +1553,7 @@ func _bloom(img: Image, ox: int, oy: int, s: int, kind: int,
 	var base := Color(0.55, 0.60, 0.38).lerp(Color(0.88, 0.86, 0.72), open)
 	var bp: PackedColorArray = _palette(rec)["bloom"]
 	var lo: int = int(round((1.0 - open) * 2.0))
-	_finish(img, ox, oy, lv, _slice(bp, lo, lo + 5), 0.10, 2)
+	_finish(img, ox, oy, lv, _slice(bp, lo, lo + 5), 0.10, 2, 0)
 
 
 # --- ТЕЛО ЛИАМОХА: светлые волоски по тёмному основанию ----------------------
@@ -1512,12 +1567,14 @@ func _lia_body(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator,
 	var lv := _field()
 	for y in range(TILE):
 		for x in range(TILE):
-			# ОСНОВАНИЕ РОВНОЕ. Крупинка на точку тут не нужна вовсе: рисунок
-			# делают волоски. А линейный хеш (x·7919 + y·104729) при укладке
-			# ступенями рисует ДИАГОНАЛЬНУЮ РЯБЬ — на кадре она читалась
-			# плетёнкой поверх пуха. Всякий хеш, линейный по координатам, этим
-			# грешит; лечится не подбором множителей, а отказом от ряби.
-			lv[y * TILE + x] = 0.26
+			# ОСНОВАНИЕ ПЯТНАМИ. Крупинка на точку читалась снегом, а линейный
+			# хеш вдобавок рисовал диагональную рябь; ровная же заливка сделала
+			# образец плоским на 0.82 при верхней границе живого пиксельарта
+			# 0.66. Две волны пятен — покрупнее и помельче — дают острова
+			# соседних тонов: это и есть фактура.
+			var patch: float = _blobs(x, y, 8, s * 13 + 1) * 0.55 \
+				+ _blobs(x, y, 16, s * 13 + 7) * 0.45
+			lv[y * TILE + x] = clampf(0.10 + patch * 0.40, 0.0, 1.0)
 	# ВОЛОСКОВ ВДВОЕ МЕНЬШЕ, ЗАТО КАЖДЫЙ ВИДЕН. Сотня волосков в одну точку
 	# толщиной — это не мех, а шум: у референсов пятно среднее 5.4 точки, у нас
 	# было 1.0. Пиксельарт рисует пучки, а не ворсинки поштучно.
@@ -1558,16 +1615,21 @@ func _lia_body(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator,
 			# край, обязан войти с другой стороны.
 			var hot: float = clampf(0.44 + tip * (0.35 + 0.65 * t) * 2.4, 0.0, 1.0)
 			# Волосок не тоньше двух точек — иначе он пропадает при первом же
-			# уменьшении, а на образце читается сором.
-			for w in range(2):
-				var q: int = posmod(py + w, TILE) * TILE + posmod(px, TILE)
-				lv[q] = maxf(lv[q], hot if w == 0 else hot - 0.14)
+			# уменьшении. Вторую точку кладём ПОПЕРЁК волоска: прежде она всегда
+			# ложилась снизу, и у стоячего волоска попадала на его же следующий
+			# шаг — то есть больше половины пуха так и оставалась в одну точку.
+			var side_x: int = 1 if absf(sin(a)) > absf(cos(a)) else 0
+			var side_y: int = 0 if side_x == 1 else 1
+			lv[posmod(py, TILE) * TILE + posmod(px, TILE)] = maxf(
+				lv[posmod(py, TILE) * TILE + posmod(px, TILE)], hot)
+			var q2: int = posmod(py + side_y, TILE) * TILE + posmod(px + side_x, TILE)
+			lv[q2] = maxf(lv[q2], hot - 0.14)
 	# Волоскам чистка одиночек противопоказана: волосок в одну точку толщиной —
 	# это и есть рисунок, а не сор.
 	var gp4: PackedColorArray = _palette(rec)["green"]
 	var sh4: int = int(round(age * 1.0))
 	# Дизеринга нет по той же причине, что у тела мха: отсюда берётся рельеф.
-	_finish(img, ox, oy, lv, _slice(gp4, 4 - sh4, 10 - sh4), 0.0, 2)
+	_finish(img, ox, oy, lv, _slice(gp4, 4 - sh4, 10 - sh4), 0.0, 0, 0, true)
 
 
 # --- ВОРСИНКА ЛИАМОХА: пучок телом, зубцы силуэтом -------------------------
@@ -1635,5 +1697,4 @@ func _lia_fuzz(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator,
 		lv[y * TILE + TILE - 1] = -1.0
 	for x in range(TILE):
 		lv[x] = -1.0
-	_rim(lv, 0.20, false)
-	_finish(img, ox, oy, lv, _slice(_palette(rec)["green"], 3, 9), 0.10, 2)
+	_finish(img, ox, oy, lv, _slice(_palette(rec)["green"], 3, 9), 0.10, 2, 1)
