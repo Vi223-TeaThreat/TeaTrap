@@ -87,6 +87,12 @@ var erase_brush: int = 1          # ... и своя ширина у снятия
 # растят по-разному, и переключать одну ширину на каждом шаге — мука. Начинает
 # со средней: рост тычком в одну кочку — редкий случай, обычно ведут по куртине.
 var grow_brush: int = 2
+# И СВОЯ ШИРИНА У РАЗМЫВАНИЯ (решение пользователя 2026-09-01: «вынеси
+# „размыть“ в отдельную кисть»). Причина та же, что у снятия и роста, и для
+# размывания она даже острее: заглаживают им УЗКОЕ место — уступ, стык двух
+# насыпей, слишком крутой край, — а лепят широким. Пока ширина была общая с
+# лепкой, всякий переход к размыванию стоил двух лишних нажатий.
+var blur_brush: int = 1
 # РЕЖИМ СНЯТИЯ как состояние, а не как зажатая клавиша. На телефоне нет ни
 # Shift, ни боковых кнопок — там снятие нечем позвать, кроме переключателя.
 # На мыши он не мешает: Shift по-прежнему снимает поверх любого режима.
@@ -108,6 +114,7 @@ var speed_buttons: Array = []
 var brush_buttons: Array = []
 var erase_buttons: Array = []
 var grow_buttons: Array = []
+var blur_buttons: Array = []
 var mode_buttons: Array = []
 var time_scale: float = 1.0
 
@@ -288,7 +295,9 @@ func _ready() -> void:
 		else:
 			_seed_scene()
 		_game_on = true
-		_save_garden()
+		# СВЕЖИЙ ОСТРОВ ТОЖЕ НЕ ЗАПИСЫВАЕТСЯ САМ. Значит, пока она не нажала
+		# «сохранить», следующий запуск построит остров заново — по тому же
+		# зерну и с той же обстановкой, но без её сада. Это и есть её правило.
 
 
 # =============================================================================
@@ -323,10 +332,7 @@ func _new_island() -> void:
 	if FileAccess.file_exists(save_path):
 		DirAccess.remove_absolute(save_path)
 	get_tree().reload_current_scene()
-const SAVE_EVERY: float = 30.0
 var _game_on: bool = false
-var _save_in: float = SAVE_EVERY
-var _last_save: float = 0.0
 
 func _save_garden() -> void:
 	if not _game_on:
@@ -384,9 +390,12 @@ func _reset_garden() -> void:
 	get_tree().reload_current_scene()
 
 
-func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST:
-		_save_garden()
+# ПРИ ЗАКРЫТИИ ОКНА САД ТОЖЕ НЕ ПИШЕТСЯ. Здесь стояло сохранение; убрано
+# 2026-09-01 по её решению — «если кнопка не нажата, не сохраняй». Правило одно
+# на все случаи: половинчатое («по кнопке, но ещё и при выходе») было бы хуже
+# любого из двух — на него нельзя положиться ни в ту, ни в другую сторону.
+func _notification(_what: int) -> void:
+	pass
 
 
 # =============================================================================
@@ -557,11 +566,8 @@ func _process(delta: float) -> void:
 			fill_label.text = "остров достраивается — %d%%" % int(fill_done * 100.0)
 	if not _dirty_chunks.is_empty():
 		_flush_chunks_some()
-	if _game_on:
-		_save_in -= delta
-		if _save_in <= 0.0:
-			_save_in = SAVE_EVERY
-			_save_garden()
+	# САМ ПО СЕБЕ САД БОЛЬШЕ НЕ ПИШЕТСЯ. Здесь стоял таймер на полминуты; убран
+	# 2026-09-01 по её решению — «если кнопка не нажата, не сохраняй».
 
 
 func _apply_camera() -> void:
@@ -879,6 +885,8 @@ const BLUR: float = 0.34
 func _active_brush(erase: bool) -> int:
 	if PlantsData.is_care(current_tool):
 		return grow_brush
+	if current_tool == "smooth":
+		return blur_brush
 	return erase_brush if erase else brush
 
 
@@ -887,7 +895,10 @@ func _active_brush(erase: bool) -> int:
 # мазке, чтобы круг подсветки ужался вместе с ним: врущая подсветка хуже
 # неудобной кисти. Все три ширины при этом остаются на своих местах — уже
 # становятся все разом.
-const GROW_SMALLER: float = 1.5
+# ЕЩЁ УЖЕ 2026-09-01, по её слову «немного уменьши радиус действия кисти
+# роста»: 1.5 → 1.9, то есть радиус меньше ещё на пятую часть. Самая узкая
+# кисть роста стала 0.9 м вместо 1.1, самая широкая — 1.7 м вместо 2.2.
+const GROW_SMALLER: float = 1.9
 
 func _brush_radius(erase: bool = false) -> float:
 	var r: float = CELL_SPACING * (1.15 + 1.25 * float(_active_brush(erase)))
@@ -908,6 +919,15 @@ func _stroke(at: Vector3, radius: float, amount: float, material: String,
 # появляется и исчезает САМА, по уровню заполнения; куски метим на пересборку.
 # Общее для лепки и размывания: и то и другое двигает одно и то же поле.
 func _after_field_change(touched: Array) -> void:
+	# ПОДСВЕТКА УСТАРЕВАЕТ ВМЕСТЕ С ЗЕМЛЁЙ. Накладка под курсором — это КОПИЯ
+	# поверхности, собранная отдельным мешем и нарисованная просвечивающей. Она
+	# пересобиралась только при смене ЯЧЕЙКИ под прицелом, а при удержании кисти
+	# ячейка та же самая: земля под накладкой росла, а накладка оставалась от
+	# прежней формы — и торчала сквозь новую землю просвечивающими полотнищами.
+	#
+	# Это и есть «баги при мазке»: не двойной меш куска (тот вылечен), а вот эта
+	# застывшая копия. Помечаем её на пересборку всякий раз, когда поле тронуто.
+	frame_id = ""
 	for c in touched:
 		_touched_cells[c] = true
 		var full: bool = grid.fill_of(c) > 0.5
@@ -1356,6 +1376,7 @@ func _clear_toolbar() -> void:
 	brush_buttons.clear()
 	erase_buttons.clear()
 	grow_buttons.clear()
+	blur_buttons.clear()
 	mode_buttons.clear()
 
 
@@ -1566,8 +1587,69 @@ func _setup_toolbar() -> void:
 		grow_row.add_child(gb)
 		grow_buttons.append(gb)
 
+	# И У РАЗМЫВАНИЯ СВОЯ (решение пользователя 2026-09-01). Заглаживают узкое
+	# место, а лепят широким — общая ширина стоила двух нажатий на каждый переход.
+	var blur_row := HBoxContainer.new()
+	blur_row.add_theme_constant_override("separation", _chip_gap())
+	column.add_child(blur_row)
+	var blur_title := Label.new()
+	blur_title.text = "размыть "
+	blur_title.modulate = Color(1, 1, 1, 0.5)
+	blur_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
+	blur_row.add_child(blur_title)
+	for w in BRUSHES:
+		var lb := _list_button(UI_FONT_SMALL, true)
+		lb.pressed.connect(_set_blur_brush.bind(int(w["width"])))
+		blur_row.add_child(lb)
+		blur_buttons.append(lb)
+
 	_setup_time_panel(layer)
 	_refresh_toolbar()
+
+
+# =============================================================================
+#  СНИМОК ЭКРАНА
+# =============================================================================
+#
+# Кадр сохраняется В ПАПКУ «ИЗОБРАЖЕНИЯ» пользователя. Не в `user://` — оттуда
+# его в собранной демке никто не достанет, а снимок нужен ровно затем, чтобы им
+# поделиться.
+#
+# ПАНЕЛИ НА КАДР НЕ ПОПАДАЮТ. Для демо нужен сад, а не список инструментов;
+# прячем все слои поверх мира и подсветку курсора ровно на один кадр. Ждать
+# приходится `frame_post_draw`: снимок берётся с уже нарисованного кадра, и без
+# ожидания в него попало бы то, что мы только что спрятали.
+#
+# Имя со временем — чтобы снимки не затирали друг друга: за минуту их делают
+# десяток.
+func _save_shot() -> String:
+	var hidden: Array = []
+	for node in get_children():
+		if node is CanvasLayer and node.visible:
+			node.visible = false
+			hidden.append(node)
+	var cursor_was: bool = frame_node.visible
+	frame_node.visible = false
+	await RenderingServer.frame_post_draw
+	var img: Image = get_viewport().get_texture().get_image()
+	for node in hidden:
+		node.visible = true
+	frame_node.visible = cursor_was
+	if img == null:
+		return "не вышло"
+	var t: Dictionary = Time.get_datetime_dict_from_system()
+	var shot_name := "сад_%04d-%02d-%02d_%02d%02d%02d.png" % [t["year"], t["month"],
+		t["day"], t["hour"], t["minute"], t["second"]]
+	# Папка изображений есть не всегда (в вебе её нет вовсе) — тогда кладём
+	# рядом с сохранением сада, и это лучше, чем не сохранить ничего.
+	var dir: String = OS.get_system_dir(OS.SYSTEM_DIR_PICTURES)
+	var path: String = (dir + "/" + shot_name) if dir != "" else ("user://" + shot_name)
+	if img.save_png(path) != OK:
+		path = "user://" + shot_name
+		if img.save_png(path) != OK:
+			return "не вышло"
+	print("Снимок: ", path)
+	return "сохранён"
 
 
 # Время — своя панель у правого края, на той же высоте, что и список слева.
@@ -1602,6 +1684,39 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		sb.pressed.connect(_set_time_scale.bind(i))
 		row.add_child(sb)
 		speed_buttons.append(sb)
+
+	# СОХРАНИТЬ ПРОГРЕСС — РУКОЙ, И ТОЛЬКО РУКОЙ (решение пользователя
+	# 2026-09-01: «добавь кнопку „сохранить прогресс“; если она не нажата — не
+	# сохраняй»). Сам по себе сад больше не пишется ни разу: ни по таймеру, ни
+	# после мазка, ни при закрытии окна. Зато и не портится: пробуешь что
+	# угодно, а вернуться всегда есть куда.
+	var save_btn := _list_button(-1, true)
+	save_btn.text = " сохранить "
+	save_btn.tooltip_text = "Записать сад на диск. Само по себе не сохраняется"
+	save_btn.pressed.connect(func():
+		var was: bool = _game_on
+		_game_on = true
+		_save_garden()
+		_game_on = was
+		save_btn.text = " записано "
+		get_tree().create_timer(2.0).timeout.connect(func():
+			if is_instance_valid(save_btn):
+				save_btn.text = " сохранить "))
+	row.add_child(save_btn)
+
+	# СНИМОК ЭКРАНА — отдельной кнопкой (решение пользователя 2026-09-01,
+	# «критически важно для демо»). Кадр кладётся В ПАПКУ ИЗОБРАЖЕНИЙ
+	# пользователя, а не в user:// — из user:// его в демо никто не достанет.
+	var shot_btn := _list_button(-1, true)
+	shot_btn.text = " снимок "
+	shot_btn.tooltip_text = "Сохранить кадр в папку «Изображения»"
+	shot_btn.pressed.connect(func():
+		var mark: String = await _save_shot()
+		shot_btn.text = " %s " % mark
+		get_tree().create_timer(2.5).timeout.connect(func():
+			if is_instance_valid(shot_btn):
+				shot_btn.text = " снимок "))
+	row.add_child(shot_btn)
 
 	# НАЧАТЬ ЗАНОВО. Стирает сохранённый сад и перечитывает сцену. Действие
 	# необратимое, поэтому кнопка переспрашивает сама: первое нажатие меняет
@@ -1718,6 +1833,12 @@ func _set_grow_brush(width: int) -> void:
 	_refresh_toolbar()
 
 
+func _set_blur_brush(width: int) -> void:
+	blur_brush = width
+	frame_id = ""
+	_refresh_toolbar()
+
+
 func _set_erase_mode(on: bool) -> void:
 	erase_mode = on
 	frame_id = ""            # подсветка показывает ту кисть, которой сейчас работают
@@ -1739,6 +1860,9 @@ func _refresh_toolbar() -> void:
 		var growing: bool = grow_brush == int(BRUSHES[i]["width"])
 		grow_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if growing else " %s " % BRUSHES[i]["label"]
 		grow_buttons[i].modulate = Color(1, 1, 1, 1.0 if growing else 0.5)
+		var blurring: bool = blur_brush == int(BRUSHES[i]["width"])
+		blur_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if blurring else " %s " % BRUSHES[i]["label"]
+		blur_buttons[i].modulate = Color(1, 1, 1, 1.0 if blurring else 0.5)
 	for i in range(MODES.size()):
 		var now: bool = erase_mode == bool(MODES[i]["erase"])
 		mode_buttons[i].text = "[%s]" % MODES[i]["label"] if now else " %s " % MODES[i]["label"]
@@ -1936,12 +2060,8 @@ func _open_group() -> void:
 
 func _close_group() -> void:
 	_group = 0
-	# Мазок закончился — снимок. Не чаще раза в пять секунд: удержание рвёт
-	# группы часто, а снимок целого сада стоит десятки миллисекунд.
-	var now: float = float(Time.get_ticks_msec()) / 1000.0
-	if _game_on and now - _last_save > 5.0:
-		_last_save = now
-		_save_garden()
+	# ЗДЕСЬ СТОЯЛО СОХРАНЕНИЕ ПОСЛЕ КАЖДОГО МАЗКА. Убрано 2026-09-01: сад
+	# пишется только кнопкой «сохранить».
 
 
 func _hold_tick(delta: float) -> void:

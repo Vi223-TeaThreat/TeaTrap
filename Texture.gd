@@ -141,6 +141,11 @@ func _init() -> void:
 		_check()
 		quit()
 		return
+	# Забрать нарисованное от руки из её файла. Генератор при этом не работает.
+	if args.has("hand-from"):
+		_take_hand(str(args["hand-from"]), str(args.get("part", "")))
+		quit()
+		return
 	if args.has("hand"):
 		_hand_back()
 		quit()
@@ -405,6 +410,96 @@ func _freeze_hand() -> void:
 	keep.blit_rect(img, Rect2i(0, 0, take, TILE * STAGES), Vector2i.ZERO)
 	_save(keep, HAND)
 	print("Рукописный мох заморожен в art/moss_hand.png — он больше не тронется")
+
+
+# =============================================================================
+#  ЗАБРАТЬ НАРИСОВАННОЕ ОТ РУКИ  (`--hand-from=<файл> --part=<кто>`)
+# =============================================================================
+#
+#  Она рисует в КОПИИ листа-заготовки (свой файл, игра его не читает), а потом
+#  говорит, что готово. Дело этой команды — перенести нарисованные столбцы в
+#  игру, не тронув ничего другого.
+#
+#  ГЕНЕРАТОР ПРИ ЭТОМ НЕ ЗАПУСКАЕТСЯ ВОВСЕ, и это главное. Её решение 01.09.2026
+#  — «используй текстуры старые, не нагенерированные вчера»; пересборка листа
+#  рецептами вернула бы машинные картинки во все прочие столбцы. Поэтому
+#  столбцы кладутся ПРЯМО в `art/moss.png` поверх нынешнего, точка в точку.
+#
+#  Заодно они попадают в `art/moss_hand.png` — оттуда генератор их уже не
+#  тронет, если она когда-нибудь снова захочет им пользоваться.
+#
+#  СТОРОЖА ТЕ ЖЕ. Нарисованное проверяется на то же, на что и своя работа:
+#  полупрозрачные точки в вырезанной фигурке и заезд на край клетки (по краю
+#  дощечки картинка тянется от соседнего столбца, и на силуэте это черта чужого
+#  цвета). Отказ печатается, файл не трогается.
+func _take_hand(path: String, part: String) -> void:
+	if not PARTS.has(part):
+		print("Чью работу берём? --part=", ", ".join(PARTS.keys()))
+		return
+	var src := Image.load_from_file(ProjectSettings.globalize_path(path))
+	if src == null:
+		print("Файла ", path, " нет или он не читается")
+		return
+	if src.get_height() != TILE * STAGES:
+		print("Лист должен быть ", TILE * STAGES, " точек в высоту, а он ",
+			src.get_height())
+		return
+	var cols: Array = PARTS[part]["cols"]
+	var solid: bool = PARTS[part]["solid"]
+	var have: int = int(src.get_width() / TILE)
+	var bad := 0
+	var empty := 0
+	for c in cols:
+		var col: int = int(c)
+		if col >= have:
+			print("В файле нет столбца ", col + 1, " — он всего ", have, " шириной")
+			return
+		for s in range(STAGES):
+			var seen := 0
+			for x in range(TILE):
+				for y in range(TILE):
+					var p := src.get_pixel(col * TILE + x, s * TILE + y)
+					if p.a <= 0.02:
+						continue
+					seen += 1
+					if not solid:
+						if p.a < 0.98:
+							bad += 1
+						elif x == 0 or x == TILE - 1 or y == 0:
+							bad += 1
+			if seen == 0:
+				empty += 1
+	if bad > 0:
+		print("НЕ ВЗЯТО: сторожа насчитали ", bad,
+			" нарушений — полупрозрачные точки или заезд на край клетки")
+		return
+	if empty > 0:
+		print("ВНИМАНИЕ: пустых клеток ", empty,
+			" — в этих возрастах картинки не будет вовсе")
+	# В ИГРОВОЙ ЛИСТ — прямо, поверх нынешнего.
+	var art := Image.load_from_file(ProjectSettings.globalize_path(ART))
+	if art == null:
+		print("Игрового листа ", ART, " нет — брать некуда")
+		return
+	_save(art, PREV)
+	# И В ЗАМОРОЗКУ РУКИ. Файл мог быть узким (в нём только мховые столбцы) —
+	# расширяем до полного, недостающее остаётся прозрачным.
+	var hand := _hand_from_file()
+	var keep := Image.create(TILE * COLS, TILE * STAGES, false, Image.FORMAT_RGBA8)
+	keep.fill(Color(0, 0, 0, 0))
+	if hand != null:
+		keep.blit_rect(hand, Rect2i(0, 0, hand.get_width(), TILE * STAGES),
+			Vector2i.ZERO)
+	for c in cols:
+		var col: int = int(c)
+		var box := Rect2i(col * TILE, 0, TILE, TILE * STAGES)
+		art.blit_rect(src, box, Vector2i(col * TILE, 0))
+		keep.blit_rect(src, box, Vector2i(col * TILE, 0))
+	_save(art, ART)
+	_save(keep, HAND)
+	print("Взято от руки: «", PARTS[part]["ru"], "», столбцов ", cols.size(),
+		" — легли в art/moss.png и заморожены в art/moss_hand.png")
+	print("Прежний лист сохранён в art/moss_prev.png — один шаг отмены")
 
 
 func _hand_from_file() -> Image:
@@ -764,26 +859,8 @@ func _ramp(base: Color, steps: int, span: float, twist: float,
 	return out
 
 
-# Положить точку ступенью пандуса. `level` — доля от 0 (тень) до 1 (свет);
-# промежуток между ступенями закрывает клетчатый порог. Координаты берём
-# КЛЕТОЧНЫЕ, а не листовые: тогда узор порога у бесшовного образца стыкуется.
-func _lay(img: Image, ox: int, oy: int, x: int, y: int,
-		ramp: PackedColorArray, level: float, dither: float,
-		alpha: float = 1.0) -> void:
-	var top: int = ramp.size() - 1
-	var f: float = clampf(level, 0.0, 1.0) * float(top)
-	var i: int = int(floorf(f))
-	var frac: float = f - float(i)
-	if i >= top:
-		i = top
-		frac = 0.0
-	var gate: float = 0.5
-	if dither > 0.0:
-		var bay: float = (float(BAYER[y & 3][x & 3]) + 0.5) / 16.0
-		gate = lerpf(0.5, bay, clampf(dither, 0.0, 1.0))
-	var idx: int = clampi(i + (1 if frac > gate else 0), 0, top)
-	var c: Color = ramp[idx]
-	img.set_pixel(ox + x, oy + y, Color(c.r, c.g, c.b, alpha))
+# «Положить точку ступенью пандуса» (`_lay`) убрана 2026-09-01: её никто не
+# звал. Укладку ступеней делает `_finish` по готовому полю долей — см. ниже.
 
 
 # ПОЛЕ СТУПЕНЕЙ. Рисовальщик заполняет не картинку, а поле долей: −1 значит
