@@ -3206,7 +3206,6 @@ func _rock_cavity_report(reach: float) -> void:
 		snappedf(vals[int(vals.size() * 0.9)], 0.001), ", наибольшая ",
 		snappedf(vals[vals.size() - 1], 0.001),
 		" — покраска ждёт 0.12…0.36, ниже швов на кадре не увидеть")
-	_crack_line_report(reach)
 	_crack_depth_report(reach)
 
 
@@ -3237,7 +3236,11 @@ func _crack_depth_report(reach: float) -> void:
 		if grid.stone_of(j) <= 0.5 or grid.surface_gap(grid.seeds[j]) < 0.0:
 			continue
 		var here: Dictionary = grid.surface_near(grid.seeds[j])
-		var calm: Dictionary = grid.calm_surface_near(grid.seeds[j])
+		# СПРАШИВАЕМ СЕТКУ НАПРЯМУЮ, а не через `calm_surface_near`. Та нарочно
+		# отдаёт настоящую поверхность — растения ходят по ней (см. «Растения
+		# летали»), — и сравнение с самой собой давало ровный ноль. Мерка молча
+		# перестала мерить, и на кадре это было не видно никак.
+		var calm: Dictionary = grid.surface_near(grid.seeds[j], true)
 		if here.is_empty() or calm.is_empty():
 			continue
 		deep.append(Vector3(here["pos"]).distance_to(Vector3(calm["pos"])))
@@ -3253,36 +3256,6 @@ func _crack_depth_report(reach: float) -> void:
 		snappedf(deep[int(deep.size() * 0.9)] * 100.0, 0.1), " см, наибольшая ",
 		snappedf(deep[deep.size() - 1] * 100.0, 0.1),
 		" см — при глыбе в 6.5 м яма мельче десяти сантиметров на кадре не видна")
-
-
-# ЧТО ИЗ КАМНЯ ПОТЕМНЕЕТ. Величина в вершинах теперь говорит, насколько глубоко в
-# ЯДРЕ трещины сидит точка: ноль на теле, единица на самом дне. По ней шейдер и
-# кладёт тень, а порог у него `notch_core`.
-#
-# Спрашиваем два числа. Сколько камня попадёт под тень — на снимках обнажений на
-# трещины приходятся считаные проценты, и если тут выйдет треть, это уже не
-# трещины, а сетка. И сколько попадает в само углубление — эта доля много больше,
-# и такова цена решётки: раскрыв держит она, уже метра его не сделать.
-func _crack_line_report(reach: float) -> void:
-	var seen := 0
-	var inked := 0
-	var wide := 0
-	for c in grid.seeds_near(_cliff_focus, reach):
-		if grid.stone_of(c) <= 0.5 or grid.surface_gap(grid.seeds[c]) < 0.0:
-			continue
-		seen += 1
-		var d: float = grid.crack_line[int(c)]
-		if d > 0.55:
-			inked += 1                     # столько потемнеет: ядро трещины
-		if d > 0.08:
-			wide += 1                      # столько лежит в углублении
-	if seen == 0:
-		print("Ядро трещин: мерить нечего")
-		return
-	print("Ядро трещин: мест на камне ", seen, ", потемнеет ",
-		snappedf(100.0 * float(inked) / float(seen), 0.1), "%, в углублении ",
-		snappedf(100.0 * float(wide) / float(seen), 0.1),
-		"% — на снимках на трещины приходятся считаные проценты")
 
 
 # МЕСТО ДЛЯ ПРОВЕРОК — НА ЗЕМЛЕ, а не в воздухе над островом.
