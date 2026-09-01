@@ -207,7 +207,7 @@ func _ready() -> void:
 	# Все записанные числа сняты на эталонном зерне, стенды обязаны идти по нему.
 	var bench: bool = false
 	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
-			"--meetbench", "--rockbench"]:
+			"--meetbench", "--rockbench", "--scenebench"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	if not bench and FileAccess.file_exists(SEED_PATH):
@@ -257,6 +257,12 @@ func _ready() -> void:
 		# крутить числа встречи приходится по многу раз подряд.
 		await _fill_world()
 		_meet_stand()
+		get_tree().quit()
+	elif "--scenebench" in args:
+		# Новый остров: сколько он стоит и насколько разный. Сад не грузим и не
+		# пишем — стенд не должен трогать её сохранение.
+		await _fill_world()
+		await _scene_bench(args)
 		get_tree().quit()
 	elif "--rockbench" in args:
 		# Только камень, без растений: подбор облика идёт десятками прогонов.
@@ -776,14 +782,39 @@ func _flush_chunks() -> void:
 #
 # Коллизия — тот же меш. Это заодно чинит давнюю занозу: раньше по клику
 # ловилась нескруглённая ячейка, лежавшая снаружи видимой поверхности.
+#
+# УЗЕЛ ПЕРЕИСПОЛЬЗУЕТСЯ, А НЕ СОЗДАЁТСЯ ЗАНОВО. Кадр пользователя 2026-09-01:
+# «во время мазка просвечивает текстура, вылезают странные объекты, длится
+# крайне малое время».
+#
+# Причина была ровно здесь. `queue_free()` не убирает узел со сцены, а лишь
+# ставит его в очередь на конец кадра — и всё это время старый меш ПРОДОЛЖАЕТ
+# рисоваться. Новый добавлялся тут же, рядом. То есть один кадр в сцене висели
+# две почти совпадающие шкуры куска: где старая оказывалась снаружи новой, она
+# и вылезала, а где они совпадали в точности — дрались за глубину и мерцали.
+#
+# Один кадр на кусок; при удержании кисти куски пересобираются непрерывно, и
+# мерцание идёт всё время мазка. Лечится тем же приёмом, каким это давно
+# сделано у кочек: узел и тело остаются свои, меняется только меш.
 func _rebuild_chunk(chunk: Vector3i) -> void:
-	if chunk_nodes.has(chunk):
-		chunk_nodes[chunk].queue_free()
-		chunk_nodes.erase(chunk)
 	var lo: Vector3i = chunk * CHUNK_NODES
 	var hi: Vector3i = lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES)
 	var mesh: ArrayMesh = SurfaceScript.build(grid, lo, hi)
 	if mesh == null:
+		# Кусок опустел — убираем его СРАЗУ, а не в очередь: иначе он проживёт
+		# лишний кадр там, где земли уже нет.
+		if chunk_nodes.has(chunk):
+			var gone: Node = chunk_nodes[chunk]
+			remove_child(gone)
+			gone.queue_free()
+			chunk_nodes.erase(chunk)
+		return
+
+	if chunk_nodes.has(chunk):
+		var mi_old: MeshInstance3D = chunk_nodes[chunk]
+		mi_old.mesh = mesh
+		var col_old: CollisionShape3D = mi_old.get_child(0).get_child(0)
+		col_old.shape = mesh.create_trimesh_shape()
 		return
 
 	var mi := MeshInstance3D.new()
@@ -1571,17 +1602,6 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		sb.pressed.connect(_set_time_scale.bind(i))
 		row.add_child(sb)
 		speed_buttons.append(sb)
-
-	# ПЕРЕМОТКА. Не скорость, а действие: одно нажатие дарит саду тридцать
-	# игровых секунд, и они проливаются ускоренно (см. `fast_left` у растений).
-	# Работает и при «стоп» — это ответ на руку, как и кисть роста.
-	var ff := _list_button(-1, true)
-	ff.text = " +30с "
-	ff.tooltip_text = "Перемотать рост: сад проживёт тридцать секунд ускоренно"
-	ff.pressed.connect(func():
-		if plants != null:
-			plants.fast_left += 30.0)
-	row.add_child(ff)
 
 	# НАЧАТЬ ЗАНОВО. Стирает сохранённый сад и перечитывает сцену. Действие
 	# необратимое, поэтому кнопка переспрашивает сама: первое нажатие меняет
@@ -2629,6 +2649,26 @@ func _stone_surface_check(at: Vector3, reach: float) -> void:
 		int(e["spike_seam"]), "; резких за 45° всего ", int(e["sharp"]),
 		", на швах ", int(e["sharp_seam"]),
 		" — шов и край мазка лечатся разным")
+	# ГДЕ СИДЯТ РЕЗКИЕ РЁБРА: на нависании или на том, что смотрит вверх. Общая
+	# доля их прячет: одна и та же сотая доля на кровле незаметна, а на кромке
+	# нависания читается пилой.
+	var over: float = maxf(1.0, float(e["over_edges"]))
+	var up: float = maxf(1.0, float(e["up_edges"]))
+	print("Нависание камня: рёбер ", int(e["over_edges"]), ", резких за 45° — ",
+		snappedf(100.0 * float(e["over_sharp"]) / over, 0.01), "%, худшее ",
+		snappedf(float(e["over_worst"]), 0.1), "°; для сравнения на кровле ",
+		int(e["up_edges"]), " рёбер и ",
+		snappedf(100.0 * float(e["up_sharp"]) / up, 0.01),
+		"% резких — пильчатый край это перекос в пользу нависания")
+	# ПЛОСКИЕ ПЛИТЫ. Кадр: «образуются ромбовидные грубые структуры». Ромб — это
+	# не ребро, а СЛИПШАЯСЯ ПЛИТА: десятки треугольников, легших в одну
+	# плоскость. Ребро о ней не скажет ничего, поэтому меряем площадью.
+	print("Плиты камня: цельных ", int(e["plates"]), " на ",
+		snappedf(float(e["skin"]), 0.1), " кв.м шкуры; самая крупная ",
+		snappedf(float(e["plate_top"]), 0.01), " кв.м, а всё, что крупнее",
+		" квадратного метра, занимает ",
+		snappedf(100.0 * float(e["plate_big"]), 0.1),
+		"% камня — крупная плита и читается ромбом")
 
 
 # РЁБРА КАМНЯ, ПОРОЗНЬ ПО ЗНАКУ. Общая мерка «излом круче 45°» валит в одну кучу
@@ -2649,6 +2689,11 @@ func _stone_surface_check(at: Vector3, reach: float) -> void:
 # случайным.
 func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 	var faces: Dictionary = {}
+	# ПЛОЩАДЬ КАЖДОГО ТРЕУГОЛЬНИКА И ЕГО НОМЕР — для мерки плоских ПЛИТ (см.
+	# `_plate_stats`). Ребро говорит только «тут гладко», а ромб на кадре — это
+	# не ребро, а слипшаяся из многих треугольников плоская плита.
+	var tri_area := PackedFloat32Array()
+	var tri_up := PackedFloat32Array()
 	var idx := PackedInt32Array()
 	idx.resize(8)
 	var val := PackedFloat32Array()
@@ -2687,7 +2732,22 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 							tri[2]["p"] - tri[0]["p"])
 						if n.length() < 0.0000001:
 							continue
-						n = n.normalized()
+						var tid: int = tri_area.size()
+						tri_area.append(n.length() * 0.5)
+						# НОРМАЛЬ ЗДЕСЬ СМОТРЕЛА ВНУТРЬ, И ЗНАК РЁБЕР БЫЛ
+						# ПЕРЕВЁРНУТ. `wound` разворачивает треугольник под
+						# правило Godot — обход ПО ЧАСОВОЙ снаружи, — а у такого
+						# обхода векторное произведение смотрит ВНУТРЬ тела.
+						# Проверка же считала его наружным: «сосед ушёл туда,
+						# куда смотрит грань, — значит щель». С внутренней
+						# нормалью это правило меняет знак на обратный, и все
+						# годы вогнутые рёбра числились выпуклыми, а выпуклые
+						# вогнутыми.
+						#
+						# Разворачиваем один раз здесь — тогда и знак рёбер, и
+						# нависание считаются по одному честному наружу.
+						n = -n.normalized()
+						tri_up.append(n.y)
 						var mid: Vector3 = (tri[0]["p"] + tri[1]["p"]
 							+ tri[2]["p"]) / 3.0
 						# НА ШВЕ ЛИ ЭТОТ ТРЕУГОЛЬНИК. Без этого не отличить
@@ -2706,12 +2766,20 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
 								maxi(a, c2), maxi(b, d)]
 							if faces.has(key):
-								faces[key].append({"n": n, "c": mid, "s": on_seam})
+								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid})
 							else:
-								faces[key] = [{"n": n, "c": mid, "s": on_seam}]
+								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid}]
 	var out := {"edges": 0, "flat": 0, "cave_worst": 0.0, "ridge_worst": 0.0,
 		"cave_sharp": 0, "ridge_sharp": 0, "cave_bend": 0, "ridge_bend": 0,
-		"sharp": 0, "sharp_seam": 0, "spike": 0, "spike_seam": 0}
+		"sharp": 0, "sharp_seam": 0, "spike": 0, "spike_seam": 0,
+		"over_edges": 0, "over_sharp": 0, "over_worst": 0.0,
+		"up_edges": 0, "up_sharp": 0}
+	# СЛИПАНИЕ ПЛОСКИХ ТРЕУГОЛЬНИКОВ В ПЛИТЫ. Каждый сам себе плита, гладкое
+	# ребро их сливает. Обычный поиск с объединением.
+	var boss := PackedInt32Array()
+	boss.resize(tri_area.size())
+	for i in range(boss.size()):
+		boss[i] = i
 	for key in faces:
 		var list: Array = faces[key]
 		if list.size() != 2:
@@ -2727,6 +2795,21 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 		# рёбер плоских и сколько заломлено круче 20°.
 		if bend < 5.0:
 			out["flat"] = int(out["flat"]) + 1
+			_plate_join(boss, int(list[0]["t"]), int(list[1]["t"]))
+		# НАВИСАЮЩИЙ КРАЙ — ПОРОЗНЬ. Кадр пользователя: «слишком заострённый и
+		# пильчатый край нависающего над землёй камня». Общее число резких рёбер
+		# об этом молчит: их и так процент с небольшим, а весь вопрос в том, где
+		# они сидят. Нависанием считаем грань, смотрящую вниз.
+		var lean: float = (tri_up[int(list[0]["t"])] + tri_up[int(list[1]["t"])]) * 0.5
+		if lean < -0.15:
+			out["over_edges"] = int(out["over_edges"]) + 1
+			if bend > 45.0:
+				out["over_sharp"] = int(out["over_sharp"]) + 1
+			out["over_worst"] = maxf(float(out["over_worst"]), bend)
+		elif lean > 0.15:
+			out["up_edges"] = int(out["up_edges"]) + 1
+			if bend > 45.0:
+				out["up_sharp"] = int(out["up_sharp"]) + 1
 		# Резкие рёбра порознь: сколько их сидит НА ШВЕ между глыбами, а сколько
 		# в другом месте. Шов и край мазка лечатся разным, и валить их в одну
 		# кучу — значит крутить не тот винт.
@@ -2751,7 +2834,48 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 				out["ridge_bend"] = int(out["ridge_bend"]) + 1
 			if bend > 45.0:
 				out["ridge_sharp"] = int(out["ridge_sharp"]) + 1
+	# ПЛИТЫ. Складываем площадь по хозяину и смотрим на самые крупные: «ромб на
+	# камне» — это одна плоская плита в несколько метров, а не резкое ребро.
+	var plate: Dictionary = {}
+	var whole := 0.0
+	for t in range(boss.size()):
+		var r: int = _plate_boss(boss, t)
+		plate[r] = float(plate.get(r, 0.0)) + tri_area[t]
+		whole += tri_area[t]
+	var sizes := PackedFloat32Array()
+	for r in plate:
+		sizes.append(float(plate[r]))
+	sizes.sort()
+	sizes.reverse()
+	var big_share := 0.0
+	for s in sizes:
+		if s < 1.0:
+			break
+		big_share += s
+	out["plates"] = sizes.size()
+	out["plate_top"] = 0.0 if sizes.is_empty() else sizes[0]
+	out["plate_big"] = big_share / maxf(whole, 0.0001)
+	out["skin"] = whole
 	return out
+
+
+# Поиск с объединением: у каждой плиты один хозяин.
+func _plate_boss(boss: PackedInt32Array, t: int) -> int:
+	var r: int = t
+	while boss[r] != r:
+		r = boss[r]
+	while boss[t] != r:
+		var up: int = boss[t]
+		boss[t] = r
+		t = up
+	return r
+
+
+func _plate_join(boss: PackedInt32Array, a: int, b: int) -> void:
+	var ra: int = _plate_boss(boss, a)
+	var rb: int = _plate_boss(boss, b)
+	if ra != rb:
+		boss[rb] = ra
 
 
 # =============================================================================
@@ -2884,9 +3008,16 @@ func _seed_scene() -> void:
 		print("Сцена: чистое поле")
 		return
 	var started := Time.get_ticks_msec()
+	# МАЗКИ ОБСТАНОВКИ ИДУТ ПАЧКОЙ: последствия считаются один раз в конце.
+	# Между ними на мир никто не смотрит, а ложатся они друг на друга десятками.
+	grid.begin_batch()
 	if scene_id == "rocks":
 		_scene_rocks()
+	grid.end_batch()
+	var dabbed := Time.get_ticks_msec() - started
+	var flushed := Time.get_ticks_msec()
 	_flush_chunks()
+	flushed = Time.get_ticks_msec() - flushed
 	# Считаем ячейки с породой: ноль значил бы, что мазки легли мимо земли, а по
 	# кадру это не отличить от «скалы просто мелкие».
 	var stony := 0
@@ -2912,7 +3043,133 @@ func _seed_scene() -> void:
 		snappedf(top - foot, 0.1), " м, отвесных мест ",
 		snappedf(100.0 * float(steep) / float(stony), 0.1),
 		"% — по ним и лазает лоза; поставлена за ",
-		Time.get_ticks_msec() - started, " мс")
+		Time.get_ticks_msec() - started, " мс, из них мазки ", dabbed,
+		" мс и пересборка мешей ", flushed, " мс")
+
+
+# =============================================================================
+#  СТЕНД ОСТРОВА  (`--scenebench`)
+# =============================================================================
+#
+#  Кнопка «новый остров» перечитывает сцену целиком: мир строится заново, потом
+#  на нём ставится обстановка. Её жалоба 2026-09-01 — «генерируется очень
+#  долго», и без разбивки по частям чинить тут нечего: непонятно, что дольше —
+#  сами семена, достройка мешей или расстановка скал.
+#
+#  Стенд строит НЕСКОЛЬКО островов подряд на разных зёрнах и печатает по
+#  каждому и время, и облик. Разные зёрна нужны не для красоты: она просила
+#  РАЗНООБРАЗИЯ, а разнообразие — это разброс между островами, и одним прогоном
+#  его не увидеть, как и у лозы.
+func _scene_bench(args: PackedStringArray) -> void:
+	var many: int = int(_arg_num(args, "--islands", 3.0))
+	var seed0: int = int(_arg_num(args, "--seed", float(WORLD_SEED + 1)))
+	scene_id = "rocks"
+	var total := 0
+	for n in range(many):
+		if n > 0:
+			world_seed = seed0 + n * 7919
+			for ch in chunk_nodes.keys():
+				var gone: Node = chunk_nodes[ch]
+				remove_child(gone)
+				gone.queue_free()
+			chunk_nodes.clear()
+			chunk_list.clear()
+			_dirty_chunks.clear()
+			_build_world()
+			await _fill_world()
+		var t0 := Time.get_ticks_msec()
+		_seed_scene()
+		total += Time.get_ticks_msec() - t0
+		_relief_report()
+		# ОБЛИК НАСТОЯЩИХ СКАЛ, а не пробной глыбы. Стенд камня лепит ком на
+		# ровном месте, и нависания у него ровно два ребра — а её кадр с
+		# пильчатым краем снят как раз с нависающей скалы. Здесь скалы те же,
+		# что в игре, и мерить их надо здесь.
+		var high := Vector3.ZERO
+		for c in solid:
+			if grid.stone_of(c) > 0.5 and grid.seeds[c].y > high.y:
+				high = grid.seeds[c]
+		if high != Vector3.ZERO:
+			_stone_surface_check(high, 5.0)
+	print("Стенд острова: ", many, " островов, обстановка в среднем ",
+		total / maxi(1, many), " мс — к ней прибавьте семена и достройку выше,",
+		" их платит всякий «новый остров»")
+
+
+# ОБЛИК САМОЙ ЗЕМЛИ, а не скал. Её слова: «пусть будут холмы (не пупырки, а
+# логичные холмы), ямы и так далее». Значит, мерить надо не «неровно ли», а
+# КРУПНАЯ ли неровность: пупырка от холма отличается размером, а не наличием.
+#
+# Меряем по видимой земле БЕЗ породы: высоту над средней и то, на скольких
+# метрах она набирается. Холм — это подъём, растянутый на метры; пупырка —
+# тот же подъём на одной ячейке.
+#
+# МЕРИМ КАРТУ ВЫСОТ ПО СТОЛБЦАМ, а не все видимые семена подряд. Семена ловят и
+# исподнюю сторону острова, и стенки — от них размах в шесть метров выходит
+# всегда, есть на острове холмы или нет. Столбец даёт ровно то, о чём речь:
+# какая высота у земли в этом месте.
+const RELIEF_STEP: float = 0.8    # шаг сетки замера, м
+
+func _relief_report() -> void:
+	var h: Dictionary = {}        # (i,j) -> высота земли
+	var ys := PackedFloat32Array()
+	var edge: float = ISLAND_RADIUS - 2.0
+	var wide: int = int(edge / RELIEF_STEP)
+	for i in range(-wide, wide + 1):
+		for j in range(-wide, wide + 1):
+			var x: float = float(i) * RELIEF_STEP
+			var z: float = float(j) * RELIEF_STEP
+			if Vector2(x, z).length() > edge:
+				continue
+			var at: Vector3 = _ground_at(x, z, ISLAND_BOTTOM)
+			if at == Vector3.ZERO:
+				continue
+			# Камень не земля: холмы мерим по земле, скалы уже сосчитаны выше.
+			var c: int = grid.cell_at(at)
+			if c >= 0 and grid.stone_of(c) > 0.02:
+				continue
+			h[Vector2i(i, j)] = at.y
+			ys.append(at.y)
+	if ys.size() < 16:
+		print("Земля: мерить нечего")
+		return
+	var mid := 0.0
+	for y in ys:
+		mid += y
+	mid /= float(ys.size())
+	var sorted := PackedFloat32Array(ys)
+	sorted.sort()
+	# ХОЛМ И ЯМА — ЭТО ПЛОЩАДЬ, А НЕ ВЫСШАЯ ТОЧКА. Одна кочка поднимет
+	# наибольшее и не сделает остров разнообразнее; холм — это заметная доля
+	# земли, поднятая над средней.
+	var up := 0
+	var down := 0
+	for y in ys:
+		if y > mid + 0.5:
+			up += 1
+		elif y < mid - 0.5:
+			down += 1
+	# КРУПНОСТЬ: на скольких метрах земля успевает подняться на полметра.
+	# Считаем по соседним столбцам — уклон, а не разброс.
+	var runs := PackedFloat32Array()
+	for key in h:
+		var k: Vector2i = key
+		var nb := Vector2i(k.x + 1, k.y)
+		if not h.has(nb):
+			continue
+		var dy: float = absf(float(h[nb]) - float(h[k]))
+		if dy < 0.02:
+			continue
+		runs.append(0.5 * RELIEF_STEP / dy)
+	runs.sort()
+	print("Земля: столбцов ", ys.size(), ", высота от ", snappedf(sorted[0], 0.01),
+		" до ", snappedf(sorted[sorted.size() - 1], 0.01), " м при средней ",
+		snappedf(mid, 0.01), "; выше средней на полметра — ",
+		snappedf(100.0 * float(up) / float(ys.size()), 0.1), "% земли (холмы),",
+		" ниже — ", snappedf(100.0 * float(down) / float(ys.size()), 0.1),
+		"% (ямы); на полметра подъёма приходится ",
+		snappedf(0.0 if runs.is_empty() else runs[runs.size() / 2], 0.01),
+		" м вширь — у холма это метры, у пупырки доли метра")
 
 
 # ПОЛЕ СО СКАЛАМИ. Несколько обнажений разной величины, разнесённых по острову.
@@ -2931,12 +3188,41 @@ const SCENE_NEAR: float = 4.5     # ближе этого к середине н
 const SCENE_FAR: float = 9.5      # и дальше этого тоже, м
 # Насколько высоки обнажения, в уровнях подъёма (уровень — 0.6 ячейки, то есть
 # 40 см). Разброс нужен: скалы одной высоты читаются забором.
-const SCENE_LOW: int = 3
-const SCENE_HIGH: int = 6
+const SCENE_LOW: int = 2
+const SCENE_HIGH: int = 4
+# КЛАССИЧЕСКАЯ ПОСТАНОВКА ОСТАЁТСЯ НА ПРЕЖНИХ ЧИСЛАХ, слово в слово: на ней
+# стоят все воспроизводимые кадры и записанные числа. Ускорение выше — только
+# для новых островов.
+const SCENE_RISE_OLD: float = 0.9
+const SCENE_LOW_OLD: int = 3
+const SCENE_HIGH_OLD: int = 6
 # На сколько ячеек поднимается каждый уровень.
-const SCENE_RISE: float = 0.9
+#
+# БЫЛО 0.9 (60 см), СТАЛО 2.4 (1.6 м) — 2026-09-01, её жалоба «новый остров
+# генерируется очень долго». Кисть сцены смотрит на 3.27 м, а шаг был 0.6 м: на
+# один свой поперечник ложилось ОДИННАДЦАТЬ мазков подряд. Столб набирался
+# честно, но десятикратно поверх самого себя, и вся цена острова уходила туда —
+# замер показал, что мазки это 95% времени обстановки.
+#
+# Больше 1.8 м шагать нельзя: мазки дальше `LUMP_MERGE` лепят РАЗНЫЕ глыбы, и
+# столб распался бы на висящие друг над другом камни. 1.6 м — под этим пределом.
+const SCENE_RISE: float = 2.4
 # Во сколько раз мазок сцены сильнее обычного: ей нужен готовый камень сразу.
-const SCENE_FORCE: float = 6.0
+const SCENE_FORCE: float = 9.0
+
+# ЗАПАС МАЗКОВ НА ОСТРОВ — ЯВНЫЙ, А НЕ СЛУЧАЙНЫЙ (2026-09-01).
+#
+# Прежде цену обстановки держала географическая случайность: гряда упиралась в
+# край макушки и обрывалась на полпути. Стоило починить поиск земли — и гряды
+# пошли во всю длину, а остров стал ставиться семь секунд вместо полутора.
+# Замерено: один мазок сцены стоит около 20 мс, и всё время обстановки — это
+# он, помноженный на своё число.
+#
+# Поэтому число мазков ограничено прямо. Разнообразие от этого не страдает: что
+# именно поставить в этот запас — по-прежнему решает случай, а вот сколько
+# ждать игроку, больше не решает никто.
+const SCENE_DABS: int = 14
+var _scene_dabs: int = 0
 
 func _scene_rocks() -> void:
 	var rng := RandomNumberGenerator.new()
@@ -2956,13 +3242,28 @@ func _scene_rocks() -> void:
 	#      земли вверх, мазок прибавляет к живому полю.
 	#   2. В скалах и земле бывают ямы, арки и гроты — их выедает мазок
 	#      снятия, тот же, что у руки; решётка держит проём шириной кисти.
-	var forms: int = rng.randi_range(2, 5)
+	# СПЕРВА ЗЕМЛЯ, ПОТОМ КАМЕНЬ: скалы встают на найденную землю, и лепить её
+	# после них значило бы поднимать холмы прямо сквозь скалу.
+	_scene_dabs = 0
+	_scene_relief(rng)
+	var forms: int = rng.randi_range(2, 3)
 	var turn: float = rng.randf_range(0.0, TAU)
 	for i in range(forms):
-		var ang: float = turn + TAU * float(i) / float(forms) \
-			+ rng.randf_range(-0.5, 0.5)
-		var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
-		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
+		if _scene_dabs >= SCENE_DABS:
+			break
+		# СКАЛА ВСТАЁТ НА ВОЗВЫШЕНИИ, А НЕ В ЯМЕ. Теперь, когда в земле есть
+		# настоящие ямы, случайная точка запросто попадает на дно одной из них —
+		# и мазки камня просто засыпают яму, не давая ни высоты, ни стены.
+		# Замер поймал это на острове с 43% ям: 80 ячеек породы и НИ ОДНОГО
+		# отвесного места. Пробуем три точки и берём самую высокую.
+		var at := Vector3.ZERO
+		for _try in range(3):
+			var ang: float = turn + TAU * float(i) / float(forms) \
+				+ rng.randf_range(-0.5, 0.5)
+			var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
+			var spot: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
+			if spot != Vector3.ZERO and (at == Vector3.ZERO or spot.y > at.y):
+				at = spot
 		if at == Vector3.ZERO:
 			continue
 		var kind: float = rng.randf()
@@ -2982,12 +3283,62 @@ func _scene_rocks() -> void:
 	brush = was_brush
 
 
+# ХОЛМЫ И ЯМЫ В САМОЙ ЗЕМЛЕ (её слова 2026-09-01: «поиграйся не только с
+# камнями, но и с землёй; пусть будут холмы — не пупырки, а логичные холмы, —
+# ямы и так далее»).
+#
+# ХОЛМ ОТ ПУПЫРКИ ОТЛИЧАЕТ ШИРИНА, А НЕ ВЫСОТА. Игровая кисть широка на 3.27 м,
+# и сколько ею ни води, выходит бугор в кисть шириной. Поэтому холм кладётся
+# ОДНИМ мазком заведомо большего радиуса — 4.5…7 м, вдвое шире самой широкой
+# кисти и в половину острова. Сила при этом убавляется обратно радиусу, тем же
+# правилом, что у руки (`_stroke_amount`): иначе широкий мазок упирается в
+# предел правок и холм угловатеет.
+#
+# ЯМА — ТОТ ЖЕ МАЗОК СО ЗНАКОМ МИНУС, и она тоже обязана быть широкой: узкая
+# яма в земле — это колодец, а решётка при ячейке 0.67 м держит только пологое.
+const SCENE_HILLS_LOW: int = 2    # сколько неровностей кладём, от и до
+const SCENE_HILLS_HIGH: int = 4
+const SCENE_HILL_NEAR: float = 3.5   # полуширина холма, м
+const SCENE_HILL_FAR: float = 5.5
+const SCENE_HILL_FORCE: float = 24.0 # во сколько раз сильнее обычного мазка
+const SCENE_HILL_UP: float = 0.70    # доля холмов; остальное — ямы
+
+func _scene_relief(rng: RandomNumberGenerator) -> void:
+	var many: int = rng.randi_range(SCENE_HILLS_LOW, SCENE_HILLS_HIGH)
+	for i in range(many):
+		var ang: float = rng.randf_range(0.0, TAU)
+		var far: float = rng.randf_range(1.5, ISLAND_RADIUS - 5.0)
+		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far, ISLAND_BOTTOM)
+		if at == Vector3.ZERO:
+			continue
+		var wide: float = rng.randf_range(SCENE_HILL_NEAR, SCENE_HILL_FAR)
+		# Сила обратна ширине — то же правило, что у руки.
+		var mass: float = STROKE * (CELL_SPACING * 2.4) / wide * SCENE_HILL_FORCE
+		# СЕРЕДИНА МАЗКА ЛЕЖИТ ВЫШЕ ЗЕМЛИ — И У ХОЛМА, И У ЯМЫ. Мазок правит поле
+		# в шаре своего радиуса, а радиус тут 4…7 м: посади середину на землю —
+		# и яма выйдет в полострова глубиной, а холм наполовину уйдёт внутрь.
+		# Подняв середину, мы оставляем земле только НИЖНИЙ КРАЙ шара, и глубина
+		# ямы получается той, на сколько он в неё вошёл.
+		#
+		# ХОЛМЫ ИДУТ ВНЕ ЗАПАСА НА СКАЛЫ: иначе на одном острове они съедали его
+		# целиком, и остров выходил без камня вовсе (замер: 80 ячеек породы).
+		var lift: float = wide * (0.45 if rng.randf() < SCENE_HILL_UP else 0.62)
+		if lift < wide * 0.5:
+			_stroke(at + Vector3(0, lift, 0), wide, mass, "ground", 0.0)
+		else:
+			_stroke(at + Vector3(0, lift, 0), wide, -mass, "", 0.0)
+
+
 # Одиночное обнажение: кучка столбов, как в классической постановке.
 func _scene_column(rng: RandomNumberGenerator, at: Vector3) -> void:
 	var dabs: int = rng.randi_range(1, 3)
 	for k in range(dabs):
-		var off := Vector3(rng.randf_range(-1.6, 1.6), 0.0,
-			rng.randf_range(-1.6, 1.6))
+		# СТОЛБЫ ОДНОГО ОБНАЖЕНИЯ ДОЛЖНЫ СЛИВАТЬСЯ. Разброс ±1.6 м разводил два
+		# столба на 3.2 м — вдвое дальше расстояния слияния, — и внутри одной
+		# скалы вырастал шов. Швы нужны между РАЗНЫМИ обнажениями, а не внутри
+		# одного: см. кадр про пильчатый край.
+		var off := Vector3(rng.randf_range(-0.8, 0.8), 0.0,
+			rng.randf_range(-0.8, 0.8))
 		_scene_tower(at + off, rng.randi_range(SCENE_LOW, SCENE_HIGH))
 
 
@@ -2995,7 +3346,7 @@ func _scene_column(rng: RandomNumberGenerator, at: Vector3) -> void:
 # произвольной формы. С аркой или гротом: в готовое тело бьёт мазок снятия —
 # насквозь понизу выходит арка, вбок на средней высоте — грот.
 func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void:
-	var links: int = rng.randi_range(3, 6)
+	var links: int = rng.randi_range(2, 3)
 	var dir: float = rng.randf_range(0.0, TAU)
 	var head: Vector3 = at
 	var spine: Array = []
@@ -3006,7 +3357,19 @@ func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void
 		spine.append(ground)
 		_scene_tower(ground, rng.randi_range(SCENE_LOW, SCENE_HIGH))
 		dir += rng.randf_range(-0.7, 0.7)
-		head = ground + Vector3(cos(dir), 0.0, sin(dir)) * rng.randf_range(1.8, 2.6)
+		# ШАГ ГРЯДЫ ДЕРЖИМ ПОД РАССТОЯНИЕМ СЛИЯНИЯ (1.8 м), и это её кадр 2:
+		# «слишком заострённый и пильчатый край нависающего камня».
+		#
+		# Замер на настоящих скалах: 79 резких рёбер из 116 сидят НА ШВАХ между
+		# глыбами, а под нависанием резких вчетверо больше, чем на кровле
+		# (13.6% против 5.6%). Шов между глыбами вогнут по своей природе — на
+		# кровле он читается складкой, а под нависающим краем свет туда не
+		# доходит вовсе, и складка становится чёрным зубцом.
+		#
+		# Прежний шаг 1.8…2.6 м перешагивал расстояние слияния, и гряда выходила
+		# ЦЕПОЧКОЙ ОТДЕЛЬНЫХ ГЛЫБ со швом между каждой парой. Теперь она одно
+		# тело, и швов в ней нет вовсе.
+		head = ground + Vector3(cos(dir), 0.0, sin(dir)) * rng.randf_range(1.15, 1.7)
 	if not hollow or spine.size() < 2:
 		return
 	var mid: Vector3 = spine[spine.size() / 2]
@@ -3026,15 +3389,18 @@ func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void
 
 # Столб камня от земли вверх — только от найденной земли: скала не появляется
 # в воздухе по построению.
-func _scene_tower(at: Vector3, up: int) -> void:
+func _scene_tower(at: Vector3, up: int, rise: float = SCENE_RISE) -> void:
 	var head: Vector3 = at
 	for level in range(up + 1):
+		if _scene_dabs >= SCENE_DABS:
+			return
 		var cell: int = grid.cell_at(head
-			+ Vector3(0, CELL_SPACING * SCENE_RISE, 0))
+			+ Vector3(0, CELL_SPACING * rise, 0))
 		if cell < 0 or not grid.in_play(cell):
 			break
 		head = grid.seeds[cell]
 		var mass: float = _stroke_amount() * SCENE_FORCE
+		_scene_dabs += 1
 		_stroke(head, _brush_radius(), mass, "cliff",
 			_stone_push(mass, "cliff"))
 
@@ -3060,24 +3426,68 @@ func _scene_rocks_classic(rng: RandomNumberGenerator) -> void:
 		for k in range(dabs):
 			var off := Vector3(rng.randf_range(-1.6, 1.6), 0.0,
 				rng.randf_range(-1.6, 1.6))
-			_scene_tower(at + off, rng.randi_range(SCENE_LOW, SCENE_HIGH))
+			_scene_tower(at + off, rng.randi_range(SCENE_LOW_OLD, SCENE_HIGH_OLD),
+				SCENE_RISE_OLD)
 
 
 # Точка на видимой земле над заданным местом. Ноль значит «там земли нет».
-func _ground_at(x: float, z: float) -> Vector3:
-	var best := INF
-	var at := Vector3.ZERO
-	for i in range(grid.seeds.size()):
-		if not grid.in_play(i) or absf(grid.fill_of(i) - 0.5) > 0.08:
-			continue
-		var p: Vector3 = grid.seeds[i]
-		if p.y < 0.0:
-			continue
-		var d: float = Vector2(p.x - x, p.z - z).length_squared()
-		if d < best:
-			best = d
-			at = p
-	return at
+#
+# ИЩЕМ В СТОЛБЦЕ, А НЕ ПО ВСЕМУ ОСТРОВУ (2026-09-01, её кадр «новый остров
+# генерируется очень долго»).
+#
+# Прежде эта строка перебирала ВСЕ семена мира — их пятьдесят две тысячи, — и
+# делала это на каждое звено гряды, на каждый столб и на каждую яму. Полсотни
+# вызовов на остров, и каждый обходит весь мир.
+#
+# Сетка и так умеет искать рядом (`seeds_near` идёт по пространственной
+# разбивке). Спускаемся по столбцу сверху вниз шагами в ячейку и берём первое
+# же поверхностное семя — это заодно ВЕРНЕЕ прежнего: прежний брал ближайшее по
+# горизонтали и мог сесть на дно ямы вместо её кромки.
+#
+# ИЩЕМ ВЕРХНЮЮ ЗАПОЛНЕННУЮ ЯЧЕЙКУ, А НЕ «ПОЧТИ РОВНО ПОЛОВИНУ». Прежнее условие
+# «заполнение отличается от половины не больше чем на 0.08» — это узкая щёлка, и
+# в столбце такого семени может не оказаться вовсе: семена разбросаны, уровень
+# 0.5 проходит между ними. По всему острову оно всегда находилось, а в столбце —
+# нет, и остров тогда выходил БЕЗ СКАЛ ВООБЩЕ. Верхняя заполненная ячейка есть
+# в каждом столбце, где есть земля.
+func _ground_at(x: float, z: float, floor_y: float = -0.8) -> Vector3:
+	# `floor_y` — НИЖЕ ЭТОГО ЗЕМЛЮ НЕ БЕРЁМ, и у двух дел оно разное.
+	#
+	# СКАЛЫ стоят на макушке острова: floor_y = 0. Так было всегда, и это не
+	# случайность — остров идёт от −3.5 до +2.5, выше нуля у него одна макушка, а
+	# скала у самой кромки читается вылезшей из-под воды. Замер: сними отсечку —
+	# и обстановка дорожает вчетверо (1.0 с против 4.6 с), потому что гряды
+	# перестают упираться в край и растут во всю длину.
+	#
+	# ХОЛМЫ И ЯМЫ, наоборот, идут по ВСЕМУ острову: им скатов бояться нечего, а
+	# на одной макушке они выходят кучей в середине.
+	var step: float = CELL_SPACING
+	var y: float = ISLAND_TOP + HEADROOM
+	while y > ISLAND_BOTTOM - step:
+		var best := INF
+		var at := Vector3.ZERO
+		for i in grid.seeds_near(Vector3(x, y, z), step * 1.2):
+			if not grid.in_play(i) or grid.fill_of(i) < 0.5:
+				continue
+			var p: Vector3 = grid.seeds[i]
+			if p.y < floor_y:
+				continue
+			var d: float = Vector2(p.x - x, p.z - z).length_squared()
+			if d < best:
+				best = d
+				at = p
+		if at != Vector3.ZERO:
+			return at
+		y -= step
+	# НЕ НАШЛИ ВЫШЕ ПОРОГА — ИЩЕМ БЕЗ НЕГО. Порог это предпочтение, а не запрет:
+	# скалам лучше стоять на макушке, но если холмы и ямы срезали её в этом
+	# месте, лучше поставить скалу ниже, чем не поставить вовсе. Замер поймал
+	# ровно это: остров с большими ямами выходил с 80 ячейками породы и без
+	# единого отвесного места. Цену держит запас мазков (`SCENE_DABS`), а не
+	# география.
+	if floor_y > ISLAND_BOTTOM:
+		return _ground_at(x, z, ISLAND_BOTTOM)
+	return Vector3.ZERO
 
 
 func _seed_massif(at: Vector3, wide: int, levels: int) -> void:
@@ -3194,9 +3604,14 @@ func _arg_word(args: PackedStringArray, name: String, fallback: String) -> Strin
 # они останутся серой ложбиной на сером теле.
 func _rock_cavity_report(reach: float) -> void:
 	var vals := PackedFloat32Array()
+	var turf := PackedFloat32Array()
 	for c in grid.seeds_near(_cliff_focus, reach):
-		if grid.stone_of(c) > 0.5 and grid.surface_gap(grid.seeds[c]) >= 0.0:
+		if grid.surface_gap(grid.seeds[c]) < 0.0:
+			continue
+		if grid.stone_of(c) > 0.5:
 			vals.append(grid.cavity_of(c))
+		else:
+			turf.append(grid.cavity_of(c))
 	if vals.is_empty():
 		print("Впадина на камне: мерить нечего")
 		return
@@ -3206,7 +3621,43 @@ func _rock_cavity_report(reach: float) -> void:
 		snappedf(vals[int(vals.size() * 0.9)], 0.001), ", наибольшая ",
 		snappedf(vals[vals.size() - 1], 0.001),
 		" — покраска ждёт 0.12…0.36, ниже швов на кадре не увидеть")
+	_turf_cavity_report(turf)
 	_crack_depth_report(reach)
+
+
+# ТА ЖЕ ВПАДИНА, НО У ПОДОШВЫ — НА ЗЕМЛЕ, А НЕ НА КАМНЕ.
+#
+# Кадр пользователя 2026-09-01: «слишком тёмный переход между камнем и землёй».
+# Стык камня с землёй ВОГНУТ по построению, а затенение щели (`hollow`, `slot` в
+# `Terrain.gdshader`) идёт по одной впадине и про породу не спрашивает вовсе —
+# то есть самое глубокое затенение, до трети яркости, ложится на ТРАВУ.
+#
+# Ровно эти грабли уже записаны в шейдере рядом: «всё, что касается камня,
+# обязано спрашивать `stone`». Здесь они повторились в другом месте.
+#
+# Мерка честная: спрашиваем впадину у видимых мест БЕЗ породы в округе глыбы и
+# считаем, сколько из них переваливает пороги затенения. Шейдер вдобавок сыплет
+# на впадину шум ±0.085, так что до порога дотягивается и то, что чуть ниже.
+func _turf_cavity_report(turf: PackedFloat32Array) -> void:
+	if turf.is_empty():
+		print("Впадина у подошвы: мерить нечего")
+		return
+	turf.sort()
+	var dim := 0        # переваливших порог складки (0.08)
+	var dark := 0       # ... и порог щели (0.30) — самое глубокое затенение
+	for v in turf:
+		if v > 0.08:
+			dim += 1
+		if v > 0.30:
+			dark += 1
+	print("Впадина у подошвы (земля, не камень): мест ", turf.size(),
+		", середина ", snappedf(turf[turf.size() / 2], 0.001),
+		", наибольшая ", snappedf(turf[turf.size() - 1], 0.001),
+		"; за порог складки (0.08) вышло ", dim, " мест (",
+		snappedf(float(dim) / float(turf.size()) * 100.0, 0.1),
+		"%), за порог щели (0.30) — ", dark, " (",
+		snappedf(float(dark) / float(turf.size()) * 100.0, 0.1),
+		"%) — щель на траве это и есть тёмная кайма у подошвы")
 
 
 # ЧЕРТА ТРЕЩИНЫ ГЛАЗАМИ ЧИСЕЛ. Сама черта рисуется краской, и на кадре её видно,
@@ -3679,6 +4130,17 @@ func _vine_grown_check() -> void:
 		snappedf(float(big["wide"]) * 100.0, 0.1), " см, подъём ",
 		snappedf(float(big["tall"]) * 100.0, 0.1), " см, на камне ",
 		snappedf(float(big["rock"]) / links * 100.0, 0.1), "% звеньев")
+	# ОДРЕВЕСНЕНИЕ ПО ПОКОЛЕНИЯМ — правило пользователя «дочерна деревенеют
+	# только первые поколения». Печатаем звенья и одревесневшие ПОРОЗНЬ по
+	# поколениям: одно общее число тут ничего не скажет, вся суть в том, где
+	# волна остановилась.
+	var wood_line := ""
+	for k in range(big["by_order"].size()):
+		var was: int = int(big["by_order"][k])
+		var got: int = int(big["wood_order"][k])
+		wood_line += "%s%d: %d из %d" % ["; " if k > 0 else "", k + 1, got, was]
+	print("Лиана взрослая: одревеснело дочерна по поколениям — ", wood_line,
+		" — деревенеть должны только первые, дальше зелёный облиственный побег")
 	# ЗАСТРЯЛА ЛИ ХОТЬ ОДНА. Средние числа прячут беду: одна плеть в полсотни
 	# звеньев и три по пять дают то же «в среднем четырнадцать».
 	print("Лианы порознь: корней — ", big["roots"], ", у самой бедной ",

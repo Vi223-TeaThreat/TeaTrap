@@ -65,9 +65,20 @@ func remove_at(key: Vector3i) -> bool:
 	if not props.has(key):
 		return false
 	if props[key]["node"] != null:
-		props[key]["node"].queue_free()
+		_drop(props[key]["node"])
 	props.erase(key)
 	return true
+
+
+# Убрать узел со сцены СЕЙЧАС, а освободить память потом. Одно место на все
+# случаи: пока узел висит в дереве, он рисуется, чем бы его ни заменили.
+func _drop(node: Node) -> void:
+	if node == null:
+		return
+	var parent: Node = node.get_parent()
+	if parent != null:
+		parent.remove_child(node)
+	node.queue_free()
 
 
 func has_prop(key: Vector3i) -> bool:
@@ -104,7 +115,7 @@ func surface_changed() -> void:
 			doomed.append(key)
 	for key in doomed:
 		if props[key]["node"] != null:
-			props[key]["node"].queue_free()
+			_drop(props[key]["node"])
 		props.erase(key)
 	for key in props:
 		_rebuild(key)
@@ -116,7 +127,12 @@ func surface_changed() -> void:
 func _rebuild(key: Vector3i) -> void:
 	var entry: Dictionary = props[key]
 	if entry["node"] != null:
-		entry["node"].queue_free()
+		# СНИМАЕМ СО СЦЕНЫ СРАЗУ. `queue_free` откладывает удаление до конца
+		# кадра, и всё это время старый кусочек рисуется рядом с новым. А
+		# `surface_changed` зовётся на КАЖДЫЙ мазок и пересобирает все кусочки —
+		# то есть при удержании кисти они двоились непрерывно. Кадр
+		# пользователя 2026-09-01: «вылезают странные объекты».
+		_drop(entry["node"])
 		entry["node"] = null
 
 	var poly: Array = main.plants.patch_outline(key)

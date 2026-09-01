@@ -113,10 +113,6 @@ func _coarse_drop(pid: int, p: Dictionary) -> void:
 			_coarse.erase(k)
 var cell_nodes: Dictionary = {}   # ячейка -> меш со всеми её растениями
 var time_scale: float = 1.0
-# Запас перемотки, в игровых секундах: кнопка «+30 с» прибавляет сюда, кадр
-# проливает по FAST_K игровых секунд на настоящую (см. `_process`).
-var fast_left: float = 0.0
-const FAST_K: float = 8.0
 var _dirty: Dictionary = {}
 var _accum: float = 0.0
 # ВСПЛЕСК ОТ РУКИ ИГРОКА — свой счёт времени, по настоящим секундам. `_burst_left`
@@ -1241,6 +1237,8 @@ func vine_stats() -> Dictionary:
 	var longest := 0.0
 	var spots: Array = []
 	var order := 0
+	var by_order: Array = []      # звеньев в каждом поколении
+	var wood_order: Array = []    # ... и сколько из них одревеснело дочерна
 	var flying := 0
 	var riding := 0
 	var ends: Array = []
@@ -1297,6 +1295,18 @@ func vine_stats() -> Dictionary:
 		if int(p.get("kids", 0)) > 1:
 			forks += 1
 		order = maxi(order, int(p.get("order", 0)))
+		# ОДРЕВЕСНЕНИЕ — ПОРОЗНЬ ПО ПОКОЛЕНИЯМ. Правило пользователя «дочерна
+		# деревенеют только первые поколения» до сих пор ничем не мерилось, и
+		# сломайся оно — узналось бы только с кадра. Считаем той же меркой,
+		# какой красят кору (`_wood_of`), иначе мерка и инструмент разойдутся.
+		if int(p.get("bloom", 0)) <= 0:
+			var ord: int = int(p.get("order", 0))
+			while by_order.size() <= ord:
+				by_order.append(0)
+				wood_order.append(0)
+			by_order[ord] += 1
+			if _wood_of(p) >= 0.98:
+				wood_order[ord] += 1
 		# КРУТИЗНУ СКЛАДЫВАЕМ, А НЕ СЧИТАЕМ ПО ПОРОГУ. Свои же грабли: порог стоял
 		# на 0.5, а вся крутизна на острове доходит до 0.41 — то есть он не мог
 		# сработать НИКОГДА и честно показывал ноль при любом поведении. Средняя
@@ -1588,7 +1598,7 @@ func vine_stats() -> Dictionary:
 	return {"links": links, "roots": roots, "steep": steep, "rock": rock,
 		"forks": forks, "deep": deep, "rise": rise, "run": run, "tall": tall,
 		"long": longest, "cap": _stem_max(PlantsData.ITEMS["vine"]), "wide": wide,
-		"order": order,
+		"order": order, "by_order": by_order, "wood_order": wood_order,
 		"least": 0 if mine.is_empty() else least, "most": most,
 		"tries": _sprout_try, "wins": _sprout_win, "air": flying,
 		"tips": ends.size(), "tips_wide": apart_ends,
@@ -1693,15 +1703,6 @@ func _process(delta: float) -> void:
 		# мире удары сердца заводят вторые, а мир в них не стареет ни на миг:
 		# `_tick` получает ноль мирового времени и один лишь подарок.
 		_accum += delta * time_scale
-		# ПЕРЕМОТКА: кнопка «+30 с» дарит саду игровые секунды, и они проливаются
-		# ускоренно, но не разом — FAST_K игровых секунд на настоящую. Одним
-		# куском нельзя: сотни тиков в один кадр — это замирание, а не перемотка.
-		# Течёт и при остановленном времени: это ответ на действие руки, как и
-		# всплеск роста.
-		if fast_left > 0.0:
-			var boost: float = minf(fast_left, delta * FAST_K)
-			_accum += boost
-			fast_left -= boost
 		if _burst_left > 0.0:
 			_burst_left -= delta
 			_burst_accum += delta
@@ -4985,9 +4986,18 @@ const TIP_GREEN := Color(0.33, 0.44, 0.20)
 # Ширина волны — два поколения, чтобы переход не был щелчком.
 const WOOD_FROM: int = 3          # поколение (от нуля), с которого начинается
 const WOOD_SPAN: float = 2.0      # за сколько поколений звено буреет дочерна
-# Докуда доходит одревеснение: 2 значит «первое и второе поколение дочерна,
-# третье наполовину, дальше зелень».
-const WOOD_LAST: int = 2
+# Докуда доходит одревеснение: 3 значит «первое, второе и третье поколение
+# дочерна, четвёртое наполовину, дальше зелень».
+#
+# БЫЛО 2, СТАЛО 3 — 2026-09-01, её напоминание по кадру: «полностью
+# одревесневают со временем только 1-3 поколения ветвей лозы, сейчас это не
+# так». И правда не так: замер по взрослой лозе показал 18 из 18 в первом
+# поколении, 63 из 63 во втором и НОЛЬ из 192 в третьем — третье по прежнему
+# числу деревенело лишь наполовину и дочерна не доходило никогда.
+#
+# Теперь это меряется само: строка «одревеснело дочерна по поколениям» в
+# самопроверке. Без неё правило четыре дня стояло сломанным молча.
+const WOOD_LAST: int = 3
 
 # НАСКОЛЬКО ЗВЕНО ОДРЕВЕСНЕЛО: 0 — травянистый побег, 1 — бурый ствол.
 #

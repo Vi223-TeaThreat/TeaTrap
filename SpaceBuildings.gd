@@ -42,8 +42,15 @@ func setup(main_ref: Node3D) -> void:
 
 
 func clear_all() -> void:
+	# СНИМАЕМ СО СЦЕНЫ СРАЗУ: `rebuild_all` зовёт `clear_all` и тут же строит
+	# заново, а отложенное удаление оставило бы старую постройку рисоваться
+	# поверх новой целый кадр. Та же беда, что была у кусков земли.
 	for key in nodes:
-		nodes[key].queue_free()
+		var gone: Node = nodes[key]
+		var parent: Node = gone.get_parent()
+		if parent != null:
+			parent.remove_child(gone)
+		gone.queue_free()
 	nodes.clear()
 	openings.clear()
 

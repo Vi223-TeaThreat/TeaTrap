@@ -64,17 +64,6 @@ var fill_soft: PackedFloat32Array = PackedFloat32Array()
 # шестерых соседей. Замерено: на этом уходило две трети всей пересборки куска,
 # и хранение наклона у семени ускоряет её в 2.16 раза.
 var shade_slope: PackedVector3Array = PackedVector3Array()
-# СКОЛЬКО ПОД ТОЧКОЙ ЗЕМЛИ: 0 — под ней пусто, 1 — сплошная толща.
-#
-# Без этого числа облик врал в двух местах сразу. «Глыба местами тонет в
-# дёрне» и «нижние глыбы зарастают целиком» — правила верные, но обе смотрели
-# только на ВЫСОТУ. Стоит выкопать яму, и низко перестаёт значить «у земли»:
-# нависающий край, потолок пещеры и стенка ямы получали дёрн и утопание
-# наравне с валуном, лежащим на лугу.
-var under: PackedFloat32Array = PackedFloat32Array()
-# ТОЛЩА ПОД ТОЧКОЙ уходит в вершины informational: решение о зелени её больше не
-# спрашивает — см. `Terrain.gdshader`, «ТОЛЩУ ПОД ТОЧКОЙ ИЗ РЕШЕНИЯ О ЗЕЛЕНИ
-# УБРАЛИ СОВСЕМ».
 # Рама для наклона: по 6 чисел на семя — обратная матрица направлений к
 # соседям. Считается один раз, потому что семена больше не двигаются.
 var slope_basis: PackedFloat32Array = PackedFloat32Array()
@@ -773,7 +762,6 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 	cavity.resize(seeds.size())
 	fill_soft.resize(seeds.size())
 	shade_slope.resize(seeds.size())
-	under.resize(seeds.size())
 	# Породы в мире пока нет ни крупицы, поэтому оба — нули. Заполнятся сами,
 	# как только по месту пройдёт мазок камня.
 	stone_mid.resize(seeds.size())
@@ -785,7 +773,6 @@ func _fill_terrain(radius: float, top: float, bottom: float,
 	_smooth_cavity()
 	for i in range(seeds.size()):
 		_refresh_shade(i)
-		_refresh_under(i)
 
 
 # ВПАДИНА. Насколько ячейка сидит в складке: −1 на голом выступе, 0 на ровном,
@@ -838,6 +825,27 @@ func _refresh_cavity(index: int) -> void:
 # Обновляем наклон для света ШИРЕ, чем менялось поле: он смотрит на соседей, а
 # у них поле для света только что пересчиталось. Кольцо ровно одно — дальше уже
 # ничего не изменилось.
+# ПАЧКА МАЗКОВ: считаем последствия ОДИН РАЗ В КОНЦЕ, а не после каждого.
+#
+# Годится только там, где между мазками никто не смотрит на мир, — то есть при
+# расстановке острова. У руки игрока так нельзя: она видит каждый мазок.
+var _batching: bool = false
+var _batch: Dictionary = {}
+
+func begin_batch() -> void:
+	_batching = true
+	_batch = {}
+
+
+func end_batch() -> void:
+	_batching = false
+	for j in _batch:
+		_refresh_cavity(j)
+	_smooth_cavity(_batch.keys())
+	_refresh_shade_round(_batch)
+	_batch = {}
+
+
 func _refresh_shade_round(seen: Dictionary) -> void:
 	for j in _grown(seen):
 		_refresh_shade(j)
@@ -907,37 +915,17 @@ func _refresh_stone_soft(index: int) -> void:
 	stone_soft[index] = sum / w
 
 
-# На сколько ячеек вниз смотрим. Четыре — это 2.7 м: тоньше слой камня над
-# пустотой уже не «стоит на земле», а нависает.
-const GROUND_DEEP: int = 4
-
-func _refresh_under(index: int) -> void:
-	if index < 0 or index >= under.size():
-		return
-	var got := 0
-	var at: int = index
-	for _step in range(GROUND_DEEP):
-		at = nb_table[at * 6 + 3]        # сосед снизу
-		if at < 0:
-			break                        # за краем мира земли нет
-		if fill[at] > SOLID_AT:
-			got += 1
-	under[index] = float(got) / float(GROUND_DEEP)
-
-
-# Обновляем ВЫШЕ изменённого: под точкой смотрят вниз, значит правка внизу
-# меняет число у всех, кто над ней в пределах глубины взгляда.
-func _refresh_under_round(seen: Dictionary) -> void:
-	var wide: Dictionary = seen.duplicate()
-	for j in seen:
-		var at: int = int(j)
-		for _step in range(GROUND_DEEP):
-			at = nb_table[at * 6 + 2]    # сосед сверху
-			if at < 0:
-				break
-			wide[at] = true
-	for j in wide:
-		_refresh_under(j)
+# ТОЛЩА ПОД ТОЧКОЙ УБРАНА ЦЕЛИКОМ (2026-09-01).
+#
+# Она считалась на каждый мазок и клалась во ВСЯКУЮ вершину земли вторым
+# набором разметки — а шейдер земли её не читал вовсе. Смысл у неё был «есть ли
+# куда осесть наносу», и его давно взял на себя наклон поверхности: толща
+# ступенчата (скачок на три четверти между соседями), и порог по ней давал
+# прямые отрезки поперёк треугольников — те самые «треугольные выносы травы».
+# Замена записана в `Terrain.gdshader` рядом с `rest`.
+#
+# Держалась она последние дни только тем, что её никто не вычёркивал. Мазок от
+# неё стал дешевле, а мазок — это отклик на руку.
 
 
 # РАЗГЛАЖИВАНИЕ ТОЛЩИ УБРАНО, И ЭТО ЗАМЕР, А НЕ ВКУС.
@@ -1696,11 +1684,18 @@ func stroke_at(point: Vector3, radius: float, amount: float,
 	# ячейки за её краем не поменяли ни породы, ни вида, только затенение стыка.
 	# Кольцо уже посчитано выше, для швов, — второй раз его не строим.
 	var seen: Dictionary = edge
+	if _batching:
+		# ОБСТАНОВКА ОСТРОВА КЛАДЁТ ДЕСЯТКИ МАЗКОВ ДРУГ НА ДРУГА, и каждый из них
+		# заново пересчитывал впадину, разглаживание и затенение по всей своей
+		# округе — по той же самой округе, что и предыдущий. Игроку это нужно
+		# сразу (он смотрит на результат), а расстановке — один раз в конце.
+		for j in seen:
+			_batch[j] = true
+		return zone.keys()
 	for j in seen:
 		_refresh_cavity(j)
 	_smooth_cavity(seen.keys())
 	_refresh_shade_round(seen)
-	_refresh_under_round(seen)
 	return zone.keys()
 
 
@@ -1797,7 +1792,6 @@ func apply_delta(delta: Dictionary, sign: float,
 		_refresh_cavity(j)
 	_smooth_cavity(seen.keys())
 	_refresh_shade_round(seen)
-	_refresh_under_round(seen)
 	return zone.keys()
 
 
@@ -1837,7 +1831,6 @@ func restore_state(ed: Dictionary, st: Dictionary, lu: Array) -> Array:
 		_refresh_cavity(j)
 	_smooth_cavity(edge.keys())
 	_refresh_shade_round(edge)
-	_refresh_under_round(edge)
 	return edge.keys()
 
 
