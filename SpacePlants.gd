@@ -66,6 +66,9 @@ const SIT_APART: float = 0.45
 # равномерная рябь, то есть те же клёпки, только разного калибра.
 const BULK_MIN: float = 0.65
 const BULK_MAX: float = 1.35
+# В каком шаре считать метлу — начала побегов, сошедшиеся в одном месте.
+# Треть метра, как и у клубка: мерки должны быть об одном масштабе.
+const BROOM_BALL: float = 0.3
 const BULK_FADE: float = 0.06               # насколько поколение мельчает
 const BULK_DRIFT: float = 0.16              # и насколько разброс это перебивает
 # Насколько гуляет сам зазор между соседями. Без этого расстановка выходит
@@ -129,6 +132,9 @@ var _blade_mat: ShaderMaterial
 var _bump_spread: float = 0.0     # замеренный уклон образца, девятая десятая
 var _bump_tilt: float = 0.0       # и во сколько градусов он обошёлся
 var _body_hgt := PackedFloat32Array()   # высота образца, если его рисовали мы
+# Кисти, заведённые в текущем ударе, но ещё не рождённые. Их места держит
+# `_bloom_near` — см. там же, почему без этого правило дистанции не работало.
+var _bloom_soon: Array = []
 var _sprout_try: int = 0                # попыток отростка у лиан
 var _sprout_win: int = 0                # ... и сколько из них нашли место
 # ПОЧЕМУ ОТРОСТКУ ОТКАЗАНО. По одной доле удач («нашли место 62%») не видно,
@@ -1620,6 +1626,32 @@ func vine_stats() -> Dictionary:
 				near_here += 1
 		knot = maxi(knot, near_here)
 
+	# МЕТЛА — ЭТО НЕ КЛУБОК. Клубок ловится теснотой звеньев, а метла — теснотой
+	# НАЧАЛ ПОБЕГОВ: пять новых плетей, вышедших из одного места, идут дальше
+	# врозь и просторно, и по числу звеньев в шаре их не видно вовсе. Её кадр
+	# 02.09.2026: «иногда на лианах образуются такие метёлки».
+	#
+	# Начало побега — звено, чей родитель отпустил не первый побег (боковая
+	# ветвь), и всякая проснувшаяся почка.
+	var starts: Array = []
+	for pid in patches:
+		var q: Dictionary = patches[pid]
+		if not _is_stem(PlantsData.ITEMS[q["id"]]) or int(q.get("bloom", 0)) > 0:
+			continue
+		var up_at: int = int(q.get("from", -1))
+		if not patches.has(up_at):
+			continue
+		if int(patches[up_at].get("order", 0)) != int(q.get("order", 0)) \
+				or bool(patches[up_at].get("heir_done", false)):
+			starts.append(Vector3(q["pos"]))
+	var broom := 0
+	for i in range(starts.size()):
+		var near_here := 0
+		for j in range(starts.size()):
+			if Vector3(starts[i]).distance_to(starts[j]) < BROOM_BALL:
+				near_here += 1
+		broom = maxi(broom, near_here)
+
 	var apart_ends := 0.0
 	for i in range(ends.size()):
 		for j in range(i + 1, ends.size()):
@@ -1658,6 +1690,7 @@ func vine_stats() -> Dictionary:
 		"straight": walk_far / maxf(walk_len, 0.0001),
 		"thin": 0.0 if links == 0 else thin, "fat": fat,
 		"sunk": 0.0 if links == 0 else sunk, "knot": knot, "sharp": sharp,
+		"broom": broom, "starts": starts.size(),
 		"rode": riding, "leaves": leaves, "leaf_in": leaf_in,
 		"buried": buried,
 		"sprays": sprays, "flowers": flowers, "flower_in": flower_in,
@@ -2443,9 +2476,19 @@ func _meet_taken(at: Vector3, born: String, apart: float) -> bool:
 
 # НЕ СТОИТ ЛИ РЯДОМ ЧУЖАЯ МЕТЁЛКА. Ищем ПЕРВЫЕ звенья цветоносов (`bloom` == 1):
 # от них метёлка и отсчитывается, и держать врозь надо именно их начала.
+#
+# И ТЕ, ЧТО ТОЛЬКО ЧТО ЗАВЕЛИСЬ В ЭТОМ ЖЕ УДАРЕ, — тоже. Вот та самая дыра, из-за
+# которой правило не держалось (её кадр 02.09.2026: «цветоносы слишком близко, не
+# соблюдается дистанция»): кисти заводятся при обходе, а РОЖДАЮТСЯ после него, и
+# два узла в одном ударе спрашивали пустоту — ни одной кисти ещё не существовало,
+# обе проходили. А на взрослой лозе узлов, готовых зацвести, сотни, и за удар их
+# зацветало по десятку разом.
 func _bloom_near(at: Vector3, gap: float) -> bool:
 	if gap <= 0.0:
 		return false
+	for soon in _bloom_soon:
+		if at.distance_squared_to(Vector3(soon)) < gap * gap:
+			return true
 	var home: int = main.grid.cell_at(at)
 	if home < 0:
 		return false
@@ -2478,6 +2521,7 @@ func meet_stats() -> Vector3i:
 func _tick(dt: float, gift: float = 0.0) -> void:
 	var sprouts: Array = []
 	var fallen: Array = []
+	_bloom_soon.clear()
 	for pid in patches:
 		var p: Dictionary = patches[pid]
 		var def: Dictionary = PlantsData.ITEMS[p["id"]]
@@ -2613,6 +2657,9 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 			if not born.is_empty():
 				# ОДИН УЗЕЛ — ОДНА МЕТЁЛКА.
 				p["bloomed"] = true
+				# И МЕСТО ЗАНЯТО СРАЗУ, до самого рождения: следующий узел в этом
+				# же ударе обязан её увидеть.
+				_bloom_soon.append(Vector3(born["pos"]))
 				sprouts.append([born, p["id"],
 					_child_bulk(float(p["bulk"]), def), pid])
 			else:
@@ -2645,6 +2692,10 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 				# Почка проснулась и дала побег — дальше она обычное звено.
 				if patches.has(int(s[3])):
 					patches[int(s[3])].erase("wake")
+					if patches[int(s[3])].has("heir"):
+						# Замена вышла — место занято навсегда: второго вожака
+						# рядом с этим быть не должно (см. `_bud_near`).
+						patches[int(s[3])]["heir_done"] = true
 					patches[int(s[3])].erase("heir")
 	# Рост НЕ пересобирает на месте — только помечает. Собирает `_process` с
 	# запасом на кадр: иначе каждый толчок роста был бы заминкой.
@@ -3204,6 +3255,21 @@ func _wake_bud(pid: int, def: Dictionary) -> void:
 	var at: int = pid
 	var best: int = -1
 	var cast: int = -1
+	var apart: float = float(def.get("wake_apart", 0.0))
+	# НА МАЛЕНЬКОЙ ЛОЗЕ ПРАВИЛА РАЗВОДА НЕТ, и это не поблажка, а необходимость.
+	# Шар развода — треть метра, а у лозы в пять звеньев вся длина меньше него:
+	# разбудив одну почку, мы закрыли бы ей все остальные места навсегда. Ровно
+	# это и вышло при первой пробе — посев `7` упал с 77 звеньев до пяти, то есть
+	# вернулась та самая мёртвая лоза, ради которой почка и заводилась.
+	#
+	# Метла же — беда ВЗРОСЛОЙ лозы: пять замен из одного места видны там, где
+	# вокруг и без них густо.
+	var whole: int = 0
+	var r: int = int(patches[pid].get("root", -1))
+	if patches.has(r):
+		whole = int(patches[r].get("load", 0)) + 1
+	if whole < int(def.get("wake_free", 0)):
+		apart = 0.0
 	for _i in range(int(def.get("wake_back", 12))):
 		var up: int = int(patches[at].get("from", -1))
 		if not patches.has(up):
@@ -3214,6 +3280,16 @@ func _wake_bud(pid: int, def: Dictionary) -> void:
 		if int(a.get("kids", 0)) >= int(def.get("branch_max", 2)) \
 				or bool(a.get("spent", false)) or bool(a.get("wake", false)):
 			continue
+		# ВОЖАК В ОДНОМ МЕСТЕ ТОЛЬКО ОДИН (её кадр 02.09.2026: «иногда на лианах
+		# образуются такие метёлки»). Кончики упираются кучно — в стену, в чужой
+		# побег, — и каждый будил свою почку в считаных звеньях от соседней.
+		# Пять замен из одного места и есть метла: дальше они идут врозь и
+		# просторно, поэтому ни клубок, ни моток их не ловили.
+		#
+		# Держим врозь ПО МЕСТУ, а не по цепочке: почки садятся на разные ветви,
+		# и вдоль лозы они друг от друга далеко, а в кадре — рядом.
+		if _bud_near(Vector3(a["pos"]), apart):
+			continue
 		best = at
 		cast = came
 		if not bool(a.get("air", false)):
@@ -3223,6 +3299,34 @@ func _wake_bud(pid: int, def: Dictionary) -> void:
 		patches[best]["heir"] = true
 		if patches.has(cast):
 			patches[cast]["cast"] = true
+
+
+# НЕ СИДИТ ЛИ РЯДОМ ДРУГОЙ ВОЖАК — спящая почка или звено, уже отпустившее
+# замену. Ищем по тем же ячейкам, что и всё соседство.
+func _bud_near(at: Vector3, gap: float) -> bool:
+	if gap <= 0.0:
+		return false
+	var home: int = main.grid.cell_at(at)
+	if home < 0:
+		return false
+	var node: Vector3i = main.grid.node_of(home)
+	var span: int = maxi(1, int(ceil(gap / main.CELL_SPACING)))
+	for dx in range(-span, span + 1):
+		for dy in range(-span, span + 1):
+			for dz in range(-span, span + 1):
+				var c: int = main.grid.node_seed(node + Vector3i(dx, dy, dz))
+				if c < 0:
+					continue
+				for pid in by_cell.get(c, {}):
+					if not patches.has(pid):
+						continue
+					var q: Dictionary = patches[pid]
+					if not bool(q.get("wake", false)) \
+							and not bool(q.get("heir_done", false)):
+						continue
+					if at.distance_squared_to(q["pos"]) < gap * gap:
+						return true
+	return false
 
 
 # Отказ с пометкой причины. Возвращает пустое место — на то он и отказ.
