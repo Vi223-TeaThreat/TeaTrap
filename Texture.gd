@@ -448,6 +448,7 @@ func _take_hand(path: String, part: String) -> void:
 	var solid: bool = PARTS[part]["solid"]
 	var have: int = int(src.get_width() / TILE)
 	var bad := 0
+	var soft := 0
 	var empty := 0
 	for c in cols:
 		var col: int = int(c)
@@ -463,16 +464,29 @@ func _take_hand(path: String, part: String) -> void:
 						continue
 					seen += 1
 					if not solid:
+						# МЯГКИЙ КРАЙ ОКРУГЛЯЕМ, А НЕ ОТВЕРГАЕМ (02.09.2026).
+						# Прежде рисунок с мягкой кистью не брался вовсе — 78
+						# точек из трёх тысяч, и вся работа впустую. А смысла в
+						# полупрозрачности тут нет: шейдер режет по половине
+						# (`cutoff` 0.5) и рисует точку либо целиком, либо
+						# никак. Округлить по тому же порогу — это и есть
+						# честный перенос: в игре выйдет ровно то, что выйдет.
 						if p.a < 0.98:
-							bad += 1
+							soft += 1
+							if p.a >= 0.5 and (x == 0 or x == TILE - 1 or y == 0):
+								bad += 1
 						elif x == 0 or x == TILE - 1 or y == 0:
 							bad += 1
 			if seen == 0:
 				empty += 1
 	if bad > 0:
 		print("НЕ ВЗЯТО: сторожа насчитали ", bad,
-			" нарушений — полупрозрачные точки или заезд на край клетки")
+			" точек с заездом на край клетки — по краю дощечки картинка тянется",
+			" от соседнего столбца, и на силуэте это черта чужого цвета")
 		return
+	if soft > 0:
+		print("Мягкий край округлён по порогу шейдера (0.5): точек ", soft)
+		src = _harden(src, cols)
 	if empty > 0:
 		print("ВНИМАНИЕ: пустых клеток ", empty,
 			" — в этих возрастах картинки не будет вовсе")
@@ -500,6 +514,28 @@ func _take_hand(path: String, part: String) -> void:
 	print("Взято от руки: «", PARTS[part]["ru"], "», столбцов ", cols.size(),
 		" — легли в art/moss.png и заморожены в art/moss_hand.png")
 	print("Прежний лист сохранён в art/moss_prev.png — один шаг отмены")
+
+
+# Округлить мягкий край по порогу шейдера: точка либо есть целиком, либо её нет.
+# Правим КОПИЮ и только те столбцы, что берём, — остальное в её файле не наше
+# дело.
+func _harden(src: Image, cols: Array) -> Image:
+	var out := Image.create(src.get_width(), src.get_height(), false,
+		Image.FORMAT_RGBA8)
+	out.copy_from(src)
+	for c in cols:
+		var col: int = int(c)
+		for x in range(TILE):
+			for y in range(TILE * STAGES):
+				var p := out.get_pixel(col * TILE + x, y)
+				if p.a <= 0.02 or p.a >= 0.98:
+					continue
+				if p.a < 0.5:
+					out.set_pixel(col * TILE + x, y, Color(0, 0, 0, 0))
+				else:
+					out.set_pixel(col * TILE + x, y,
+						Color(p.r, p.g, p.b, 1.0))
+	return out
 
 
 func _hand_from_file() -> Image:

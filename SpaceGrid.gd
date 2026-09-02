@@ -837,6 +837,41 @@ func begin_batch() -> void:
 	_batch = {}
 
 
+# ОДИНОЧНОЕ СЕМЯ — ЭТО ШИП, а не форма (её кадр 2026-09-02: тонкий зелёный
+# клинок, торчащий из макушки скалы).
+#
+# Поверхность режется по уровню 0.5. Семя, поднявшееся над уровнем в одиночку —
+# когда все шесть его соседей ниже, — даёт не бугор, а КЛИН: тетраэдры вокруг
+# него срезаются у самой вершины, и выходит тонкая игла или лезвие. Формы в этом
+# нет никакой: ни один мазок такого не задумывал, это остаток на хвосте юбки.
+#
+# Правим самым слабым лекарством — опускаем такое семя чуть ниже уровня. Соседей
+# это не трогает, и всё, что стоит хотя бы на паре семян, остаётся как было.
+#
+# `SOLO_KEEP` — сколько соседей выше уровня всё же считается формой. Один сосед
+# оставляем: это уже не игла, а гребешок в одно ребро, и на кромке скалы он к
+# месту.
+const SOLO_KEEP: int = 1
+
+func solo_spikes(fix: bool) -> int:
+	var many := 0
+	for j in range(fill.size()):
+		if fill[j] <= SOLID_AT:
+			continue
+		var up := 0
+		var at: int = j * 6
+		for k in range(6):
+			var s: int = nb_table[at + k]
+			if s >= 0 and fill[s] > SOLID_AT:
+				up += 1
+		if up > SOLO_KEEP:
+			continue
+		many += 1
+		if fix:
+			fill[j] = SOLID_AT - 0.02
+	return many
+
+
 func end_batch() -> void:
 	_batching = false
 	for j in _batch:
@@ -2591,6 +2626,14 @@ func node_seed(node: Vector3i) -> int:
 	return int(_node_index.get(node, -1))
 
 
+# ВЕСЬ УКАЗАТЕЛЬ УЗЛОВ ЦЕЛИКОМ — для сборки поверхности. Она спрашивает восемь
+# углов у каждого кубика, кубиков в куске шестьдесят четыре, а вызов через
+# нетипизированную ссылку тут самое дорогое: сборщик берёт словарь один раз и
+# дальше читает его напрямую.
+func node_index() -> Dictionary:
+	return _node_index
+
+
 func node_of(index: int) -> Vector3i:
 	var p: Vector3 = lattice[index] / _spacing
 	return Vector3i(int(round(p.x)), int(round(p.y)), int(round(p.z)))
@@ -2606,22 +2649,62 @@ func spacing() -> float:
 # делом занят `seeds_near` — он же и остался.
 
 
+#
+# СВОЮ КЛЕТКУ СМОТРИМ ПЕРВОЙ, А СОСЕДНИЕ — ТОЛЬКО ЕСЛИ В НИХ МОЖЕТ БЫТЬ БЛИЖЕ.
+#
+# Это самое горячее место во всей игре: через него ходят и поиск земли, и рост,
+# и посадка. Замерено 02.09.2026: одна опора вокруг нового звена лианы — это 128
+# таких поисков, отсюда 3.4 мс на рождение звена; поиск места отростку — ещё 0.8
+# мс. Вместе 93% всей цены роста.
+#
+# Клетка хеша в 1.4 шага решётки, значит в ней около трёх семян, а перебирались
+# все двадцать семь клеток — под восемь десятков расстояний на каждый вызов.
+# Теперь: сперва своя клетка (ближайшее семя почти всегда в ней), потом соседние
+# с отсечением по КОРОБКЕ — если до ближайшего угла клетки дальше, чем до уже
+# найденного семени, ничего лучшего там нет.
+#
+# Отсечение ТОЧНОЕ: то же самое семя, а не «примерно то же». Проверено стендом
+# лианы — сад выходит звено в звено тот же.
 func cell_at(p: Vector3) -> int:
 	var base := _key_of(p)
 	var best := -1
 	var best_d := INF
+	var mine = _seed_hash.get(base)
+	if mine != null:
+		for i in mine:
+			var d: float = seeds[i].distance_squared_to(p)
+			if d < best_d:
+				best_d = d
+				best = i
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			for dz in range(-1, 2):
-				var key := base + Vector3i(dx, dy, dz)
-				if not _seed_hash.has(key):
+				if dx == 0 and dy == 0 and dz == 0:
 					continue
-				for i in _seed_hash[key]:
+				var key := base + Vector3i(dx, dy, dz)
+				var here = _seed_hash.get(key)
+				if here == null:
+					continue
+				# Отсечение спрашиваем только когда есть с чем сравнивать: в
+				# пустоте (своя клетка без семян) оно всё равно ничего не
+				# отсекает, а вызов на каждую из двадцати шести клеток стоит.
+				if best >= 0 and _box_away(p, key) >= best_d:
+					continue
+				for i in here:
 					var d: float = seeds[i].distance_squared_to(p)
 					if d < best_d:
 						best_d = d
 						best = i
 	return best
+
+
+# Квадрат расстояния от точки до коробки клетки хеша — мерка отсечения выше.
+func _box_away(p: Vector3, key: Vector3i) -> float:
+	var lo := Vector3(key) * _cell_size
+	var ax: float = maxf(maxf(lo.x - p.x, 0.0), p.x - lo.x - _cell_size)
+	var ay: float = maxf(maxf(lo.y - p.y, 0.0), p.y - lo.y - _cell_size)
+	var az: float = maxf(maxf(lo.z - p.z, 0.0), p.z - lo.z - _cell_size)
+	return ax * ax + ay * ay + az * az
 
 
 func neighbors_of(index: int) -> Array:

@@ -2818,6 +2818,15 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 	idx.resize(8)
 	var val := PackedFloat32Array()
 	val.resize(8)
+	var seeds: PackedVector3Array = grid.seeds
+	var cpos := PackedVector3Array()
+	cpos.resize(4)
+	var ca := PackedInt32Array()
+	ca.resize(4)
+	var cb := PackedInt32Array()
+	cb.resize(4)
+	var cw := PackedFloat64Array()
+	cw.resize(4)
 	for i in range(lo.x, hi.x):
 		for j in range(lo.y, hi.y):
 			for k in range(lo.z, hi.z):
@@ -2836,20 +2845,24 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 				if not ok or below == 0 or below == 8 or grid.stone_of(idx[0]) <= 0.02:
 					continue
 				for t in SurfaceScript.TETS:
-					var poly: Array = SurfaceScript.tet_polygon(grid, idx, val, t)
-					if poly.is_empty():
+					var cnt: int = SurfaceScript.tet_polygon(seeds, idx, val, t,
+						cpos, ca, cb, cw)
+					if cnt == 0:
 						continue
 					# РАЗВОРАЧИВАЕМ ЛИЦОМ НАРУЖУ, как это делает отрисовка. Без
 					# этого у соседних треугольников обход случайный, нормали
 					# смотрят врозь, и ровное место показывает 180°.
-					var want: Vector3 = SurfaceScript._outward(grid, idx, val, t)
-					for f in range(1, poly.size() - 1):
-						var tri: Array = SurfaceScript.wound(
-							[poly[0], poly[f], poly[f + 1]], grid, want)
-						if tri.is_empty():
+					var want: Vector3 = SurfaceScript._outward(seeds, idx, val, t)
+					for f in range(1, cnt - 1):
+						var turn: int = SurfaceScript.wound_order(cpos[0],
+							cpos[f], cpos[f + 1], want)
+						if turn < 0:
 							continue
-						var n: Vector3 = (tri[1]["p"] - tri[0]["p"]).cross(
-							tri[2]["p"] - tri[0]["p"])
+						var tri: Array = [0, f, f + 1]
+						if turn == 1:
+							tri = [f + 1, f, 0]
+						var n: Vector3 = (cpos[tri[1]] - cpos[tri[0]]).cross(
+							cpos[tri[2]] - cpos[tri[0]])
 						if n.length() < 0.0000001:
 							continue
 						var tid: int = tri_area.size()
@@ -2868,21 +2881,21 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 						# нависание считаются по одному честному наружу.
 						n = -n.normalized()
 						tri_up.append(n.y)
-						var mid: Vector3 = (tri[0]["p"] + tri[1]["p"]
-							+ tri[2]["p"]) / 3.0
+						var mid: Vector3 = (cpos[tri[0]] + cpos[tri[1]]
+							+ cpos[tri[2]]) / 3.0
 						# НА ШВЕ ЛИ ЭТОТ ТРЕУГОЛЬНИК. Без этого не отличить
 						# шипы, которые делает шов, от шипов, которые делает
 						# край мазка, — а лечатся они разным.
 						var on_seam: float = 0.0
 						for v in range(3):
 							on_seam = maxf(on_seam,
-								maxf(grid.seam[int(tri[v]["a"])],
-									grid.seam[int(tri[v]["b"])]))
+								maxf(grid.seam[ca[tri[v]]],
+									grid.seam[cb[tri[v]]]))
 						for pair in [[0, 1], [1, 2], [2, 0]]:
-							var a: int = mini(int(tri[pair[0]]["a"]), int(tri[pair[0]]["b"]))
-							var b: int = maxi(int(tri[pair[0]]["a"]), int(tri[pair[0]]["b"]))
-							var c2: int = mini(int(tri[pair[1]]["a"]), int(tri[pair[1]]["b"]))
-							var d: int = maxi(int(tri[pair[1]]["a"]), int(tri[pair[1]]["b"]))
+							var a: int = mini(ca[tri[pair[0]]], cb[tri[pair[0]]])
+							var b: int = maxi(ca[tri[pair[0]]], cb[tri[pair[0]]])
+							var c2: int = mini(ca[tri[pair[1]]], cb[tri[pair[1]]])
+							var d: int = maxi(ca[tri[pair[1]]], cb[tri[pair[1]]])
 							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
 								maxi(a, c2), maxi(b, d)]
 							if faces.has(key):
@@ -3133,6 +3146,9 @@ func _seed_scene() -> void:
 	grid.begin_batch()
 	if scene_id == "rocks":
 		_scene_rocks()
+	# ШИПЫ СНИМАЕМ ДО ТОГО, КАК СЧИТАТЬ ПОСЛЕДСТВИЯ: одиночное семя над уровнем
+	# даёт не форму, а тонкий клин — см. `solo_spikes`. Её кадр 02.09.2026.
+	var spikes: int = grid.solo_spikes(true)
 	grid.end_batch()
 	var dabbed := Time.get_ticks_msec() - started
 	var flushed := Time.get_ticks_msec()
@@ -3159,6 +3175,8 @@ func _seed_scene() -> void:
 	if stony == 0:
 		print("Сцена: ", scene_id, " — породы не встало вовсе")
 		return
+	print("Сцена: снято одиночных семян (тонких клиньев) — ", spikes,
+		", осталось ", grid.solo_spikes(false), " — норма ноль")
 	print("Сцена: ", scene_id, ", ячеек с породой — ", stony, ", высота скал ",
 		snappedf(top - foot, 0.1), " м, отвесных мест ",
 		snappedf(100.0 * float(steep) / float(stony), 0.1),
@@ -3341,7 +3359,16 @@ const SCENE_FORCE: float = 9.0
 # Поэтому число мазков ограничено прямо. Разнообразие от этого не страдает: что
 # именно поставить в этот запас — по-прежнему решает случай, а вот сколько
 # ждать игроку, больше не решает никто.
-const SCENE_DABS: int = 14
+#
+# ПОДНЯТО 14 → 18 (02.09.2026, её просьба «пусть генерация острова будет более
+# комплексной»). На четырнадцати мазках гнездо из трёх форм съедало весь запас,
+# и второму гнезду не оставалось ничего.
+#
+# ЦЕНА ЗАМЕРЕНА И ОНА ПРЯМАЯ: один мазок сцены стоит около 70 мс, и обстановка
+# растёт ровно на столько за каждый прибавленный. 14 мазков — 1.13 с, 18 — около
+# 1.4 с, 22 — 1.6 с. Это то самое число, которым и торгуются «богаче» против
+# «быстрее»; прочее в постановке острова не решает почти ничего.
+const SCENE_DABS: int = 18
 var _scene_dabs: int = 0
 
 func _scene_rocks() -> void:
@@ -3366,8 +3393,22 @@ func _scene_rocks() -> void:
 	# после них значило бы поднимать холмы прямо сквозь скалу.
 	_scene_dabs = 0
 	_scene_relief(rng)
-	var forms: int = rng.randi_range(2, 3)
+	# СКАЛЫ СТОЯТ КУЧАМИ, А НЕ ПОРОВНУ ПО КРУГУ (решение пользователя 2026-09-02
+	# по её референсам). На снимках камень выходит НА ПОВЕРХНОСТЬ ГНЕЗДАМИ:
+	# крупный кусок, а вокруг него мельче, и между гнёздами чистый луг. Ровная
+	# раскладка по кругу — это ровно те «2-3 круглых прыщика», на которые она и
+	# жаловалась: каждый сам по себе, и ни одного скопления.
+	#
+	# Гнёзд одно-два, в каждом две-три формы. Внутри гнезда формы стоят ближе
+	# расстояния слияния плюс шаг — то есть местами срастаются в одно тело, а
+	# местами оставляют щель, и это и есть обломочность.
+	var nests: int = rng.randi_range(1, 2)
+	var forms: int = nests * rng.randi_range(2, 3)
 	var turn: float = rng.randf_range(0.0, TAU)
+	var nest_at: Array = []
+	for n in range(nests):
+		nest_at.append(turn + TAU * float(n) / float(nests)
+			+ rng.randf_range(-0.4, 0.4))
 	for i in range(forms):
 		if _scene_dabs >= SCENE_DABS:
 			break
@@ -3377,19 +3418,25 @@ func _scene_rocks() -> void:
 		# Замер поймал это на острове с 43% ям: 80 ячеек породы и НИ ОДНОГО
 		# отвесного места. Пробуем три точки и берём самую высокую.
 		var at := Vector3.ZERO
+		var home: float = float(nest_at[i % nests])
 		for _try in range(3):
-			var ang: float = turn + TAU * float(i) / float(forms) \
-				+ rng.randf_range(-0.5, 0.5)
+			# Разброс внутри гнезда узкий: это одно обнажение, разбитое на куски,
+			# а не три скалы в разных концах острова.
+			var ang: float = home + rng.randf_range(-0.22, 0.22)
 			var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
 			var spot: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
 			if spot != Vector3.ZERO and (at == Vector3.ZERO or spot.y > at.y):
 				at = spot
 		if at == Vector3.ZERO:
 			continue
+		# ПЛИТА — САМАЯ ЧАСТАЯ ФОРМА: именно её не хватало на кадре. Столб
+		# оставлен как обломок помельче рядом с крупным, гряда — как связка.
 		var kind: float = rng.randf()
 		if kind < 0.40:
+			_scene_slab(rng, at)
+		elif kind < 0.60:
 			_scene_column(rng, at)
-		elif kind < 0.75:
+		elif kind < 0.85:
 			_scene_ridge(rng, at, false)
 		else:
 			_scene_ridge(rng, at, true)
@@ -3462,6 +3509,39 @@ func _scene_column(rng: RandomNumberGenerator, at: Vector3) -> void:
 		_scene_tower(at + off, rng.randi_range(SCENE_LOW, SCENE_HIGH))
 
 
+# ПЛИТА: наклонный клин, а не купол (решение пользователя 2026-09-02 по её
+# референсам — «скалы не должны быть шаровидными; придавай им форму, близкую к
+# референсам»).
+#
+# На её снимках у камня две черты, которых у нас не было ни одной: он СЛОИСТ
+# (плиты стоят наклонно, параллельными плоскостями) и он ОБЛОМОЧЕН (крупный
+# кусок, рядом с ним мельче). Купол не даёт ни того, ни другого: мазок кладёт
+# округлое пятно, и столб из таких пятен всегда выходит пупыркой.
+#
+# Плиту строим двумя приёмами разом:
+#   1. КАЖДЫЙ ЯРУС СДВИНУТ ВБОК (`lean`) — столб не стоит отвесно, а валится в
+#      одну сторону. С одной стороны выходит нависающий склон, с другой отвес:
+#      это и читается наклонной плитой, а не шаром.
+#   2. ВЫСОТА УБЫВАЕТ ВДОЛЬ ХОДА — от высокого края к низкому. Ровная высота
+#      даёт хребет-колбасу; убывающая — клин, у которого есть верх и подошва.
+func _scene_slab(rng: RandomNumberGenerator, at: Vector3) -> void:
+	var links: int = rng.randi_range(3, 4)
+	var dir: float = rng.randf_range(0.0, TAU)
+	var way := Vector3(cos(dir), 0.0, sin(dir))
+	# Валится плита ПОПЕРЁК своего хода: тогда наклон один на всю плиту, а не
+	# разный у каждого столба, и плоскости выходят параллельными.
+	var lean: Vector3 = Vector3(-way.z, 0.0, way.x) \
+		* (CELL_SPACING * rng.randf_range(0.25, 0.5))
+	var tall: int = rng.randi_range(SCENE_LOW + 1, SCENE_HIGH)
+	var head: Vector3 = at
+	for k in range(links):
+		var ground: Vector3 = _ground_at(head.x, head.z)
+		if ground == Vector3.ZERO:
+			break
+		_scene_tower(ground, maxi(1, tall - k), SCENE_RISE, lean)
+		head = ground + way * rng.randf_range(1.15, 1.6)
+
+
 # ГРЯДА: цепочка столбов, идущая ломаной с инерцией, — крупный скальный массив
 # произвольной формы. С аркой или гротом: в готовое тело бьёт мазок снятия —
 # насквозь понизу выходит арка, вбок на средней высоте — грот.
@@ -3509,12 +3589,13 @@ func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void
 
 # Столб камня от земли вверх — только от найденной земли: скала не появляется
 # в воздухе по построению.
-func _scene_tower(at: Vector3, up: int, rise: float = SCENE_RISE) -> void:
+func _scene_tower(at: Vector3, up: int, rise: float = SCENE_RISE,
+		lean: Vector3 = Vector3.ZERO) -> void:
 	var head: Vector3 = at
 	for level in range(up + 1):
 		if _scene_dabs >= SCENE_DABS:
 			return
-		var cell: int = grid.cell_at(head
+		var cell: int = grid.cell_at(head + lean
 			+ Vector3(0, CELL_SPACING * rise, 0))
 		if cell < 0 or not grid.in_play(cell):
 			break
@@ -4111,10 +4192,21 @@ func _vine_bench() -> void:
 					+ str(why[k]))
 		print("  посев ", s, ": звеньев ", out["links"], ", развилок ",
 			out["forks"], ", кончиков ", out["tips"], ", метёлок ",
-			out["sprays"], " с ", out["flowers"], " цветками; вросло ",
+			out["sprays"], " с ", out["flowers"], " цветками (две самые близкие в ",
+			snappedf(float(out["spray_gap"]) * 100.0, 0.1), " см); вросло ",
 			out["buried"], ", колено под землёй до ",
 			snappedf(float(out["sunk"]) * 100.0, 0.1), " см; отказы — ",
 			", ".join(parts) if not parts.is_empty() else "нет")
+		# ПОКОЛЕНИЯ — разнобой в счёте ловится разбросом по посевам, а не одним
+		# прогоном: первое поколение выходит то в 49 звеньев, то в два.
+		var gens: Array = []
+		for k in range(out["by_order"].size()):
+			gens.append("%d: %d зв. в %d местах" % [k + 1,
+				int(out["by_order"][k]), int(out["gen_starts"][k])])
+		print("    поколения — ", ", ".join(gens),
+			"; звеньев с двумя детьми своего поколения ", out["gen_twins"],
+			"; дерево лежит ", out["wood_runs"], " кусками, дальний край в ",
+			snappedf(float(out["wood_far"]) * 100.0, 0.1), " см от посадки")
 		# ЧТО С КОНЧИКОМ У ЗАСТРЯВШЕЙ ЛОЗЫ. Разбираем только бедные: у бодрой
 		# кончиков десятки, и смотреть там не на что.
 		if int(out["links"]) < 40:
@@ -4261,6 +4353,24 @@ func _vine_grown_check() -> void:
 		wood_line += "%s%d: %d из %d" % ["; " if k > 0 else "", k + 1, got, was]
 	print("Лиана взрослая: одревеснело дочерна по поколениям — ", wood_line,
 		" — деревенеть должны только первые, дальше зелёный облиственный побег")
+	# А СЧИТАЮТСЯ ЛИ ПОКОЛЕНИЯ ОТ ТОЧКИ ПОСАДКИ (правило 2026-09-02). Числом
+	# звеньев это не мерится: печатаем НАЧАЛА — в скольких разных местах
+	# поколение заводится.
+	var gen_line := ""
+	for k in range(big["gen_starts"].size()):
+		gen_line += "%s%d: %d" % ["; " if k > 0 else "", k + 1,
+			int(big["gen_starts"][k])]
+	print("Лиана взрослая: поколение начинается в стольких местах — ", gen_line,
+		"; у первого их должно быть ровно столько, сколько корней (сейчас ",
+		big["roots"], ") — это сами точки посадки, у прочих это число ветвей;",
+		" звеньев с двумя детьми своего же поколения — ", big["gen_twins"],
+		" (норма 0)")
+	# И ЧТО ИЗ ЭТОГО ВИДНО НА КАДРЕ: номер поколения глазом не читается, читается
+	# бурая древесина.
+	print("Лиана взрослая: одревесневшее дерево лежит ", big["wood_runs"],
+		" кусками — норма по куску на корень, то есть ", big["roots"],
+		"; дальний его край в ", snappedf(float(big["wood_far"]) * 100.0, 0.1),
+		" см от СВОЕЙ точки посадки")
 	# ЗАСТРЯЛА ЛИ ХОТЬ ОДНА. Средние числа прячут беду: одна плеть в полсотни
 	# звеньев и три по пять дают то же «в среднем четырнадцать».
 	print("Лианы порознь: корней — ", big["roots"], ", у самой бедной ",
@@ -4976,3 +5086,4 @@ func _shot_mode() -> void:
 
 	print("Кадры сохранены в: ", ProjectSettings.globalize_path("user://"))
 	get_tree().quit()
+

@@ -76,15 +76,41 @@ const CORNER := [
 # приносил переданный сюда вызов, и на каждую вершину приходилось по два таких
 # обращения; вершин у куска тысячи, и один клик стоил тридцати семи миллисекунд
 # вместо трёх. Отклик здесь дороже красоты устройства.
+#
+# СОБИРАЕМ В ПЛОСКИЕ ЧИСЛОВЫЕ МАССИВЫ, а не через `SurfaceTool`. Тот кладёт
+# вершину тремя вызовами и держит её в своей записи; вершин у куска тысячи, а
+# кусков на широкий мазок — под сорок. Меш выходит ТОТ ЖЕ (проверено слепком
+# всей поверхности: то же число вершин и то же их содержимое).
+#
+# Всё, что берётся у сетки, берётся ОДИН РАЗ и в типизированные переменные:
+# обращение к полю через нетипизированную ссылку — самое дорогое, что тут есть.
+# Про это в файле уже записано однажды (наклоны), и правило то же.
 static func build(grid, lo: Vector3i, hi: Vector3i) -> ArrayMesh:
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var any := false
+	var seeds: PackedVector3Array = grid.seeds
+	var fill: PackedFloat32Array = grid.fill
+	var slopes: PackedVector3Array = grid.shade_slope
+	var cav_all: PackedFloat32Array = grid.cavity
+	var stone_raw: Dictionary = grid.stone
+	var nodes: Dictionary = grid.node_index()
+
+	var verts := PackedVector3Array()
+	var norms := PackedVector3Array()
+	var uvs := PackedVector2Array()
 
 	var idx := PackedInt32Array()
 	idx.resize(8)
 	var val := PackedFloat32Array()
 	val.resize(8)
+	# Буферы под точки среза: их не бывает больше четырёх, и заводятся они один
+	# раз на весь кусок, а не на каждый тетраэдр.
+	var cpos := PackedVector3Array()
+	cpos.resize(4)
+	var ca := PackedInt32Array()
+	ca.resize(4)
+	var cb := PackedInt32Array()
+	cb.resize(4)
+	var cw := PackedFloat64Array()
+	cw.resize(4)
 
 	for i in range(lo.x, hi.x):
 		for j in range(lo.y, hi.y):
@@ -93,30 +119,47 @@ static func build(grid, lo: Vector3i, hi: Vector3i) -> ArrayMesh:
 				var ok := true
 				var below := 0
 				for c in range(8):
-					var s: int = grid.node_seed(here + CORNER[c])
+					var s: int = int(nodes.get(here + CORNER[c], -1))
 					if s < 0:
 						ok = false
 						break
 					idx[c] = s
-					val[c] = grid.fill[s]
+					val[c] = fill[s]
 					if val[c] <= ISO:
 						below += 1
 				if not ok or below == 0 or below == 8:
 					continue
 				for t in TETS:
-					if _emit_tet(st, grid, idx, val, t):
-						any = true
+					var cnt: int = tet_polygon(seeds, idx, val, t,
+						cpos, ca, cb, cw)
+					if cnt == 0:
+						continue
+					_face(cnt, _outward(seeds, idx, val, t), seeds, slopes,
+						cav_all, stone_raw, cpos, ca, cb, cw,
+						verts, norms, uvs)
 
-	if not any:
+	if verts.is_empty():
 		return null
-	return st.commit()
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = norms
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
 
 
 # Многоугольник среза тетраэдра, уже в правильном порядке обхода. Отдельно от
 # отрисовки, чтобы проверка на дыры считала РОВНО ту же геометрию, а не свою
 # копию: разошедшаяся копия врала бы про целостность.
-static func tet_polygon(grid, idx: PackedInt32Array, val: PackedFloat32Array,
-		t: Array) -> Array:
+#
+# Точки кладутся в буферы вызывающего (их не бывает больше четырёх); возвращаем,
+# сколько легло. Ноль — среза нет.
+static func tet_polygon(seeds: PackedVector3Array, idx: PackedInt32Array,
+		val: PackedFloat32Array, t: Array, cpos: PackedVector3Array,
+		ca: PackedInt32Array, cb: PackedInt32Array,
+		cw: PackedFloat64Array) -> int:
 	var inside: Array = []
 	var outside: Array = []
 	for c in t:
@@ -125,30 +168,33 @@ static func tet_polygon(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 		else:
 			outside.append(c)
 	if inside.is_empty() or outside.is_empty():
-		return []
+		return 0
 
-	var pts: Array = []
+	var n := 0
 	# Точки среза лежат на рёбрах «изнутри наружу».
 	for a in inside:
 		for b in outside:
-			pts.append(_cut(grid, idx, val, a, b))
-	if pts.size() < 3:
-		return []
-	if pts.size() == 3:
-		return pts
-	# Четыре точки: два ребра от каждого заполненного угла. Порядок 0,1,3,2
-	# замыкает их в четырёхугольник без самопересечения.
-	return [pts[0], pts[1], pts[3], pts[2]]
-
-
-static func _emit_tet(st: SurfaceTool, grid, idx: PackedInt32Array,
-		val: PackedFloat32Array, t: Array) -> bool:
-	var poly: Array = tet_polygon(grid, idx, val, t)
-	if poly.is_empty():
-		return false
-
-	_face(st, poly, _outward(grid, idx, val, t), grid)
-	return true
+			_cut(seeds, idx, val, a, b, n, cpos, ca, cb, cw)
+			n += 1
+	if n < 3:
+		return 0
+	if n == 4:
+		# Четыре точки: два ребра от каждого заполненного угла. Порядок 0,1,3,2
+		# замыкает их в четырёхугольник без самопересечения — меняем местами
+		# третью и четвёртую.
+		var p: Vector3 = cpos[2]
+		var a2: int = ca[2]
+		var b2: int = cb[2]
+		var w2: float = cw[2]
+		cpos[2] = cpos[3]
+		ca[2] = ca[3]
+		cb[2] = cb[3]
+		cw[2] = cw[3]
+		cpos[3] = p
+		ca[3] = a2
+		cb[3] = b2
+		cw[3] = w2
+	return n
 
 
 # Ищем ДЫРЫ. У замкнутой поверхности каждое ребро принадлежит ровно двум
@@ -157,10 +203,19 @@ static func _emit_tet(st: SurfaceTool, grid, idx: PackedInt32Array,
 # тетраэдров и кубиков, которые её породили.
 static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary,
 		stats: Dictionary) -> void:
+	var seeds: PackedVector3Array = grid.seeds
 	var idx := PackedInt32Array()
 	idx.resize(8)
 	var val := PackedFloat32Array()
 	val.resize(8)
+	var cpos := PackedVector3Array()
+	cpos.resize(4)
+	var ca := PackedInt32Array()
+	ca.resize(4)
+	var cb := PackedInt32Array()
+	cb.resize(4)
+	var cw := PackedFloat64Array()
+	cw.resize(4)
 	for i in range(lo.x, hi.x):
 		for j in range(lo.y, hi.y):
 			for k in range(lo.z, hi.z):
@@ -179,30 +234,35 @@ static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary,
 				if not ok or below == 0 or below == 8:
 					continue
 				for t in TETS:
-					var poly: Array = tet_polygon(grid, idx, val, t)
-					if poly.is_empty():
+					var cnt: int = tet_polygon(seeds, idx, val, t,
+						cpos, ca, cb, cw)
+					if cnt == 0:
 						continue
 					# Не вывернулся ли сам тетраэдр. Семя уходит от своего узла
 					# почти на половину ячейки, и при неудачном совпадении
 					# четвёрка семян меняет ориентацию: тетраэдры начинают
 					# перекрываться, и срез в них смотрит не туда.
-					if _volume(grid.seeds[idx[t[0]]], grid.seeds[idx[t[1]]],
-							grid.seeds[idx[t[2]]], grid.seeds[idx[t[3]]]) \
+					if _volume(seeds[idx[t[0]]], seeds[idx[t[1]]],
+							seeds[idx[t[2]]], seeds[idx[t[3]]]) \
 							* _volume(Vector3(CORNER[t[0]]), Vector3(CORNER[t[1]]),
 							Vector3(CORNER[t[2]]), Vector3(CORNER[t[3]])) < 0.0:
 						stats["inverted"] = int(stats.get("inverted", 0)) + 1
-					var want: Vector3 = _outward(grid, idx, val, t)
-					for f in range(1, poly.size() - 1):
-						var tri: Array = wound([poly[0], poly[f], poly[f + 1]], grid, want)
-						if tri.is_empty():
+					var want: Vector3 = _outward(seeds, idx, val, t)
+					for f in range(1, cnt - 1):
+						var turn: int = wound_order(cpos[0], cpos[f],
+							cpos[f + 1], want)
+						if turn < 0:
 							continue
+						var tri: Array = [0, f, f + 1]
+						if turn == 1:
+							tri = [f + 1, f, 0]
 						# Пишем НАПРАВЛЕННЫЕ рёбра. У согласованной поверхности
 						# каждое направленное ребро встречается ровно один раз:
 						# соседние треугольники проходят общее ребро навстречу
 						# друг другу. Встретилось дважды — треугольник вывернут.
 						for pair in [[0, 1], [1, 2], [2, 0]]:
-							var u := _vkey(tri[pair[0]])
-							var v := _vkey(tri[pair[1]])
+							var u := _vkey(ca[tri[pair[0]]], cb[tri[pair[0]]])
+							var v := _vkey(ca[tri[pair[1]]], cb[tri[pair[1]]])
 							if u == v:
 								continue
 							var s2 := "%s>%s" % [u, v]
@@ -213,22 +273,22 @@ static func _volume(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> float:
 	return (b - a).cross(c - a).dot(d - a)
 
 
-static func _vkey(c: Dictionary) -> String:
-	return "%d.%d" % [mini(int(c["a"]), int(c["b"])), maxi(int(c["a"]), int(c["b"]))]
+static func _vkey(a: int, b: int) -> String:
+	return "%d.%d" % [mini(a, b), maxi(a, b)]
 
 
-static func _outward(grid, idx: PackedInt32Array, val: PackedFloat32Array,
-		t: Array) -> Vector3:
+static func _outward(seeds: PackedVector3Array, idx: PackedInt32Array,
+		val: PackedFloat32Array, t: Array) -> Vector3:
 	var solid_mid := Vector3.ZERO
 	var empty_mid := Vector3.ZERO
 	var n_in := 0
 	var n_out := 0
 	for c in t:
 		if val[c] > ISO:
-			solid_mid += grid.seeds[idx[c]]
+			solid_mid += seeds[idx[c]]
 			n_in += 1
 		else:
-			empty_mid += grid.seeds[idx[c]]
+			empty_mid += seeds[idx[c]]
 			n_out += 1
 	if n_in == 0 or n_out == 0:
 		return Vector3.UP
@@ -236,18 +296,25 @@ static func _outward(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 
 
 # Точка на ребре и всё, что к ней прилагается: наклон поля и доля породы.
-static func _cut(grid, idx: PackedInt32Array, val: PackedFloat32Array,
-		a: int, b: int) -> Dictionary:
+#
+# ТОЧКА КЛАДЁТСЯ В ПЕРЕДАННЫЕ БУФЕРЫ, а не возвращается словарём. Словарь с
+# именами полей — самое дорогое, что есть в GDScript, а точек этих в куске
+# тысячи, и каждая читается по шесть раз. Замерено: на сборке мешей земли
+# уходило 98% цены мазка.
+static func _cut(seeds: PackedVector3Array, idx: PackedInt32Array,
+		val: PackedFloat32Array, a: int, b: int, n: int,
+		cpos: PackedVector3Array, ca: PackedInt32Array,
+		cb: PackedInt32Array, cw: PackedFloat64Array) -> void:
 	var fa: float = val[a]
 	var fb: float = val[b]
 	var span: float = fa - fb
 	var t: float = 0.5 if absf(span) < 0.00001 else clampf((fa - ISO) / span, 0.0, 1.0)
 	var sa: int = idx[a]
 	var sb: int = idx[b]
-	return {
-		"p": grid.seeds[sa].lerp(grid.seeds[sb], t),
-		"a": sa, "b": sb, "t": t,
-	}
+	cpos[n] = seeds[sa].lerp(seeds[sb], t)
+	ca[n] = sa
+	cb[n] = sb
+	cw[n] = t
 
 
 # Сторону определяем У КАЖДОГО ТРЕУГОЛЬНИКА ОТДЕЛЬНО, а не на весь
@@ -256,55 +323,63 @@ static func _cut(grid, idx: PackedInt32Array, val: PackedFloat32Array,
 # Вывернутый треугольник не рисуется со своей стороны — сквозь него видно небо,
 # и это неотличимо от дыры с прямыми краями. Сетка при этом остаётся замкнутой,
 # поэтому поиск незамкнутых рёбер таких мест не находит.
-static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
-	var stone_raw: Dictionary = grid.stone
-	var cav_all: PackedFloat32Array = grid.cavity
-	# Наклоны берём ОДИН РАЗ на треугольник, а не на каждую вершину: обращение
-	# к полю через нетипизированную ссылку — самое дорогое, что тут есть, а
-	# вершин у куска тысячи.
-	#
-	# Они посчитаны по ПОЛЮ ДЛЯ СВЕТА, а срез идёт по настоящему. Форма остаётся
-	# ровно там, где была, а свет по ней течёт мягче: у решётки в 0.67 м любая
-	# вылепленная форма набрана из считаных граней, и резкий свет выдаёт каждую.
-	var slopes: PackedVector3Array = grid.shade_slope
-	# ВТОРОГО НАБОРА РАЗМЕТКИ У ЗЕМЛИ БОЛЬШЕ НЕТ. В нём лежала толща под точкой,
-	# и шейдер её не читал ни одной строкой — а считалась она на каждый мазок и
-	# писалась в каждую вершину. Убрана 2026-09-01 вместе с самой толщей.
-	for i in range(1, cut.size() - 1):
-		var tri: Array = wound([cut[0], cut[i], cut[i + 1]], grid, want)
-		if tri.is_empty():
+#
+# Всё, что берётся у сетки, приходит сюда ГОТОВЫМ и типизированным: обращение к
+# полю через нетипизированную ссылку — самое дорогое, что тут есть, а вершин у
+# куска тысячи. Наклоны посчитаны по ПОЛЮ ДЛЯ СВЕТА, а срез идёт по настоящему:
+# форма остаётся ровно там, где была, а свет по ней течёт мягче.
+#
+# ВТОРОГО НАБОРА РАЗМЕТКИ У ЗЕМЛИ БОЛЬШЕ НЕТ. В нём лежала толща под точкой,
+# и шейдер её не читал ни одной строкой — а считалась она на каждый мазок и
+# писалась в каждую вершину. Убрана 2026-09-01 вместе с самой толщей.
+static func _face(cnt: int, want: Vector3, seeds: PackedVector3Array,
+		slopes: PackedVector3Array, cav_all: PackedFloat32Array,
+		stone_raw: Dictionary, cpos: PackedVector3Array, ca: PackedInt32Array,
+		cb: PackedInt32Array, cw: PackedFloat64Array,
+		verts: PackedVector3Array, norms: PackedVector3Array,
+		uvs: PackedVector2Array) -> void:
+	for i in range(1, cnt - 1):
+		var i0 := 0
+		var i1 := i
+		var i2 := i + 1
+		var turn: int = wound_order(cpos[i0], cpos[i1], cpos[i2], want)
+		if turn < 0:
 			continue
+		if turn == 1:
+			var swap := i0
+			i0 = i2
+			i2 = swap
 		# КАМЕНЬ ГРАНИТСЯ СВЕТОМ. Поверхность и так набрана из треугольников по
 		# полторы-две сажени — но нормаль у неё берётся от наклона поля, и свет
 		# течёт по ним гладко, пряча грани. Земле так и надо. Камню — нет: у него
 		# нормаль ведём к нормали самого треугольника, и глыба сразу читается
 		# многогранником. Это ничего не стоит и ничем не рискует: сама сетка не
 		# меняется, меняется только то, как её освещает.
-		var stones := [0.0, 0.0, 0.0]
-		var cavs := [0.0, 0.0, 0.0]
+		var p0: Vector3 = cpos[i0]
+		var p1: Vector3 = cpos[i1]
+		var p2: Vector3 = cpos[i2]
+		var flat: Vector3 = (p1 - p0).cross(p2 - p0)
+		flat = flat.normalized() if flat.length() > 0.000001 else Vector3.ZERO
 		for k in range(3):
-			var a: int = int(tri[k]["a"])
-			var b: int = int(tri[k]["b"])
-			var w: float = float(tri[k]["t"])
-			stones[k] = clampf(lerpf(float(stone_raw.get(a, 0.0)),
+			var at: int = i0 if k == 0 else (i1 if k == 1 else i2)
+			var a: int = ca[at]
+			var b: int = cb[at]
+			var w: float = cw[at]
+			var stone: float = clampf(lerpf(float(stone_raw.get(a, 0.0)),
 				float(stone_raw.get(b, 0.0)), w), 0.0, 1.0)
 			# Впадина приходит с сетки: по ней шейдер темнит стыки и пускает
 			# зелень в трещины. Половина — ровное место, больше — щель.
-			cavs[k] = 0.5 + 0.5 * lerpf(cav_all[a], cav_all[b], w)
-		var flat: Vector3 = (tri[1]["p"] - tri[0]["p"]).cross(tri[2]["p"] - tri[0]["p"])
-		flat = flat.normalized() if flat.length() > 0.000001 else Vector3.ZERO
-		for k in range(3):
-			var cc: Dictionary = tri[k]
-			var smooth: Vector3 = _slope(grid, slopes, cc)
+			var cav: float = 0.5 + 0.5 * lerpf(cav_all[a], cav_all[b], w)
+			var smooth: Vector3 = _slope(seeds, slopes, a, b, w)
 			var n: Vector3 = smooth
-			if flat != Vector3.ZERO and stones[k] > 0.0:
+			if flat != Vector3.ZERO and stone > 0.0:
 				# Сторону берём от гладкой нормали: у треугольника своей нет,
 				# он одинаково смотрит в обе.
 				var faced: Vector3 = flat if flat.dot(smooth) > 0.0 else -flat
-				n = smooth.lerp(faced, minf(stones[k], 1.0) * face_light).normalized()
-			st.set_uv(Vector2(stones[k], cavs[k]))
-			st.set_normal(n)
-			st.add_vertex(cc["p"])
+				n = smooth.lerp(faced, minf(stone, 1.0) * face_light).normalized()
+			uvs.append(Vector2(stone, cav))
+			norms.append(n)
+			verts.append(cpos[at])
 
 
 # Разворачиваем треугольник лицом наружу. ЕДИНСТВЕННОЕ место, где решается
@@ -315,20 +390,19 @@ static func _face(st: SurfaceTool, cut: Array, want: Vector3, grid) -> void:
 # становится плоским, наклон вырождается и может указать не туда — тогда
 # треугольник выворачивается, перестаёт рисоваться со своей стороны, и сквозь
 # него видно небо. Это неотличимо от дыры, хотя сетка остаётся замкнутой.
-static func wound(tri: Array, grid, want: Vector3) -> Array:
-	var a: Vector3 = tri[0]["p"]
-	var b: Vector3 = tri[1]["p"]
-	var c: Vector3 = tri[2]["p"]
+#
+# Возвращает ПОРЯДОК ОБХОДА, а не новый список: 0 — как дано, 1 — наоборот,
+# −1 — треугольник выродился. Список тут заводился на каждый треугольник, а их
+# в куске тысячи.
+static func wound_order(a: Vector3, b: Vector3, c: Vector3, want: Vector3) -> int:
 	var face_n: Vector3 = (b - a).cross(c - a)
 	# Порог только против полного вырождения. Отбрасывать «волоски» по
 	# относительному порогу пробовали — вместо ста вывернутых треугольников
 	# получилось семьсот незамкнутых рёбер: щели оказались настоящими дырами.
 	if face_n.length() < 0.000000001:
-		return []
+		return -1
 	# В Godot лицевая сторона — обход ПО ЧАСОВОЙ снаружи.
-	if face_n.dot(want) > 0.0:
-		return [tri[2], tri[1], tri[0]]
-	return tri
+	return 1 if face_n.dot(want) > 0.0 else 0
 
 
 # Нормаль берём от НАКЛОНА ПОЛЯ, а не от треугольника: она непрерывна и
@@ -338,10 +412,11 @@ static func wound(tri: Array, grid, want: Vector3) -> Array:
 # вершине: одно семя попадает в десяток вершин, и обход шестерых соседей ради
 # него повторялся десять раз подряд. Замерено — на этом уходило две трети всей
 # пересборки куска.
-static func _slope(grid, slopes: PackedVector3Array, c: Dictionary) -> Vector3:
-	var g: Vector3 = slopes[int(c["a"])].lerp(slopes[int(c["b"])], float(c["t"]))
+static func _slope(seeds: PackedVector3Array, slopes: PackedVector3Array,
+		a: int, b: int, w: float) -> Vector3:
+	var g: Vector3 = slopes[a].lerp(slopes[b], w)
 	if g.length() < 0.000001:
-		return (grid.seeds[int(c["b"])] - grid.seeds[int(c["a"])]).normalized()
+		return (seeds[b] - seeds[a]).normalized()
 	return -g.normalized()
 
 
