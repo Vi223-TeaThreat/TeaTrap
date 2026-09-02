@@ -20,6 +20,22 @@ extends Node3D
 const PlantsData = preload("res://Plants.gd")
 
 const TICK: float = 0.15
+
+# СКОЛЬКО РАСТЕНИЕ ВООБЩЕ РАСТЁТ — решение пользователя 2026-09-02: «ограничим
+# рост всех растений длиной в 3 минуты игрового времени».
+#
+# Число одно на все виды нарочно: это не свойство лианы или мха, а правило мира.
+# Оттого оно и здесь, а не в каталоге.
+#
+# ЧАСЫ У ОРГАНИЗМА ОБЩИЕ, А НЕ У ЗВЕНА. Новорождённое звено наследует прожитое
+# родителем, а не начинает с нуля: иначе лоза не кончилась бы никогда — каждое
+# новое звено приносило бы ей ещё три минуты, и предел не значил бы ничего.
+# У мха то же самое: ковёр — такое же дерево от посеянной кочки.
+#
+# СЧИТАЕМ ВСЕ СЕКУНДЫ РОСТА, и мировые, и подаренные рукой. Подарок — это
+# настоящие секунды роста (см. `_burst_take`), он и должен приближать конец:
+# иначе кистью можно было бы растить сад без предела, и предела бы не было.
+const GROW_SPAN: float = 180.0
 # Ступеней роста, на которых меш пересобирается.
 #
 # Прежде их было девять — по числу возрастов картинки, — и кочка росла заметными
@@ -135,6 +151,22 @@ var _body_hgt := PackedFloat32Array()   # высота образца, если 
 # Кисти, заведённые в текущем ударе, но ещё не рождённые. Их места держит
 # `_bloom_near` — см. там же, почему без этого правило дистанции не работало.
 var _bloom_soon: Array = []
+
+# КТО ЕЩЁ МОЖЕТ ИЗМЕНИТЬСЯ. Удар сердца обходит только их, а не весь сад.
+#
+# Пока роста не было предела, список этот не имел смысла: измениться могло любое
+# растение, и он повторял бы `patches` целиком. С пределом (`GROW_SPAN`) смысл
+# появился: доросшее растение не изменится уже НИКОГДА — ни само, ни от руки, —
+# и спрашивать его каждую шестую долю секунды не за чем.
+#
+# Замерено: обход стоит около трёх микросекунд на растение, и в саду из трёх
+# тысяч это девять миллисекунд на удар — заминка семь раз в секунду в саду,
+# который и не растёт вовсе. С этим списком доросший сад стоит НУЛЬ.
+#
+# Растение выбывает, когда кончилось И расползание, и дозревание. Возвращается
+# только осиротевшее: у него могла отняться опора, и повиснуть в воздухе ему
+# нельзя (см. `_touch_kids`).
+var _live: Dictionary = {}
 var _sprout_try: int = 0                # попыток отростка у лиан
 var _sprout_win: int = 0                # ... и сколько из них нашли место
 # ПОЧЕМУ ОТРОСТКУ ОТКАЗАНО. По одной доле удач («нашли место 62%») не видно,
@@ -1862,6 +1894,11 @@ func _touch_kids(pid: int, orphan: bool = false, snap: float = 0.0) -> void:
 						continue
 					if orphan:
 						patches[kid]["from"] = -1
+						# ОСИРОТЕВШЕЕ ВОЗВРАЩАЕМ В ЖИВЫЕ. Доросшее звено из
+						# списка выбыло, а держаться ему теперь не на чем:
+						# висящему без родителя положено упасть, и спросить об
+						# этом может только удар сердца.
+						_live[kid] = true
 					# И РВЁМ РЕБЁНКА, КОТОРОГО РАСТЯНУЛО. Разрыв по своему
 					# родителю звено проверяет само, но при правке рельефа
 					# переехать может ЛЮБОЙ конец колена: сдвинули родителя, а
@@ -1968,6 +2005,7 @@ func remove_at(pid: int) -> void:
 	var cell: int = int(patches[pid]["cell"])
 	_touch_kids(pid, true)
 	_coarse_drop(pid, patches[pid])
+	_live.erase(pid)
 	patches.erase(pid)
 	if by_cell.has(cell):
 		by_cell[cell].erase(pid)
@@ -1982,6 +2020,7 @@ func remove_at(pid: int) -> void:
 # тысячах звеньев это минуты чистого ожидания.
 func clear_all() -> void:
 	patches.clear()
+	_live.clear()
 	by_cell.clear()
 	_coarse.clear()
 	_dirty.clear()
@@ -2138,6 +2177,10 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		# вершину меша было бы слишком дорого.
 		"root": (int(patches[from].get("root", from)) if patches.has(from)
 			else pid),
+		# СКОЛЬКО РАСТЕНИЕ УЖЕ РОСЛО. Наследуется от родителя, у посаженного
+		# ноль: часы принадлежат организму, а не звену — см. `GROW_SPAN`.
+		"lived": (float(patches[from].get("lived", 0.0)) if patches.has(from)
+			else 0.0),
 	}
 	if _is_stem(def):
 		patches[pid].merge(_stem_traits(from, def))
@@ -2211,6 +2254,7 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 	if not by_cell.has(cell):
 		by_cell[cell] = {}
 	by_cell[cell][pid] = true
+	_live[pid] = true
 	_coarse_add(pid, patches[pid])
 	_link_near(pid)
 	_dirty[cell] = true
@@ -2522,7 +2566,13 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 	var sprouts: Array = []
 	var fallen: Array = []
 	_bloom_soon.clear()
-	for pid in patches:
+	# Обходим ТОЛЬКО тех, кто ещё может измениться. Ключи снимаем копией: по ходу
+	# обхода список правится — доросшие выбывают, новорождённые входят.
+	var walk: Array = _live.keys()
+	for pid in walk:
+		if not patches.has(pid):
+			_live.erase(pid)
+			continue
 		var p: Dictionary = patches[pid]
 		var def: Dictionary = PlantsData.ITEMS[p["id"]]
 		# ВИСЯЩЕМУ ЗВЕНУ БЕЗ РОДИТЕЛЯ ДЕРЖАТЬСЯ НЕ НА ЧЕМ. Родитель мог погибнуть
@@ -2535,9 +2585,24 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 		# мира и своя доля подаренного рукой игрока. Дальше по коду разницы между
 		# ними нет — подарок проливается через тот же самый рост, поэтому и
 		# зрелость, и новые звенья от него получаются настоящие.
+		# ОТРОСЛО СВОЁ — БОЛЬШЕ НЕ ШИРИТСЯ (см. `GROW_SPAN`), но СВОЁ ДОЗРЕВАЕТ.
+		#
+		# Это две разные вещи, и путать их нельзя. Звено, родившееся за секунду
+		# до срока, наследует прожитое лозой и по общим часам кончилось сразу —
+		# запрети ему и зреть, и оно застынет недоросшим огрызком на кончике
+		# каждой плети. Поэтому предел снимает только РАСПОЛЗАНИЕ: новых звеньев
+		# и кочек больше нет, а начатое доходит до своего вида.
+		var lived: float = float(p.get("lived", 0.0))
+		var done: bool = lived >= GROW_SPAN
+		if done and float(p["m"]) >= 1.0:
+			# Отросло и дозрело — из живых вон, больше его не спрашиваем.
+			_live.erase(pid)
+			continue
 		var span: float = dt + _burst_take(p, gift)
 		if span <= 0.0:
 			continue
+		if not done:
+			p["lived"] = lived + span
 		var rate: float = def["grow_rate"] * (1.0 + def["shade_love"] * _shade(p))
 		# В складке растению вольготнее: туда наносит землю и дольше держится
 		# сырость. Величину складки считает сама сетка.
@@ -2575,7 +2640,7 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 		# РАСТЁТ ТОЛЬКО КОНЧИК, а звено с отростком даёт второй редко. Без этого
 		# «сдержанное ветвление» не выйдет ничем: у мха отросток даёт каждая
 		# кочка, и лиана расплылась бы тем же ковром, только вытянутым.
-		var chance: float = float(def["spread_rate"])
+		var chance: float = 0.0 if done else float(def["spread_rate"])
 		if def.has("branch"):
 			var kids: int = int(p.get("kids", 0))
 			if kids >= int(def.get("branch_max", 2)):
@@ -2651,8 +2716,9 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 		# 2026-08-28: «не заменяют обычные побеги, а дополняют их»). Оттого он и
 		# считается здесь, ниже, своим числом и своей частотой: попади он в общий
 		# зачёт — и зацветшая ветвь росла бы медленнее нецветущей.
-		if _bloom_ready(p, def) and _rng.randf() < float(def["bloom_rate"]) \
-				* slow * span:
+		# Цветение — тоже расползание: доросшая лоза новых кистей не заводит.
+		if not done and _bloom_ready(p, def) \
+				and _rng.randf() < float(def["bloom_rate"]) * slow * span:
 			var born: Dictionary = _bloom_start(p, def, int(p["salt"]))
 			if not born.is_empty():
 				# ОДИН УЗЕЛ — ОДНА МЕТЁЛКА.
@@ -2887,7 +2953,7 @@ func _support_ahead(p: Dictionary, spot: Dictionary, def: Dictionary) -> float:
 		return 0.0
 	var dir: Vector3 = step.normalized()
 	var reach: float = main.CELL_SPACING * float(def.get("support_reach", 3.0))
-	return _support_ray(Vector3(p["pos"]), dir, reach)
+	return _support_ray(main.grid, Vector3(p["pos"]), dir, reach)
 
 
 # ЕСТЬ ЛИ ВПЕРЕДИ ПОРОДА ВЫШЕ НАС — вот и вся опора.
@@ -2914,18 +2980,28 @@ func _support_ahead(p: Dictionary, spot: Dictionary, def: Dictionary) -> float:
 # кончается на том, чтобы её найти.
 const SUPPORT_STEPS := [[0.06, 1.0], [0.2, 0.72], [0.5, 0.5], [1.0, 0.32]]
 
-func _support_ray(here: Vector3, dir: Vector3, reach: float) -> float:
+#
+# СЕТКУ БЕРЁМ ГОТОВОЙ, А СПИСКИ — ПОСТОЯННЫМИ. Один взгляд вокруг нового звена
+# это 16 лучей по 4 шага на двух высотах, то есть 128 поисков ближайшего семени
+# — самое дорогое, что есть в рождении звена (3.4 мс из них). Прежде на каждую
+# пробу заводился новый список высот и трижды дёргалась `main.grid` через две
+# нетипизированные ссылки; и то, и другое здесь стоит дороже самой пробы.
+const SUPPORT_UP := [0.35, 0.85]            # по пояс и по плечо, в метрах
+const SUPPORT_WEIGHT := [0.65, 1.0]         # чего стоит найденное на этой высоте
+
+func _support_ray(grid, here: Vector3, dir: Vector3, reach: float) -> float:
 	var seen: float = 0.0
+	var solid: float = grid.SOLID_AT
 	for probe in SUPPORT_STEPS:
 		var base: Vector3 = here + dir * (reach * float(probe[0]))
 		var hit: float = 0.0
 		# Две высоты: по пояс — это ещё может быть бугорок, по плечо — уже стена.
-		for up in [[0.35, 0.65], [0.85, 1.0]]:
-			var c: int = main.grid.cell_at(base + Vector3.UP * float(up[0]))
-			if c < 0 or not main.grid.in_play(c):
+		for k in range(2):
+			var c: int = grid.cell_at(base + Vector3.UP * float(SUPPORT_UP[k]))
+			if c < 0 or not grid.in_play(c):
 				continue
-			if main.grid.fill_of(c) > main.grid.SOLID_AT:
-				hit = maxf(hit, float(up[1]))
+			if grid.fill_of(c) > solid:
+				hit = maxf(hit, float(SUPPORT_WEIGHT[k]))
 		seen = maxf(seen, hit * float(probe[1]))
 	return seen
 
@@ -2936,9 +3012,11 @@ func _support_ray(here: Vector3, dir: Vector3, reach: float) -> float:
 # чутьё — или наоборот.
 func support_around(pos: Vector3, reach: float) -> float:
 	var seen := 0.0
+	var grid = main.grid
 	for k in range(16):
 		var a: float = TAU * float(k) / 16.0
-		seen = maxf(seen, _support_ray(pos, Vector3(cos(a), 0.0, sin(a)), reach))
+		seen = maxf(seen,
+			_support_ray(grid, pos, Vector3(cos(a), 0.0, sin(a)), reach))
 	return seen
 
 
@@ -2958,13 +3036,25 @@ func support_around(pos: Vector3, reach: float) -> float:
 # Замерено: с таким требованием лиана выросла на три звена за три минуты вместо
 # трёхсот. Ловим только то, что ушло внутрь глубже терпимости.
 const PATH_DEEP: float = 0.02               # насколько внутрь ещё простительно, м
+# Где щупаем колено, долями его длины. Порядок — от опасного к безопасному.
+const PATH_PROBES := [0.6, 0.4, 0.8, 0.2, 1.0]
 
 func _path_clear(from: Vector3, to: Vector3) -> bool:
 	# Конец колена проверяем ТОЖЕ (доля 1.0): у висящего звена он и есть то место,
 	# где можно влезть в породу, а у стоящего на земле вылет там ровно ноль и
 	# проверке не мешает.
-	for k in [0.2, 0.4, 0.6, 0.8, 1.0]:
-		var probe: Vector3 = from.lerp(to, k)
+	# ПОРЯДОК ПРОБ — С СЕРЕДИНЫ, и это чистое ускорение: проверка возвращает
+	# «нельзя» на ПЕРВОЙ же пробе, что вошла в породу, а какая войдёт первой —
+	# на ответе не сказывается никак.
+	#
+	# С середины потому, что там и опасно: оба конца колена лежат НА поверхности
+	# и вылет у них около нуля, а в ложбину между двумя горбами хорда режет
+	# породу как раз посередине (об этом же сказано выше). Отказ «путь в породе»
+	# — самый частый у лианы: на посеве стенда их 4222 против четырёх десятков
+	# прочих, то есть почти каждый вызов кончается отказом, и лишние четыре
+	# поиска земли на нём — чистая работа впустую.
+	for k in PATH_PROBES:
+		var probe: Vector3 = from.lerp(to, float(k))
 		var land: Dictionary = main.grid.calm_surface_near(probe)
 		if land.is_empty():
 			continue                 # поверхности рядом нет — значит, чистый воздух
@@ -3355,7 +3445,7 @@ func _at_top(p: Dictionary, def: Dictionary) -> bool:
 	var up: Vector3 = Vector3.UP - nrm * nrm.dot(Vector3.UP)
 	if up.length_squared() <= 0.001:
 		return true
-	return _support_ray(Vector3(p["pos"]), up.normalized(),
+	return _support_ray(main.grid, Vector3(p["pos"]), up.normalized(),
 		main.CELL_SPACING * float(def.get("support_reach", 3.0))) <= 0.1
 
 
@@ -4325,6 +4415,11 @@ func import_garden(d: Dictionary) -> void:
 		if not by_cell.has(cell):
 			by_cell[cell] = {}
 		by_cell[cell][pid] = true
+		# В живые — все, кому есть куда меняться: доросшие и дозревшие выбудут
+		# на первом же ударе сами.
+		if float(patches[pid].get("lived", 0.0)) < GROW_SPAN \
+				or float(patches[pid]["m"]) < 1.0:
+			_live[pid] = true
 		_coarse_add(pid, patches[pid])
 		_dirty[cell] = true
 
@@ -4476,8 +4571,15 @@ func _mark_steps() -> void:
 	#
 	# СПРАШИВАЕМ ПОСЛЕ ОБХОДА, А НЕ В НЁМ: встреча сажает третий вид, то есть
 	# правит тот самый список, по которому мы идём.
+	#
+	# И ОБХОДИМ ТОЛЬКО ЖИВЫХ. Ступень меняется от зрелости, а зрелость — только
+	# от роста: у доросшего растения она стоит, и спрашивать его не за чем.
+	# Оставь тут обход всего сада — и весь смысл списка живых пропал бы, эта
+	# разметка идёт каждый удар наравне с самим ростом.
 	var woke: Array = []
-	for pid in patches:
+	for pid in _live:
+		if not patches.has(pid):
+			continue
 		var p: Dictionary = patches[pid]
 		var step := int(p["m"] * float(STEPS))
 		if step != p["step"]:
@@ -4528,6 +4630,11 @@ func flush_now() -> void:
 # Сколько кусков собралось в последний заход и во что обошёлся самый дорогой.
 # Второе число и есть предел запаса: кусок собирается целиком, разделить его
 # нечем, и кадр не может стоить меньше него.
+# Сколько растений ещё может измениться. Только для проверок.
+func live_count() -> int:
+	return _live.size()
+
+
 func rebuild_stats() -> Vector2:
 	return Vector2(float(_drawn_cells), _worst_cell)
 

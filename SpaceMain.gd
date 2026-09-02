@@ -2602,6 +2602,7 @@ func _selftest() -> void:
 	# напечатаны: иначе они считают по пустому месту и врут не глядя.
 	if plants.vine_stats()["links"] > 0:
 		_vine_grown_check()
+		_grow_limit_check()
 		_vine_brake_check()
 		_burst_check()
 		_plant_gift_check()
@@ -4232,6 +4233,40 @@ func _vine_bench() -> void:
 	print("Стенд лианы: середина ", got[got.size() / 2], ", от ", got[0],
 		" до ", got[got.size() - 1])
 	get_tree().quit()
+
+
+# ВСТАЁТ ЛИ РОСТ НА ТРЁХ МИНУТАХ (`GROW_SPAN`, решение пользователя 2026-09-02).
+#
+# Проверить это в обычных проверках нельзя: они растят по полторы минуты, то есть
+# до предела не доходят вовсе, и правило стояло бы непроверенным. Здесь лозу
+# доводят ЗА предел и смотрят, прибавилось ли после него хоть одно звено.
+#
+# Меряем ТРИЖДЫ: сколько было на девяноста секундах, сколько стало ровно на
+# пределе и сколько — минутой позже. Первые два числа обязаны различаться (иначе
+# лоза встала раньше срока и предел ни при чём), вторые два — совпасть.
+func _grow_limit_check() -> void:
+	var was: int = int(plants.vine_stats()["links"])
+	# Досчитываем до самого предела: полторы минуты уже прожиты в проверке выше.
+	var left: int = int(ceil((plants.GROW_SPAN - 90.0) / plants.TICK))
+	for _i in range(left):
+		plants._tick(plants.TICK)
+	var at_edge: int = int(plants.vine_stats()["links"])
+	# И ещё минута сверх предела — за неё не должно прибавиться ничего.
+	var t0 := Time.get_ticks_usec()
+	for _i in range(int(60.0 / plants.TICK)):
+		plants._tick(plants.TICK)
+	var idle := (Time.get_ticks_usec() - t0) / 1000.0
+	var after: int = int(plants.vine_stats()["links"])
+	print("Предел роста (", snappedf(plants.GROW_SPAN, 0.1), " с): звеньев на",
+		" полутора минутах — ", was, ", на самом пределе — ", at_edge,
+		", минутой позже — ", after,
+		"; последние два обязаны совпасть, а первые два — различаться")
+	# ЧТО ДОРОСШИЙ САД СТОИТ КАДРУ. Ради этого предел и заводился: пока роста
+	# не было конца, удар сердца обходил ВЕСЬ сад до скончания века.
+	print("Доросший сад: минута тиканья на ", after, " звеньях — ",
+		snappedf(idle, 0.1), " мс, то есть ", snappedf(idle / (60.0 / plants.TICK), 0.001),
+		" мс на удар; в живых осталось ", plants.live_count(), " растений")
+
 
 
 func _vine_grown_check() -> void:
