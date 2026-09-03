@@ -19,7 +19,7 @@ const PlantsData = preload("res://Plants.gd")
 # --- Параметры мира ---
 # Радиус острова ОБЫЧНЫЙ; настоящий живёт в `island_radius` и меняется ключом
 # `--island=N` (её решение 02.09.2026: «сделать размер ключом»).
-const ISLAND_RADIUS: float = 13.0
+const ISLAND_RADIUS: float = 26.0
 var island_radius: float = ISLAND_RADIUS
 const ISLAND_TOP: float = 2.5
 const ISLAND_BOTTOM: float = -3.5
@@ -248,7 +248,7 @@ func _ready() -> void:
 	# И цена растёт как КВАДРАТ радиуса: 13 м — 52 тысячи семян и секунда на
 	# постройку, 16 м — 78 тысяч и полторы, 20 м было бы 173 тысячи и две.
 	island_radius = clampf(_arg_num(OS.get_cmdline_user_args(), "--island",
-		ISLAND_RADIUS), 8.0, 16.0)
+		ISLAND_RADIUS), 8.0, 30.0)
 	if not is_equal_approx(island_radius, ISLAND_RADIUS):
 		print("Остров по ключу: радиус ", snappedf(island_radius, 0.1),
 			" м, то есть ", snappedf(island_radius * 2.0, 0.1), " м поперёк",
@@ -3842,16 +3842,23 @@ func _scene_slabs(rng: RandomNumberGenerator) -> void:
 		for k in range(many):
 			if left <= 0:
 				break
-			# ТЕСНО: врозь это уже не кучка, а те самые одиночные камни.
+			# ТЕСНО: врозь это уже не кучка, а те самые одиночные камни. Разброс
+			# внутри кучки тянется за размером острова вместе со всем прочим.
 			var side: float = rng.randf_range(0.0, TAU)
-			var step: float = rng.randf_range(0.0, 1.9)
+			var step: float = rng.randf_range(0.0, 1.9) * _scene_scale()
 			var spot: Vector3 = _ground_at(home.x + cos(side) * step,
 				home.z + sin(side) * step, SLAB_FLOOR)
 			if spot == Vector3.ZERO:
 				continue
 			# Крупная глыба в кучке ОДНА, прочие мельче: ровные читаются кладкой,
 			# а не обнажением. То же правило, что у больших обнажений.
-			brush = 1 if k == 0 else 0
+			#
+			# КИСТЬ ПОДНЯТА НА ШАГ (её кадр 02.09.2026: «множество угловатых
+			# артефактов»). Самая узкая кисть даёт радиус 0.77 м — это ОДНА ячейка
+			# решётки с четвертью, и глыба из неё выходит не глыбой, а пучком
+			# спиц: сглаживать нечем, у тела всего несколько тетраэдров. Теперь
+			# 1.6 и 2.9 м — три и четыре ячейки, и форма читается камнем.
+			brush = 2 if k == 0 else 1
 			var wide: float = _brush_radius()
 			var mass: float = _stroke_amount() * SCENE_FORCE
 			# СЕРЕДИНА МАЗКА ПОД ЗЕМЛЁЙ — в этом вся разница между глыбой в дёрне
