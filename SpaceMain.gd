@@ -70,6 +70,8 @@ var camera: Camera3D
 # Солнце и то, на какую даль у него сейчас растянуты тени (см. `_fit_shadow`).
 var sun: DirectionalLight3D
 var _shadow_far: float = -1.0
+# Звеньев у лозы на шестидесятой секунде — только для проверки предела роста.
+var _vine_at_60: int = 0
 
 # --- Мир ---
 var grid
@@ -4523,7 +4525,7 @@ func _grow_limit_check() -> void:
 	var was: int = int(plants.vine_stats()["links"])
 	# Досчитываем до самого предела: полторы минуты уже прожиты в проверке выше.
 	var left: int = int(ceil((plants.GROW_SPAN - 90.0) / plants.TICK))
-	for _i in range(left):
+	for _i in range(maxi(0, left)):
 		plants._tick(plants.TICK)
 	var at_edge: int = int(plants.vine_stats()["links"])
 	# И ещё минута сверх предела — за неё не должно прибавиться ничего.
@@ -4533,9 +4535,10 @@ func _grow_limit_check() -> void:
 	var idle := (Time.get_ticks_usec() - t0) / 1000.0
 	var after: int = int(plants.vine_stats()["links"])
 	print("Предел роста (", snappedf(plants.GROW_SPAN, 0.1), " с): звеньев на",
-		" полутора минутах — ", was, ", на самом пределе — ", at_edge,
+		" шестидесятой секунде — ", _vine_at_60, ", на самом пределе — ", at_edge,
 		", минутой позже — ", after,
-		"; последние два обязаны совпасть, а первые два — различаться")
+		"; последние два обязаны совпасть, а первые два — различаться",
+		" (на девяноста секундах было ", was, ")")
 	# ЧТО ДОРОСШИЙ САД СТОИТ КАДРУ. Ради этого предел и заводился: пока роста
 	# не было конца, удар сердца обходил ВЕСЬ сад до скончания века.
 	print("Доросший сад: минута тиканья на ", after, " звеньях — ",
@@ -4553,7 +4556,16 @@ func _vine_grown_check() -> void:
 			plants.remove_at(pid)
 	# Срок вдвое короче прежнего: растения ускорены вдвое, и сад выходит тот же —
 	# см. про это у проверки мха выше.
-	for _i in range(600):
+	#
+	# СЧЁТ НА ШЕСТИДЕСЯТОЙ СЕКУНДЕ ЗАПОМИНАЕМ — им пользуется проверка предела
+	# роста ниже. Прежде она брала за «до предела» счёт на девяноста секундах, но
+	# с тех пор, как сам предел стал девяноста секундами (её решение 02.09.2026),
+	# это ровно предел и есть: два числа совпадали бы всегда, и проверка молча
+	# перестала бы что-либо доказывать.
+	for _i in range(400):
+		plants._tick(0.15)
+	_vine_at_60 = int(plants.vine_stats()["links"])
+	for _i in range(200):
 		plants._tick(0.15)
 	var big: Dictionary = plants.vine_stats()
 	var links: float = maxf(1.0, float(big["links"]))
