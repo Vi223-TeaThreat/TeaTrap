@@ -1,0 +1,70 @@
+Copyright © 2026 Виктория (Vi223-TeaThreat). Все права сохранены.
+Copyright © 2026 Viktoria (Vi223-TeaThreat). All rights reserved.
+
+================================================================================
+ПО-РУССКИ
+================================================================================
+
+Это НЕ свободная лицензия. Исходники открыты для чтения, но не для
+использования.
+
+ЧТО СЮДА ВХОДИТ: весь код проекта, шейдеры, рисунки в папке `art/`, тексты
+`README.md` и прочих разборов, а также сама игра и её название.
+
+МОЖНО без спроса:
+  — читать исходники, разбираться, как это устроено, и учиться на них;
+  — играть в демку и показывать её другим;
+  — форкнуть репозиторий средствами GitHub (это разрешают правила самого
+    GitHub, и запретить это, оставаясь публичным, нельзя).
+
+НЕЛЬЗЯ без письменного разрешения автора:
+  — брать код, шейдеры или рисунки в свои проекты, целиком или частями;
+  — распространять игру или её сборки, в том числе изменённые;
+  — использовать что-либо отсюда в коммерческих целях;
+  — обучать на этих файлах модели.
+
+Хотите что-то из этого — напишите автору через GitHub.
+
+СТОРОННЕЕ. Игра сделана на движке Godot Engine, он распространяется под
+лицензией MIT и принадлежит своим авторам. Настоящий копирайт на движок НЕ
+распространяется: в собранной игре есть его код, и при раздаче сборок
+полагается сохранять уведомление об авторских правах Godot (движок показывает
+его сам, в разделе с лицензиями). Шаблоны экспорта в репозиторий не входят.
+
+СОАВТОРСТВО. Часть истории проекта содержит коммиты другого человека
+(Mikhail Koshkin). Права на его вклад принадлежат ему; настоящее уведомление
+их не отменяет и не переносит.
+
+================================================================================
+IN ENGLISH
+================================================================================
+
+This is NOT an open-source licence. The sources are published for reading, not
+for use.
+
+COVERED: all project code, shaders, artwork in `art/`, the text of `README.md`
+and other design notes, the game itself and its name.
+
+YOU MAY, without asking:
+  — read the sources, study how it works, and learn from them;
+  — play the demo and show it to others;
+  — fork the repository through GitHub (GitHub's own terms allow this, and it
+    cannot be forbidden while the repository stays public).
+
+YOU MAY NOT, without the author's written permission:
+  — use the code, shaders or artwork in your own projects, in whole or in part;
+  — distribute the game or builds of it, modified or not;
+  — use anything here commercially;
+  — train models on these files.
+
+If you want any of the above, contact the author through GitHub.
+
+THIRD PARTY. The game is built with the Godot Engine, which is distributed
+under the MIT licence and belongs to its own authors. This copyright does not
+extend to the engine: built games contain its code, and distributing them
+requires keeping the Godot copyright notice (the engine shows it itself, in its
+licence screen). Export templates are not part of this repository.
+
+CO-AUTHORSHIP. Part of the project history contains commits by another person
+(Mikhail Koshkin). Rights to their contribution belong to them; this notice
+neither cancels nor transfers those rights.
