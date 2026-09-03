@@ -17,7 +17,10 @@ const SurfaceScript = preload("res://Surface.gd")
 const PlantsData = preload("res://Plants.gd")
 
 # --- Параметры мира ---
+# Радиус острова ОБЫЧНЫЙ; настоящий живёт в `island_radius` и меняется ключом
+# `--island=N` (её решение 02.09.2026: «сделать размер ключом»).
 const ISLAND_RADIUS: float = 13.0
+var island_radius: float = ISLAND_RADIUS
 const ISLAND_TOP: float = 2.5
 const ISLAND_BOTTOM: float = -3.5
 # ЗАПАС ВЫСОТЫ — ВВЕРХ И ВНИЗ (решение пользователя 2026-08-28: «увеличь
@@ -229,6 +232,25 @@ func _ready() -> void:
 			if kept != 0:
 				world_seed = kept
 	world_seed = int(_arg_num(OS.get_cmdline_user_args(), "--seed", float(world_seed)))
+	# РАЗМЕР ОСТРОВА КЛЮЧОМ (её решение 02.09.2026): по умолчанию прежние 26 м
+	# поперёк, но можно запустить с другим числом и сравнить кадры. Ключ — разовая
+	# проба, как и `--seed`: в `world.cfg` он не пишется и на следующий запуск не
+	# переходит.
+	#
+	# ПРЕДЕЛ ИЗМЕРЕН, А НЕ НАЗНАЧЕН. Рельеф соразмерен острову (см. `_land_k` в
+	# сетке), и на широком острове он выходит крупнее — а решётка крупнее
+	# некоторого предела не держит: поверхность перестаёт замыкаться. Замер
+	# 02.09.2026 на эталонном зерне: радиусы 10, 13 и 16 замкнуты начисто, 18 даёт
+	# четыре незамкнутых места, 20 — восемь. Потолок 16 и стоит по этому замеру.
+	#
+	# И цена растёт как КВАДРАТ радиуса: 13 м — 52 тысячи семян и секунда на
+	# постройку, 16 м — 78 тысяч и полторы, 20 м было бы 173 тысячи и две.
+	island_radius = clampf(_arg_num(OS.get_cmdline_user_args(), "--island",
+		ISLAND_RADIUS), 8.0, 16.0)
+	if not is_equal_approx(island_radius, ISLAND_RADIUS):
+		print("Остров по ключу: радиус ", snappedf(island_radius, 0.1),
+			" м, то есть ", snappedf(island_radius * 2.0, 0.1), " м поперёк",
+			" (обычный — ", snappedf(ISLAND_RADIUS * 2.0, 0.1), " м)")
 	_build_world()
 	_setup_toolbar()
 	# БЕЗ await: подгонка ждёт кадров вёрстки, а остальному запуску ждать её
@@ -602,7 +624,7 @@ func _fit_shadow() -> void:
 		return
 	# Остров стоит в начале координат, камера — где угодно вокруг. Запас в
 	# четыре метра на то, что торчит выше земли: скалы, лоза, свисающие плети.
-	var far: float = camera.global_position.length() + ISLAND_RADIUS + 4.0
+	var far: float = camera.global_position.length() + island_radius + 4.0
 	far = clampf(ceilf(far / 4.0) * 4.0, 28.0, 240.0)
 	if is_equal_approx(far, _shadow_far):
 		return
@@ -670,7 +692,7 @@ func _camera_flat_axes() -> Dictionary:
 func _build_world() -> void:
 	var started := Time.get_ticks_msec()
 	grid = SpaceGridScript.new()
-	grid.generate(ISLAND_RADIUS, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, UNDERROOM,
+	grid.generate(island_radius, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, UNDERROOM,
 		CELL_SPACING, world_seed)
 	solid = {}
 	for i in grid.solid:
@@ -726,6 +748,9 @@ func _fill_world() -> void:
 		chunk_nodes.size(), ", вырезано ячеек — ", grid.built_count())
 	if "--audit" in OS.get_cmdline_user_args():
 		_audit_surface()
+		# Рельеф печатаем тут же: голый мир, без обстановки — те же числа, что и в
+		# самопроверке, но за секунды, а не за десять минут.
+		_relief_report()
 
 
 # Погребена ли ячейка целиком в породе. Проверяем ПО СЕМЕНАМ, без вырезания:
@@ -2425,6 +2450,18 @@ func _audit_surface() -> void:
 		var parts: Array = String(k).split(">")
 		if not edges.has("%s>%s" % [parts[1], parts[0]]):
 			holes += 1
+			# ГДЕ ИМЕННО РВЁТСЯ. Ключ вершины — это пара семян, между которыми
+			# она сидит; по ним и место. Без этого дыры чинятся вслепую: замер
+			# 02.09.2026 стоил шести прогонов на догадки, пока место не назвали.
+			if holes <= 5:
+				var ends: Array = String(parts[0]).split(".")
+				var a: int = int(String(ends[0]))
+				if a >= 0 and a < grid.seeds.size():
+					var at: Vector3 = grid.seeds[a]
+					print("   дыра у ", Vector3(snappedf(at.x, 0.1),
+						snappedf(at.y, 0.1), snappedf(at.z, 0.1)),
+						", от середины ", snappedf(Vector2(at.x, at.z).length(),
+						0.1), " м при радиусе ", snappedf(island_radius, 0.1))
 	print("Рёбер поверхности ", edges.size(), ", вывернутых — ", flipped,
 		", незамкнутых — ", holes,
 		"; вывернутых тетраэдров на поверхности — ", int(stats.get("inverted", 0)))
@@ -3369,7 +3406,7 @@ const RELIEF_STEP: float = 0.8    # шаг сетки замера, м
 func _relief_report() -> void:
 	var h: Dictionary = {}        # (i,j) -> высота земли
 	var ys := PackedFloat32Array()
-	var edge: float = ISLAND_RADIUS - 2.0
+	var edge: float = island_radius - 2.0
 	var wide: int = int(edge / RELIEF_STEP)
 	for i in range(-wide, wide + 1):
 		for j in range(-wide, wide + 1):
@@ -3426,6 +3463,56 @@ func _relief_report() -> void:
 		"% (ямы); на полметра подъёма приходится ",
 		snappedf(0.0 if runs.is_empty() else runs[runs.size() / 2], 0.01),
 		" м вширь — у холма это метры, у пупырки доли метра")
+	# ПОЛОГО, КРУТО И ОБРЫВОМ — по её заданию 02.09.2026 «крупные холмы с
+	# пологими склонами... и обрывами». Одной средней крутизны тут мало: пологий
+	# склон и обрыв обязаны быть ОБА, и порознь, а средняя между ними покажет
+	# ровно то, чего на острове нет.
+	#
+	# Мерим наклон между соседними столбцами разметки и раскладываем по трём
+	# кучам. Обрыв у ЗЕМЛИ — это от 40°: круче она не держится и оплывает.
+	var soft := 0
+	var mid_steep := 0
+	var cliff := 0
+	var slopes := 0
+	# ОВРАГИ — это не наклон, а ПРОВАЛ ПОСРЕДИ РОВНОГО: столбец заметно ниже
+	# обоих своих соседей. Тем и отличается промоина от склона, что склон идёт
+	# в одну сторону, а овраг — вниз с обеих.
+	var cut := 0
+	var cut_deep := 0.0
+	for key in h:
+		var k: Vector2i = key
+		for way in [Vector2i(1, 0), Vector2i(0, 1)]:
+			var nb: Vector2i = k + way
+			if not h.has(nb):
+				continue
+			slopes += 1
+			var tilt: float = rad_to_deg(atan(absf(float(h[nb]) - float(h[k]))
+				/ RELIEF_STEP))
+			if tilt < 20.0:
+				soft += 1
+			elif tilt < 40.0:
+				mid_steep += 1
+			else:
+				cliff += 1
+		for way in [Vector2i(1, 0), Vector2i(0, 1)]:
+			var a: Vector2i = k - way
+			var b: Vector2i = k + way
+			if not h.has(a) or not h.has(b):
+				continue
+			var dip: float = (float(h[a]) + float(h[b])) * 0.5 - float(h[k])
+			if dip > 0.30:
+				cut += 1
+				cut_deep = maxf(cut_deep, dip)
+				break
+	var all_slopes: float = maxf(1.0, float(slopes))
+	print("Склоны острова: полого (до 20°) ",
+		snappedf(100.0 * float(soft) / all_slopes, 0.1), "%, круто (20–40°) ",
+		snappedf(100.0 * float(mid_steep) / all_slopes, 0.1), "%, обрывом (круче",
+		" 40°) ", snappedf(100.0 * float(cliff) / all_slopes, 0.1),
+		"% — пологого должно быть большинство, обрывы редкими, но не нулём")
+	print("Овраги: столбцов, провалившихся между соседями, — ", cut, " из ",
+		h.size(), ", самый глубокий провал ", snappedf(cut_deep, 0.01),
+		" м; ноль значил бы, что промоин нет вовсе")
 
 
 # ПОЛЕ СО СКАЛАМИ. Несколько обнажений разной величины, разнесённых по острову.
@@ -3442,6 +3529,12 @@ func _relief_report() -> void:
 const SCENE_ROCKS: int = 4        # сколько обнажений
 const SCENE_NEAR: float = 4.5     # ближе этого к середине не ставим, м
 const SCENE_FAR: float = 9.5      # и дальше этого тоже, м
+
+# ОБСТАНОВКА ТЯНЕТСЯ ЗА РАЗМЕРОМ ОСТРОВА. Числа выше подобраны на обычных 13 м
+# радиуса; оставь их в метрах — и на острове вдвое шире вся обстановка сбилась
+# бы в середину, а края остались голыми. Здесь они становятся долями.
+func _scene_scale() -> float:
+	return island_radius / ISLAND_RADIUS
 # Насколько высоки обнажения, в уровнях подъёма (уровень — 0.6 ячейки, то есть
 # 40 см). Разброс нужен: скалы одной высоты читаются забором.
 const SCENE_LOW: int = 2
@@ -3498,6 +3591,10 @@ func _scene_rocks() -> void:
 	# воспроизводимые кадры, и сравнение «до/после» живо, пока эта ветка цела.
 	if world_seed == WORLD_SEED:
 		_scene_rocks_classic(rng)
+		# Плитняк идёт и сюда: он появился по её референсу 02.09.2026, и смотреть
+		# она будет прежде всего обычный остров. Классическая четвёрка обнажений
+		# при этом цела — плитняк лежит на лугу между ними, а не вместо них.
+		_scene_slabs(rng)
 		brush = was_brush
 		return
 	# НОВЫЙ ОСТРОВ СТАВИТСЯ РАЗНООБРАЗНО (решение пользователя 2026-08-31:
@@ -3541,7 +3638,7 @@ func _scene_rocks() -> void:
 			# Разброс внутри гнезда узкий: это одно обнажение, разбитое на куски,
 			# а не три скалы в разных концах острова.
 			var ang: float = home + rng.randf_range(-0.22, 0.22)
-			var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
+			var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR) * _scene_scale()
 			var spot: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
 			if spot != Vector3.ZERO and (at == Vector3.ZERO or spot.y > at.y):
 				at = spot
@@ -3561,10 +3658,12 @@ func _scene_rocks() -> void:
 	# Ямы в земле — отдельно от скал, на свободных местах.
 	for i in range(rng.randi_range(0, 2)):
 		var ang: float = rng.randf_range(0.0, TAU)
-		var far: float = rng.randf_range(SCENE_NEAR * 0.5, SCENE_FAR * 0.8)
+		var far: float = rng.randf_range(SCENE_NEAR * 0.5, SCENE_FAR * 0.8) * _scene_scale()
 		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
 		if at != Vector3.ZERO:
 			_carve(at + Vector3(0, CELL_SPACING, 0), rng.randf_range(1.0, 1.8))
+	# Плитняк — последним: он ложится на готовую землю между обнажениями.
+	_scene_slabs(rng)
 	brush = was_brush
 
 
@@ -3592,7 +3691,7 @@ func _scene_relief(rng: RandomNumberGenerator) -> void:
 	var many: int = rng.randi_range(SCENE_HILLS_LOW, SCENE_HILLS_HIGH)
 	for i in range(many):
 		var ang: float = rng.randf_range(0.0, TAU)
-		var far: float = rng.randf_range(1.5, ISLAND_RADIUS - 5.0)
+		var far: float = rng.randf_range(1.5, maxf(2.5, island_radius - 5.0))
 		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far, ISLAND_BOTTOM)
 		if at == Vector3.ZERO:
 			continue
@@ -3705,6 +3804,64 @@ func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void
 		_carve(mid + side * 1.4 + Vector3(0, CELL_SPACING * 1.6, 0), 1.5)
 
 
+# ПЛИТНЯК — НИЗКИЕ ГЛЫБЫ, ВЫШЕДШИЕ ИЗ ДЁРНА КУЧКАМИ. Её референс 02.09.2026
+# (альпийский луг): «кластерами скал». На снимке это главное, что есть на самом
+# лугу: светлые плиты лежат тесными гнёздами, между гнёздами чистая трава, и
+# каждая плита сидит в дёрне наполовину.
+#
+# ЭТО НЕ ТЕ РАЗБРОСАННЫЕ КАМНИ, ЧТО УБРАНЫ 31.08, и путать их нельзя. Те были
+# ОТДЕЛЬНЫМИ ТЕЛАМИ (`Rocks.gd`), лежали вокруг массива поодиночке и читались
+# мусором рядом с ним — решение «убрать вообще» остаётся в силе. Эти же — сама
+# порода, вышедшая на поверхность: тот же мазок камня, что у скал, только
+# середина его сидит НИЖЕ земли, и наружу выходит одна макушка.
+const SLAB_NESTS_LOW: int = 3      # кучек на обычном острове
+const SLAB_NESTS_HIGH: int = 5
+const SLAB_DABS: int = 22          # общий запас мазков на весь плитняк
+# Ниже этой высоты земли плитняк не ищет. Не ноль: луг у нового рельефа местами
+# уходит под ноль, и с обычной отсечкой (−0.8) половина острова была бы для него
+# закрыта.
+const SLAB_FLOOR: float = -2.2
+
+func _scene_slabs(rng: RandomNumberGenerator) -> void:
+	var was_brush := brush
+	var left: int = SLAB_DABS
+	var nests: int = rng.randi_range(SLAB_NESTS_LOW, SLAB_NESTS_HIGH)
+	for n in range(nests):
+		if left <= 0:
+			break
+		var ang: float = rng.randf_range(0.0, TAU)
+		# По всему лугу, а не кольцом: плитняк не обстановка вокруг середины, он
+		# и есть луг. Только у самой кромки не ставим — там обрыв острова.
+		var far: float = rng.randf_range(0.25, 0.88) * island_radius
+		var home: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far, SLAB_FLOOR)
+		if home == Vector3.ZERO:
+			continue
+		var many: int = rng.randi_range(3, 6)
+		for k in range(many):
+			if left <= 0:
+				break
+			# ТЕСНО: врозь это уже не кучка, а те самые одиночные камни.
+			var side: float = rng.randf_range(0.0, TAU)
+			var step: float = rng.randf_range(0.0, 1.9)
+			var spot: Vector3 = _ground_at(home.x + cos(side) * step,
+				home.z + sin(side) * step, SLAB_FLOOR)
+			if spot == Vector3.ZERO:
+				continue
+			# Крупная глыба в кучке ОДНА, прочие мельче: ровные читаются кладкой,
+			# а не обнажением. То же правило, что у больших обнажений.
+			brush = 1 if k == 0 else 0
+			var wide: float = _brush_radius()
+			var mass: float = _stroke_amount() * SCENE_FORCE
+			# СЕРЕДИНА МАЗКА ПОД ЗЕМЛЁЙ — в этом вся разница между глыбой в дёрне
+			# и шаром, положенным на траву. Наружу выходит примерно четверть
+			# метра у мелкой и до полуметра у крупной.
+			var sink: float = wide * rng.randf_range(0.55, 0.80)
+			left -= 1
+			_stroke(spot - Vector3(0, sink, 0), wide, mass, "cliff",
+				_stone_push(mass, "cliff"))
+	brush = was_brush
+
+
 # Столб камня от земли вверх — только от найденной земли: скала не появляется
 # в воздухе по построению.
 func _scene_tower(at: Vector3, up: int, rise: float = SCENE_RISE,
@@ -3737,7 +3894,7 @@ func _scene_rocks_classic(rng: RandomNumberGenerator) -> void:
 		# По кругу с разбросом: доля оборота своя у каждого, плюс качание.
 		var ang: float = turn + TAU * float(i) / float(SCENE_ROCKS) \
 			+ rng.randf_range(-0.5, 0.5)
-		var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR)
+		var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR) * _scene_scale()
 		var at: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
 		if at == Vector3.ZERO:
 			continue
