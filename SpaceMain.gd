@@ -29,7 +29,19 @@ const ISLAND_BOTTOM: float = -3.5
 # запас лишь расширяет объём, в котором игроку позволено класть и копать.
 #
 # Платим семенами: объём мира вырос вдвое, и с ним постройка и память.
-const HEADROOM: float = 10.0         # запас высоты над островом
+# ВДВОЕ ВЫШЕ с 04.09.2026 (её решение: «увеличь вертикальное пространство
+# острова — в высоту»). Было 10 м, стало 20: над землёй теперь двадцать два с
+# половиной метра — это тридцать три ячейки решётки, выше самой высокой скалы
+# сцены втрое.
+#
+# ВНИЗ НЕ ТРОГАЛИ: просили высоту. Копать по-прежнему можно на четыре метра ниже
+# подошвы острова.
+#
+# ЧЕМ ПЛАТИМ. Семена сеются по всему играбельному объёму, и объём этот вырос в
+# полтора раза (20 м высоты против 30). Во столько же дорожает постройка мира —
+# та самая, на которую она жаловалась «генерируется очень долго». Числа — в
+# README, «Стенд острова».
+const HEADROOM: float = 20.0         # запас высоты над островом
 const UNDERROOM: float = 4.0         # ... и под ним, чтобы было куда копать
 const CELL_SPACING: float = 0.6667   # втрое мельче прежнего — детальнее рельеф
 # ПИКСЕЛЬ ЗЕМЛИ, в метрах: сторона клетки, которой красится поверхность.
@@ -52,6 +64,30 @@ var world_seed: int = WORLD_SEED
 const SMOOTH: float = 12.8
 const ORBIT_SENS: float = 0.25
 const MOUSE_PAN: float = 0.0016
+
+# ПРОСТОР КАМЕРЫ (её решение 04.09.2026: «добавь больше свободы перемещения
+# камере, увеличь доступное ей пространство перемещения и приближения»).
+#
+# Вширь камера и раньше не была ограничена ничем — поворотная точка ездит куда
+# угодно. Держали её три другие вещи, и все три раздвинуты:
+#
+#  1. ДАЛЬ И БЛИЗЬ. Было 0.8…140 м, стало 0.35…340. Ближний предел — почти
+#     вплотную к кочке (у камеры срез в 2 см, ближе нечего и смотреть),
+#     дальний — вчетверо дальше поперечника острова, чтобы он весь помещался в
+#     кадр с запасом на выросшие в высоту постройки.
+#  2. НАКЛОН. Было −85…−5°, стало −89…+30°: теперь можно и встать точно над
+#     садом, и заглянуть на постройку СНИЗУ ВВЕРХ — а это стало нужно ровно
+#     тогда, когда места вверх стало вдвое больше (см. `HEADROOM`).
+#  3. ВЫСОТА поворотной точки. Её не было вовсе: точка всегда сидела на нуле
+#     мира, и подняться к макушке скалы было нельзя. Теперь она ходит вверх и
+#     вниз — Shift со средней кнопкой, а на клавишах страницы вверх/вниз.
+const ZOOM_NEAR: float = 0.35
+const ZOOM_FAR: float = 340.0
+const PITCH_LOW: float = -89.0       # почти отвесно сверху
+const PITCH_HIGH: float = 30.0       # ... и снизу вверх
+const LIFT_LOW: float = -12.0        # докуда поворотная точка опускается
+const LIFT_HIGH: float = 60.0        # ... и докуда поднимается
+const KEY_LIFT: float = 1.6          # метров за нажатие страницы
 
 var target_yaw: float = -30.0
 var target_pitch: float = -30.0
@@ -223,7 +259,7 @@ func _ready() -> void:
 	# Все записанные числа сняты на эталонном зерне, стенды обязаны идти по нему.
 	var bench: bool = false
 	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
-			"--meetbench", "--rockbench", "--scenebench"]:
+			"--meetbench", "--rockbench", "--scenebench", "--showbench"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	if not bench and FileAccess.file_exists(SEED_PATH):
@@ -292,6 +328,12 @@ func _ready() -> void:
 		# крутить числа встречи приходится по многу раз подряд.
 		await _fill_world()
 		_meet_stand()
+		get_tree().quit()
+	elif "--showbench" in args:
+		# Чего стоит ПОКАЗ роста: сад растёт кадр за кадром, как в игре, и стенд
+		# считает пересборки. См. `_show_bench`.
+		await _fill_world()
+		_show_bench(args)
 		get_tree().quit()
 	elif "--scenebench" in args:
 		# Новый остров: сколько он стоит и насколько разный. Сад не грузим и не
@@ -609,10 +651,10 @@ func _setup_light() -> void:
 # карта теней постоянного размера растягивается на эту даль, и чем даль больше,
 # тем крупнее клетка тени.
 #
-# ПО УМОЛЧАНИЮ ОНА СТО МЕТРОВ, А ОСТРОВ — ДВАДЦАТЬ ШЕСТЬ ПОПЕРЁК. Четыре пятых
-# дали приходились на пустоту вокруг него, и тень ложилась клетками впятеро
+# ПО УМОЛЧАНИЮ ОНА СТО МЕТРОВ, А ОСТРОВ — ПЯТЬДЕСЯТ ДВА ПОПЕРЁК. Больше половины
+# дали приходилось на пустоту вокруг него, и тень ложилась клетками вдвое
 # крупнее нужного. А стоило отъехать камерой дальше сотни метров (колесо пускает
-# до ста сорока), и тени пропадали ВОВСЕ — остров оказывался за той далью.
+# до `ZOOM_FAR`), и тени пропадали ВОВСЕ — остров оказывался за той далью.
 #
 # Поэтому даль считается от камеры каждый раз, как камера двинулась: до дальнего
 # края острова и ни метром больше.
@@ -627,7 +669,10 @@ func _fit_shadow() -> void:
 	# Остров стоит в начале координат, камера — где угодно вокруг. Запас в
 	# четыре метра на то, что торчит выше земли: скалы, лоза, свисающие плети.
 	var far: float = camera.global_position.length() + island_radius + 4.0
-	far = clampf(ceilf(far / 4.0) * 4.0, 28.0, 240.0)
+	# ПОТОЛОК ИДЁТ ОТ ПРОСТОРА КАМЕРЫ, а не от круглого числа: камера отъезжает
+	# на `ZOOM_FAR`, поворотная точка ездит куда угодно, и упрись потолок ниже —
+	# тени пропадали бы ровно там, куда её и отпустили.
+	far = clampf(ceilf(far / 4.0) * 4.0, 28.0, ZOOM_FAR + island_radius + 140.0)
 	if is_equal_approx(far, _shadow_far):
 		return
 	_shadow_far = far
@@ -945,7 +990,30 @@ func _rebuild_chunk(chunk: Vector3i) -> void:
 # Постановка — это ЛЕПКА. Один мазок прибавляет земли понемногу, форма
 # набирается несколькими; поверхность идёт по уровню половинного заполнения,
 # поэтому прибавка выходит плавным наплывом, а не глыбой с углами.
-const STROKE: float = 0.75        # сколько добавляет один мазок узкой кистью
+const STROKE: float = 1.125       # сколько добавляет один мазок узкой кистью
+
+
+# ВСЕ КИСТИ ШИРЕ И СИЛЬНЕЕ В ПОЛТОРА РАЗА (её решение 04.09.2026: «увеличь радиус
+# действия и силу действия всех кистей в 1.5 раза»).
+#
+# Число стоит ОДНО И ЗДЕСЬ, а не размазано по трём формулам, потому что тянет за
+# собой три вещи разом, и разъедься они — кисть станет вести себя не так, как
+# выглядит:
+#
+#   1. сам радиус (`_brush_radius`);
+#   2. мерку, от которой считается сила (`_stroke_amount`): сила обратна ширине,
+#      и полную получает САМАЯ УЗКАЯ кисть — значит, мерка обязана уехать вместе
+#      с ней, иначе прибавка силы съелась бы прибавкой ширины;
+#   3. мерку частоты повтора при удержании (`_hold_step`): широкая повторяется
+#      реже, и по той же причине мерка должна уехать следом — иначе кисть стала
+#      бы сильнее, но во столько же раз реже, то есть холм рос бы с прежней
+#      скоростью.
+#
+# `STROKE` при этом поднят отдельно, с 0.75 до 1.125: он и есть сила самой узкой
+# кисти, и полтора раза сидят прямо в нём.
+const BRUSH_WIDE: float = 1.5
+# От чего отсчитываются и сила, и частота: радиус самой узкой кисти.
+const BRUSH_BASE: float = CELL_SPACING * 2.4 * BRUSH_WIDE
 
 
 # СИЛА МАЗКА ОБРАТНА ШИРИНЕ КИСТИ. Широкая кисть за один мазок и так трогает
@@ -963,11 +1031,11 @@ const STROKE: float = 0.75        # сколько добавляет один �
 var stroke_gain: float = 1.0
 
 func _stroke_amount(erase: bool = false) -> float:
-	return STROKE * stroke_gain * (CELL_SPACING * 2.4) / _brush_radius(erase)
+	return STROKE * stroke_gain * BRUSH_BASE / _brush_radius(erase)
 # Насколько один проход кисти размывания подтягивает ячейку к соседям. Держим
 # небольшим: размывание должно набираться повторами, как и лепка, — иначе один
 # щелчок слизывает форму начисто и вернуть её можно только отменой.
-const BLUR: float = 0.34
+const BLUR: float = 0.51
 
 # ШИРИНА КИСТИ СЧИТАЕТСЯ В ЯЧЕЙКАХ, и это главное число во всей лепке.
 #
@@ -1008,7 +1076,8 @@ func _active_brush(erase: bool) -> int:
 const GROW_SMALLER: float = 1.9
 
 func _brush_radius(erase: bool = false) -> float:
-	var r: float = CELL_SPACING * (1.15 + 1.25 * float(_active_brush(erase)))
+	var r: float = CELL_SPACING * (1.15 + 1.25 * float(_active_brush(erase))) \
+		* BRUSH_WIDE
 	return r / GROW_SMALLER if PlantsData.is_care(current_tool) else r
 
 
@@ -1876,13 +1945,13 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		tilt_up.text = " ⤒ "
 		tilt_up.tooltip_text = "Взгляд ниже к земле"
 		tilt_up.pressed.connect(func():
-			target_pitch = clampf(target_pitch + 15.0, -85.0, -5.0))
+			target_pitch = clampf(target_pitch + 15.0, PITCH_LOW, PITCH_HIGH))
 		extra.add_child(tilt_up)
 		var tilt_down := _list_button(-1, true)
 		tilt_down.text = " ⤓ "
 		tilt_down.tooltip_text = "Взгляд круче сверху"
 		tilt_down.pressed.connect(func():
-			target_pitch = clampf(target_pitch - 15.0, -85.0, -5.0))
+			target_pitch = clampf(target_pitch - 15.0, PITCH_LOW, PITCH_HIGH))
 		extra.add_child(tilt_down)
 
 
@@ -2056,7 +2125,7 @@ func _setup_hint() -> void:
 		# руки и на редком, и на плотном экране одинаково.
 		label.add_theme_font_size_override("font_size", 11 * ui_scale)
 	else:
-		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
+		label.text = "ЛКМ — поставить · Shift + ЛКМ или 2-я боковая — убрать (обе держатся)\n1-я боковая / Ctrl+Z — отменить (мазок кистью снимается целиком)\nПКМ — вращать · средняя — двигать · Shift + средняя или PgUp/PgDn — выше и ниже · колесо — приближение\nЦифры 1-3 — свернуть раздел · режим, ширина кисти и снятия — в панели слева"
 		# КЕГЛЬ ПОДСКАЗКИ — ТОТ ЖЕ, ЧТО У ПАНЕЛИ. Плотность экрана тут не
 		# угадываем (на внешних мониторах она врёт): подсказка пересобирается
 		# после ужатия меню и берёт готовый `ui_scale` — один размер на весь
@@ -2125,7 +2194,7 @@ func _hold_step() -> float:
 	# секунды, так что четыре мазка в секунду держат кисть непрерывной с запасом.
 	if PlantsData.is_care(current_tool):
 		return GROW_STEP
-	return HOLD_STEP * _brush_radius(held_erase) / (CELL_SPACING * 2.4)
+	return HOLD_STEP * _brush_radius(held_erase) / BRUSH_BASE
 
 
 const GROW_STEP: float = 0.25
@@ -2208,17 +2277,27 @@ func _unhandled_input(event: InputEvent) -> void:
 			# работать одинаково.
 			_hold_start(MOUSE_BUTTON_XBUTTON2, event, true)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
-			target_zoom = clampf(target_zoom * 0.9, 0.8, 140.0)
+			target_zoom = clampf(target_zoom * 0.9, ZOOM_NEAR, ZOOM_FAR)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
-			target_zoom = clampf(target_zoom * 1.1, 0.8, 140.0)
+			target_zoom = clampf(target_zoom * 1.1, ZOOM_NEAR, ZOOM_FAR)
 	elif event is InputEventMouseMotion:
 		if orbiting:
 			target_yaw -= event.relative.x * ORBIT_SENS
-			target_pitch = clampf(target_pitch - event.relative.y * ORBIT_SENS, -85.0, -5.0)
+			target_pitch = clampf(target_pitch - event.relative.y * ORBIT_SENS,
+				PITCH_LOW, PITCH_HIGH)
 		elif panning:
-			var flat := _camera_flat_axes()
-			var scale := cur_zoom * MOUSE_PAN
-			target_pivot += (-flat.right * event.relative.x + flat.forward * event.relative.y) * scale
+			# СО SHIFT СРЕДНЯЯ КНОПКА ВОДИТ ВВЕРХ И ВНИЗ, а не вперёд и вбок.
+			# Отдельной кнопки под это нет, а движение то же самое — «двигать
+			# камеру», только по третьей оси.
+			if event.shift_pressed:
+				target_pivot.y = clampf(
+					target_pivot.y - event.relative.y * cur_zoom * MOUSE_PAN,
+					LIFT_LOW, LIFT_HIGH)
+			else:
+				var flat := _camera_flat_axes()
+				var scale := cur_zoom * MOUSE_PAN
+				target_pivot += (-flat.right * event.relative.x
+					+ flat.forward * event.relative.y) * scale
 	elif event is InputEventScreenTouch or event is InputEventScreenDrag:
 		_touch_input(event)
 	elif event is InputEventKey and event.pressed:
@@ -2226,6 +2305,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			_undo()
 		elif event.keycode >= KEY_1 and event.keycode <= KEY_4:
 			_toggle_group(event.keycode - KEY_1 + 1)
+		elif event.keycode == KEY_PAGEUP:
+			target_pivot.y = clampf(target_pivot.y + KEY_LIFT, LIFT_LOW, LIFT_HIGH)
+		elif event.keycode == KEY_PAGEDOWN:
+			target_pivot.y = clampf(target_pivot.y - KEY_LIFT, LIFT_LOW, LIFT_HIGH)
 
 
 # --- Сенсорный экран ---------------------------------------------------------
@@ -2351,7 +2434,7 @@ func _gesture_update() -> void:
 
 	# Щипок — приближение. Берём ОТНОШЕНИЕ, а не разность: иначе у самого лица
 	# и на общем плане одно и то же движение пальцев меняло бы вид по-разному.
-	target_zoom = clampf(target_zoom * (_pinch_span / span), 0.8, 140.0)
+	target_zoom = clampf(target_zoom * (_pinch_span / span), ZOOM_NEAR, ZOOM_FAR)
 
 	# Перенос пары — панорама, тем же законом, что и средняя кнопка мыши:
 	# земля идёт ЗА пальцами, а не против них.
@@ -2629,6 +2712,14 @@ func _selftest() -> void:
 	_flush_chunks()
 	print("Мох на снесённой земле: было ", moss_before,
 		", осталось ", _moss_count())
+	# И СЕЕМ МОХ ЗАНОВО, иначе следующая проверка меряет пустой сад.
+	#
+	# ГРАБЛИ 04.09.2026: кисти стали шире и сильнее в полтора раза, и снос, до
+	# того убивавший половину посева, стал выкашивать его начисто — весь разбор
+	# сада ниже уверенно печатал нули. Проверка не должна зависеть от того, какой
+	# ширины сейчас кисть: своё дело она уже сделала строкой выше.
+	_seed_moss(6)
+	_flush_chunks()
 
 	# СРОК ЗДЕСЬ ОТМЕРЕН НЕ ВРЕМЕНЕМ, А САДОМ. Растения ускорены вдвое (решение
 	# пользователя 2026-08-21), и прежние сорок пять секунд дают теперь впятеро
@@ -5124,6 +5215,74 @@ func _plant_gift_check() -> void:
 
 
 # =============================================================================
+#  СТЕНД ПОКАЗА РОСТА  (`--showbench`)
+# =============================================================================
+#
+# ЧЕГО СТОИТ НЕ САМ РОСТ, А ЕГО ПОКАЗ. Это две разные цены, и мерились они до
+# сих пор только порознь и разово: самопроверка печатает одну пересборку сада
+# целиком, а сколько их набегает ЗА ВРЕМЯ РОСТА — не считал никто.
+#
+# Между тем платим мы именно за это: кочка за жизнь переходит с ступени на
+# ступень много раз, и каждый переход собирает свой кусок заново. Убавь показ
+# вдвое — счёт пересборок должен упасть примерно вдвое, и увидеть это можно
+# только здесь.
+#
+# ИДЁТ КАДРАМИ, А НЕ УДАРАМИ. `_tick` только помечает куски; собирает их
+# `_process` с запасом на кадр. Гони стенд ударами — и все пометки схлопнулись бы
+# в одну пересборку на весь прогон, то есть стенд мерил бы не то, что в игре.
+func _show_bench(args: PackedStringArray) -> void:
+	# СТОРОЖ НАГРУЗКИ ПЕРВОЙ СТРОКОЙ — как и в самопроверке. Стенд весь про
+	# миллисекунды, а машина у неё бывает занята редактором: без этого числа два
+	# прогона сравнивать нельзя вовсе.
+	var load: float = _load_factor()
+	print("Нагрузка машины: ", snappedf(load, 0.01),
+		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if load > LOAD_ALARM
+			else "замерам можно верить"))
+	var secs: float = _arg_num(args, "--secs", 45.0)
+	plants._rng.seed = 20260904
+	_seed_moss(6)
+	_flush_chunks()
+	plants.flush_now()
+	plants.built_reset()
+	var frames: int = int(secs * 60.0)
+	var t0 := Time.get_ticks_usec()
+	# ОЧЕРЕДЬ МЕРЯЕМ ТОЖЕ, И ОНА ВАЖНЕЕ СЧЁТА. Запас на кадр (`REBUILD_MS`)
+	# держит цену сверху сам: набралась очередь — и кусков в секунду собирается
+	# ровно столько, сколько влезает в запас, сколько бы их ни пометили. Тогда
+	# лишние метки уходят не в счёт, а в ОТСТАВАНИЕ: сад показан таким, каким
+	# был. Значит, у правки два разных исхода, и по одному счёту их не различить.
+	var queue_top: int = 0
+	var queue_sum: float = 0.0
+	for _i in range(frames):
+		plants._process(1.0 / 60.0)
+		var q: int = plants.dirty_count()
+		queue_top = maxi(queue_top, q)
+		queue_sum += float(q)
+	plants.flush_now()
+	var whole: float = float(Time.get_ticks_usec() - t0) / 1000.0
+	var live: int = _moss_count()
+	print("Показ роста: ", secs, " с роста, кочек выросло ", live,
+		"; пересборок ", plants.built_all, " на ",
+		snappedf(plants.built_ms, 0.1), " мс — это ",
+		snappedf(plants.built_ms / maxf(secs, 0.001), 0.1),
+		" мс на секунду роста, ",
+		snappedf(plants.built_ms / maxf(float(plants.built_all), 1.0), 0.01),
+		" мс на кусок и ",
+		snappedf(float(plants.built_all) / maxf(float(live), 1.0), 0.01),
+		" пересборки на кочку")
+	print("Показ роста: меток от ступеней роста — ", plants.marks_step,
+		"; остальные пересборки завели рождения, гибель и правка земли")
+	print("Показ роста: очередь кусков — в среднем ",
+		snappedf(queue_sum / maxf(float(frames), 1.0), 0.1),
+		", самая длинная ", queue_top,
+		" (пусто — цену держат метки, набралась — запас на кадр,",
+		" а лишние метки уходят в отставание сада)")
+	print("Показ роста: весь прогон ", snappedf(whole, 0.1), " мс, из них ",
+		snappedf(100.0 * plants.built_ms / maxf(whole, 0.001), 0.1),
+		"% — пересборка; остальное сам рост")
+
+
+# =============================================================================
 #  СТЕНД РОСТА КИСТЬЮ  (`--growbench`)
 # =============================================================================
 #
@@ -5371,6 +5530,15 @@ func _shot_mode() -> void:
 		plants._tick(0.15)
 		if _i % 15 == 14:
 			await get_tree().process_frame
+	# КАДР ПОКАЗЫВАЕТ САД ТАКИМ, КАКОЙ ОН ЕСТЬ. Три условия, и все три нужны:
+	# время стоит (иначе между четырьмя снимками сад успевает подрасти, и они
+	# перестают быть одним и тем же садом), меши собраны все до одного (сам по
+	# себе рост собирает их по кусочку за кадр, и к снимку успевала бы едва
+	# сотня), а догон роста доведён до конца — иначе последние собранные кочки
+	# попали бы в кадр поджатыми (см. `settle_show`).
+	plants.time_scale = 0.0
+	plants.flush_now()
+	plants.settle_show()
 	for _i in range(12):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw

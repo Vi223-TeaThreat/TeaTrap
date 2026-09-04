@@ -148,12 +148,15 @@ var _play_radius: float = 0.0
 var _land_span: float = 0.0        # радиус острова — для спада холмов к кромке
 var _play_low: float = 0.0
 var _play_high: float = 0.0
+# Зерно, от которого пляшет разброс семян. См. `_node_jitter`.
+var _scatter_salt: int = 0
 
 
 func generate(radius: float, top: float, bottom: float, headroom: float,
 		underroom: float, spacing: float, grid_seed: int) -> void:
 	_spacing = spacing
 	_cell_size = spacing * 1.4
+	_scatter_salt = grid_seed
 	# ИГРАБЕЛЬНЫЙ ОБЪЁМ: сам остров плюс запас по высоте — вверх и вниз.
 	#
 	# ЗАПАС СНИЗУ — ОТДЕЛЬНОЕ ЧИСЛО, А НЕ СДВИГ ДНА (решение пользователя
@@ -161,11 +164,24 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	# земли оставь прежним»). Опусти мы `bottom` — и остров стал бы толще: это
 	# же число задаёт его подошву в `_fill_terrain`. Запас же копать вниз
 	# позволяет, а породы не прибавляет.
-	_play_radius = radius + spacing * 0.6
+	# ПОЛЕ СЕМЯН ОБЯЗАНО ПЕРЕКРЫВАТЬ ВИЛЯНИЕ БЕРЕГА (04.09.2026).
+	#
+	# ГРАБЛИ, стоившие пяти прогонов и объяснившие давнюю беду. Очертание острова
+	# виляет на `EDGE_SWING` (1.3 м) в обе стороны от радиуса, а поле семян
+	# кончалось всего на полшага дальше самого радиуса. Там, где берег выпирал
+	# наружу, поверхность добегала до края поля — а крайние семена отбрасываются,
+	# замкнуть их нечем, — и в этом месте зияла дыра.
+	#
+	# Оттого дыры и вылезали ЧЕРЕЗ РАЗ: всё решало, попал ли гребень волны
+	# берега на самый край. Замер на прежнем коде: зерно 20260811 — ноль дыр,
+	# 20260812 — двадцать, 20260813 — ноль. Все двадцать сидели на радиусе
+	# 26…27 м при острове 26 м, то есть ровно на выпирающем берегу.
+	#
+	# Теперь запас берётся от самого виляния. Платим кольцом лишних семян по
+	# краю — около полутора процентов их числа.
+	_play_radius = radius + EDGE_SWING + spacing * 0.6
 	_play_low = bottom - maxf(underroom, spacing * 0.6)
 	_play_high = top + headroom
-	var rng := RandomNumberGenerator.new()
-	rng.seed = grid_seed
 
 	# Рельеф ОДНОЙ волной. Второй, мелкий слой шума (частота 0.26, высота 0.9
 	# шага) стоял тут ради «неправильных пятен» — а на деле давал ПОЛОВИНУ всей
@@ -229,7 +245,7 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	# Семена берём с запасом за краем: у крайних ячеек нет всех соседей,
 	# их не удаётся замкнуть, и мы их отбрасываем.
 	var margin := spacing * 2.0
-	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin, rng)
+	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin)
 	_build_seed_hash()
 	_build_neighbours()
 	_build_slope_basis()
@@ -260,8 +276,23 @@ const JITTER_Y: float = 0.30
 # лоскутами, и сквозь место их пересечения видно небо — это и были дыры.
 const OFF_MAX: float = 0.27
 
-func _scatter(radius: float, top_edge: float, bottom: float,
-		rng: RandomNumberGenerator) -> void:
+# Разброс одного узла по одной оси: от −1 до 1, свой у каждого узла и у каждой
+# оси, один и тот же при всяком запуске с тем же зерном мира. `_scatter_salt`
+# заводится от зерна, иначе ключ `--seed` перестал бы что-либо менять.
+func _node_jitter(i: int, j: int, k: int, axis: int) -> float:
+	# ПЕРЕМЕШИВАЕМ САМИ, а не встроенным `hash`. Числа тут берутся МЛАДШИМИ
+	# битами, а у многих хэшей они-то и повторяются от соседа к соседу; разброс
+	# семян с такими битами перестаёт быть разбросом. Это обычный лавинный
+	# перемешиватель на 32 бита: каждый входной бит влияет на все выходные.
+	var h: int = ((i * 73856093) ^ (j * 19349663) ^ (k * 83492791)
+		^ (axis * 2654435761) ^ _scatter_salt) & 0xFFFFFFFF
+	h = ((h ^ (h >> 16)) * 0x7feb352d) & 0xFFFFFFFF
+	h = ((h ^ (h >> 15)) * 0x846ca68b) & 0xFFFFFFFF
+	h = (h ^ (h >> 16)) & 0xFFFFFFFF
+	return float(h) / 2147483647.5 - 1.0
+
+
+func _scatter(radius: float, top_edge: float, bottom: float) -> void:
 	seeds = PackedVector3Array()
 	lattice = PackedVector3Array()
 	_node_index = {}
@@ -273,9 +304,24 @@ func _scatter(radius: float, top_edge: float, bottom: float,
 		for k in range(-nx, nx + 1):
 			for j in range(ny_lo, ny_hi + 1):
 				var node := Vector3(i, j, k) * _spacing
-				var p := node + Vector3(rng.randf_range(-JITTER, JITTER),
-					rng.randf_range(-JITTER_Y, JITTER_Y),
-					rng.randf_range(-JITTER, JITTER)) * _spacing
+				# РАЗБРОС СЕМЕНИ БЕРЁТСЯ ОТ НОМЕРА УЗЛА, А НЕ ИЗ ПОТОКА
+				# СЛУЧАЙНОСТИ, и это не украшение.
+				#
+				# ГРАБЛИ 04.09.2026. Поток отсчитывался в порядке обхода, а обход
+				# идёт по столбцам сверху вниз — значит, СКОЛЬКО чисел уйдёт на
+				# столбец, решала высота играбельного объёма. Стоило прибавить
+				# запаса вверх (`HEADROOM` 10 → 20 м, её решение о высоте), и
+				# каждому семени достался чужой разброс: остров на том же зерне
+				# вышел ДРУГИМ, и в новом оказалось пять незамкнутых мест при
+				# норме ноль.
+				#
+				# Теперь разброс — свойство самого узла. Воздух над островом и
+				# земля под ним могут расти сколько угодно: земля от этого не
+				# шелохнётся.
+				var p := node + Vector3(
+					_node_jitter(i, j, k, 1) * JITTER,
+					_node_jitter(i, j, k, 2) * JITTER_Y,
+					_node_jitter(i, j, k, 3) * JITTER) * _spacing
 				if Vector2(p.x, p.z).length() > radius:
 					continue
 				if p.y < bottom or p.y > top_edge:
@@ -866,6 +912,15 @@ const EDGE_WAVE: float = 0.055   # очертание острова: 18 м
 # размах должен быть свой, в метрах. При 1.3 м замкнуто на любом острове; на
 # прежних 13 м радиуса это ровно те же 10%, что и стояли.
 const EDGE_SWING: float = 1.3
+# НАСКОЛЬКО СКРУГЛЁН БЕРЕГ — стык верха острова с его боковым обрывом, в
+# ячейках решётки.
+#
+# Стояло 0.9 ячейки, то есть 60 см, — а по главному закону этого мира решётка
+# не держит ничего уже двух ячеек. Оттого берег и рвался: замер 04.09.2026,
+# зерно 20260813 — девять незамкнутых мест, все на кромке у самой воды.
+# Полторы ячейки (1.0 м) дыры убирают, а обрыв остаётся обрывом: доля крутых
+# склонов по замеру не сдвинулась.
+const EDGE_ROUND: float = 1.5
 
 const LAND_LOW: float = -1.9
 
@@ -989,7 +1044,7 @@ func _fill_terrain(radius: float, bottom: float,
 		# землёй, свести к одному нулю, любая прибавка в воздухе сразу
 		# подтянет его к половине и родит тонкую плёнку, оторванную от земли.
 		# Именно так появлялись летающие куски и закрученные лоскуты.
-		fill[i] = 0.5 + _smin(_smin(under, inside, 0.9), over, 1.8)
+		fill[i] = 0.5 + _smin(_smin(under, inside, EDGE_ROUND), over, 1.8)
 		if fill[i] > SOLID_AT:
 			solid[i] = true
 	base_fill = fill.duplicate()
