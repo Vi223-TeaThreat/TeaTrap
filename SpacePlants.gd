@@ -547,7 +547,31 @@ const BLOOM_KINDS: int = 2
 # столбцам, и всякая вставка посередине сдвинула бы чужую работу.
 const LIA_BODY_COL: int = KINDS + 2 + LEAF_KINDS + BLOOM_KINDS
 const LIA_FUZZ_COL: int = LIA_BODY_COL + 1
-const COLS: int = LIA_FUZZ_COL + 1                       # всего столбцов на листе
+# ДВА СТОЛБЦА МАКА (заведены 05.09.2026 вместе с самим видом) — и оба
+# ВЫРЕЗАННЫЕ ФИГУРКИ на прозрачном фоне, как лист лианы и её лепесток.
+#
+# ЛИСТ У МАКА СВОЙ, а не лианий, и подменить его нечем: у лианы лист цельный с
+# сердцевидным основанием, у мака — узкий, перисто-рассечённый, сизый. Это
+# первое, по чему вид узнаётся на кадре, раньше цветка: цветок виден не всегда,
+# а розетка есть у мака любого возраста.
+#
+# ЛЕПЕСТОК ТОЖЕ СВОЙ. У лианы он мелкий и почти белый, у мака — крупный, алый,
+# с тёмным пятном у основания и смятой шёлковой поверхностью. Одной перекраской
+# белого лепестка этого не получить: перекрашивание не добавит ни пятна, ни
+# складок, а без них лепесток мака не мак.
+#
+# ПРИБАВЛЕНЫ В КОНЕЦ — по тому же правилу, по которому в конец прибавляли
+# лиамоха: нарисованное от руки лежит в файле по столбцам, и всякая вставка
+# посередине сдвинула бы чужую работу.
+const POPPY_LEAF_COL: int = LIA_FUZZ_COL + 1
+# РАЗНОВИДНОСТЕЙ ДВЕ. Розетка у мака из пяти листьев, и одна картинка на все
+# пять читалась бы повторением; трёх, как у лианы, не нужно — лист лежит у
+# земли, наполовину в тени соседей, и разница между второй и третьей там уже
+# не видна. Мало покажется — прибавляется одной строкой здесь и одной в заглушке.
+const POPPY_LEAF_KINDS: int = 2
+const POPPY_PETAL_COL: int = POPPY_LEAF_COL + POPPY_LEAF_KINDS
+const POPPY_PETAL_KINDS: int = 2
+const COLS: int = POPPY_PETAL_COL + POPPY_PETAL_KINDS    # всего столбцов на листе
 
 # НАРИСОВАННЫЙ ЛИСТ ГЛАВНЕЕ СЧИТАННОГО. Если в `art/moss.png` лежит картинка,
 # берём её; иначе рисуем сами. Так рисунок от руки подменяет заглушку без
@@ -621,6 +645,28 @@ func _widen_sheet(drawn: Texture2D, have: int) -> ImageTexture:
 	if have <= LIA_FUZZ_COL:
 		for s in range(STAGES):
 			_paint_lia_fuzz_cell(img, LIA_FUZZ_COL * TILE, s * TILE, s, rng)
+	# СТОЛБЦЫ МАКА — И ЗДЕСЬ ТОЖЕ. Забыть их тут значило вот что: пока листа от
+	# руки нет, мак рисуется правильно (столбцы печёт `_make_blade_texture`), а
+	# стоит появиться нарисованному файлу — и он подменяет лист ЦЕЛИКОМ, а
+	# маковых столбцов в нём нет. Лепестки и листья становятся пустыми клетками.
+	#
+	# Её кадр 06.09.2026 это и показал: «не видно листьев, не видно лепестков» —
+	# на стеблях торчали одни тёмные серединки да белые лоскуты.
+	#
+	# ПРАВИЛО ОТСЮДА: всякий новый столбец заводится В ДВУХ местах — в печке
+	# заглушки и в этой доработке нарисованного. Одно без другого не работает.
+	for k in range(POPPY_LEAF_KINDS):
+		if have > POPPY_LEAF_COL + k:
+			continue
+		for s in range(STAGES):
+			_paint_poppy_leaf_cell(img, (POPPY_LEAF_COL + k) * TILE,
+				s * TILE, s, k, rng)
+	for k in range(POPPY_PETAL_KINDS):
+		if have > POPPY_PETAL_COL + k:
+			continue
+		for s in range(STAGES):
+			_paint_poppy_petal_cell(img, (POPPY_PETAL_COL + k) * TILE,
+				s * TILE, s, k, rng)
 	return ImageTexture.create_from_image(img)
 
 
@@ -1854,6 +1900,562 @@ func vine_stats() -> Dictionary:
 		"hang_deep": _hang_deep}
 
 
+
+# =============================================================================
+#  МАК: КУСТ ИЗ НЕСКОЛЬКИХ СТЕБЛЕЙ
+# =============================================================================
+#
+# ПЕРЕПИСАН 06.09.2026 ПО ЕЁ РЕФЕРЕНСАМ (восемь снимков и две ботанические
+# таблицы). Первая сборка была догадкой — один прямой стебель, розетка листьев на
+# земле, четыре лепестка. Референсы показали, что мак устроен иначе, и её слова
+# разобрали это по косточкам:
+#
+#   • «стебель — изгибающаяся трубка» — не палка с наклоном, а ДУГА;
+#   • «из одного основания растут сразу несколько стеблей» — мак не одиночный
+#     стебель, а КУСТ; на снимках их четыре-шесть из одной точки, и все разной
+#     высоты и возраста;
+#   • «на нижней трети стеблей растут листья» — не прикорневая розетка, а листья
+#     ПО СТЕБЛЮ, и только внизу;
+#   • «на конце стебля сначала формируется бутон — вытянутое овальное тело,
+#     которое потом раскрывается цветком»;
+#   • «лепестки в 2 ряда — первый 4, второй (ближе к центру) 2»;
+#   • «в центре тёмное тело, а вокруг него массив из тычинок в форме бублика»;
+#   • «треть цветков со временем превращается в коробочки».
+#
+# ОТЧЕГО КУСТ, А НЕ НЕСКОЛЬКО РАСТЕНИЙ РЯДОМ. Можно было бы сажать по три-пять
+# маков вплотную и звать это кустом — но тогда у каждого свои часы, свой возраст
+# и свой жребий на коробочку, и связи между ними нет никакой. У настоящего же
+# куста стебли РАЗНОГО ВОЗРАСТА НА ОДНОМ КОРНЕ: на снимках рядом и раскрытый
+# цветок, и поникший бутон, и голая коробочка. Это и есть главная примета мака,
+# и держится она только тем, что стебли — части ОДНОГО растения.
+#
+# ВОЗРАСТ СТЕБЛЯ БЕРЁТСЯ ОТ ВОЗРАСТА КУСТА СО СДВИГОМ. Сдвиг у каждого свой, по
+# соли: первый стебель идёт вровень с кустом, последний отстаёт заметно. Оттого
+# на молодом кусте одни бутоны, на зрелом — цветы и коробочки вперемешку.
+func _emit_poppy(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
+	var m: float = float(p["m"])
+	var base: Vector3 = p["pos"]
+	var nrm: Vector3 = p["nrm"]
+	var salt: int = int(p["salt"])
+	var bulk: float = float(p["bulk"])
+	var stage: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
+	var shade: float = float(p["body"]["shade"])
+	var grow: float = pow(clampf(m, 0.0, 1.0), 0.75)
+
+	# ДОГОН: КУСТ ЕДЕТ К НОВОМУ РАЗМЕРУ ОТ ПРЕЖНЕГО, а не подскакивает на ступени.
+	var seen_m: float = float(p.get("seen_m", -1.0))
+	if seen_m < 0.0:
+		_morph_set(st, base, 0.0, MORPH_BORN)
+	else:
+		var was: float = pow(clampf(seen_m, 0.0, 1.0), 0.75)
+		_morph_set(st, base, was / maxf(grow, 0.000001),
+			minf(_grow_clock - float(p.get("seen_at", 0.0)), 30.0))
+	p["seen_m"] = m
+	p["seen_at"] = _grow_clock
+
+	# СТЕБЛИ ТЯНУТСЯ К ОТВЕСУ, А НЕ ПО НОРМАЛИ ЗЕМЛИ. Мох ложится на склон, лиана
+	# ползёт по нему — им нормаль и нужна. Мак же тянется к свету: на пологом
+	# склоне он стоит прямо, лишь чуть отклоняясь.
+	var up: Vector3 = (Vector3.UP * 3.0 + nrm).normalized()
+	var side: Vector3 = up.cross(Vector3.RIGHT)
+	if side.length_squared() < 0.001:
+		side = up.cross(Vector3.FORWARD)
+	side = side.normalized()
+	var fore: Vector3 = up.cross(side).normalized()
+	var stem_c: Color = Color(def.get("stem_color", def["color"])) * shade
+
+	var many: int = poppy_stems(p, def)
+	for s in range(many):
+		_emit_poppy_stem(st, p, def, s, many, base, up, side, fore,
+			stem_c, bulk, m, grow, stage, shade)
+	return true
+
+
+# ОДИН СТЕБЕЛЬ КУСТА: дуга-трубка, листья на нижней трети, головка на конце.
+func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
+		s: int, many: int, base: Vector3, up: Vector3, side: Vector3,
+		fore: Vector3, stem_c: Color, bulk: float, m: float, grow: float,
+		stage: int, shade: float) -> void:
+	var salt: int = poppy_stem_salt(int(p["salt"]), s)
+	var mine: float = poppy_stem_m(p, def, s, many)
+	var mgrow: float = pow(mine, 0.75)
+	var high: float = float(def.get("stem_high", 0.4)) * bulk * mgrow \
+		* (0.82 + 0.36 * _mix01(salt + 23))
+
+	# КУДА КЛОНИТСЯ ЭТОТ СТЕБЕЛЬ. Стебли расходятся веером из одной точки —
+	# иначе куст читается пучком проводов.
+	var turn: float = TAU * (float(s) / float(many)) \
+		+ (_mix01(salt + 31) - 0.5) * 1.1
+	var away: Vector3 = (side * cos(turn) + fore * sin(turn)).normalized()
+	# Основания стеблей чуть разведены — из одной точки они бы срослись в столб.
+	var foot: Vector3 = base + away * (high * float(def.get("stem_spread", 0.06)))
+	# Поперёк наклона — по этой оси стебель и виляет (см. волну ниже).
+	var cross: Vector3 = up.cross(away)
+	if cross.length_squared() < 0.000001:
+		cross = side
+	cross = cross.normalized()
+
+	var open_at: float = float(def.get("open_at", 0.6))
+
+	var is_bud: bool = mine < open_at
+	# ЖРЕБИЙ НА КОРОБОЧКУ — У КАЖДОГО СТЕБЛЯ СВОЙ, а не у куста целиком: иначе
+	# весь куст разом становился бы коробочками, а на снимках они вперемешку.
+	var is_pod: bool = poppy_stem_pod(p, def, s, many)
+
+	# =========================================================================
+	#  СТЕБЕЛЬ — ИЗГИБАЮЩАЯСЯ ТРУБКА
+	# =========================================================================
+	# Дуга собирается из звеньев: прямая палка мака не даёт вовсе, а у бутона
+	# верх и вовсе загнут крючком — он висит головой вниз, пока не раскроется.
+	var bend: float = float(def.get("stem_bend", 0.30)) \
+		* (0.5 + 1.0 * _mix01(salt + 37))
+	# КРЮЧОК БУТОНА — самая узнаваемая повадка мака. Распрямляется перед самым
+	# раскрытием: к `open_at` от него не остаётся ничего.
+	var hook: float = 0.0
+	if is_bud:
+		var ripe: float = clampf(mine / maxf(open_at, 0.001), 0.0, 1.0)
+		hook = deg_to_rad(float(def.get("bud_hook", 95.0))) * (1.0 - ripe * ripe)
+	var links: int = maxi(int(def.get("stem_links", 6)), 2)
+	var path: PackedVector3Array = PackedVector3Array()
+	for k in range(links + 1):
+		var t: float = float(k) / float(links)
+		# Отклонение растёт квадратом — у земли стебель почти отвесен, кверху
+		# уходит вбок. Это и есть дуга, а не наклонная прямая.
+		var lean: Vector3 = away * (high * bend * t * t)
+		# У КАЖДОГО СТЕБЛЯ СВОЙ ИЗГИБ, И НЕ ОДИН (её слово 07.09.2026: «пусть у
+		# каждого стебля будет свой собственный изгиб или несколько изгибов»).
+		#
+		# Одной дуги мало: все стебли гнулись одинаково, только в разные стороны,
+		# и куст читался пучком одинаковых прутьев. Прибавляем ВОЛНУ — синус по
+		# длине стебля, у которого своя сторона, своя сила и своё число горбов.
+		# У земли она погашена (`t`), чтобы стебель выходил из земли отвесно.
+		var waves: float = 1.0 + floor(_mix01(salt + 613) * 2.0)   # один или два
+		var sway: float = float(def.get("stem_wave", 0.10)) \
+			* (0.45 + _mix01(salt + 727))
+		lean += cross * (high * sway * sin(t * PI * waves) * t)
+		# Крючок гнёт ТОЛЬКО верхнюю треть: ниже стебель прям, как на снимках.
+		var curl: float = clampf((t - 0.62) / 0.38, 0.0, 1.0)
+		var drop: Vector3 = (away * sin(hook) - up * (1.0 - cos(hook))) \
+			* (high * 0.30 * curl * curl)
+		path.append(foot + up * (high * t) + lean + drop)
+	var r_foot: float = float(def.get("stem_foot", 0.005)) * mgrow
+	var r_head: float = float(def.get("stem_thin", 0.0035)) * mgrow
+	for k in range(links):
+		var t0: float = float(k) / float(links)
+		_emit_twig(st, path[k], path[k + 1],
+			lerpf(r_foot, r_head, t0),
+			lerpf(r_foot, r_head, float(k + 1) / float(links)),
+			side, stem_c, stage)
+
+	# =========================================================================
+	#  ЛИСТЬЯ — НА НИЖНЕЙ ТРЕТИ
+	# =========================================================================
+	# ЛИСТЬЕВ СТАНОВИТСЯ БОЛЬШЕ С ВОЗРАСТОМ (её расписание 06.09.2026: на
+	# ступенях 4–6 «больше листьев»). Число в карточке — это сколько их у
+	# взрослого стебля; у молодого один-два.
+	var leaves: int = maxi(1, int(round(float(def.get("leaf_many", 3))
+		* clampf(mine * 1.35, 0.3, 1.0))))
+	var leaf_long: float = float(def.get("leaf_long", 0.1)) * bulk * mgrow
+	var plan: Array = []
+	for i in range(leaves):
+		# Место по стеблю: от самого низа до трети высоты, вразнобой.
+		var t: float = lerpf(0.05, float(def.get("leaf_upto", 0.34)),
+			(float(i) + 0.35 + 0.3 * _mix01(salt + i * 53)) / float(leaves))
+		var at_k: int = clampi(int(t * float(links)), 0, links - 1)
+		var seat: Vector3 = path[at_k]
+		# Лист уходит вбок и вверх — не лежит на земле и не липнет к стеблю.
+		var a: float = TAU * (_mix01(salt + i * 89) + float(i) * 0.42)
+		var out_dir: Vector3 = (side * cos(a) + fore * sin(a)).normalized()
+		var lift: float = deg_to_rad(float(def.get("leaf_lift", 28.0)))
+		var along: Vector3 = (out_dir * cos(lift) + up * sin(lift)).normalized()
+		var face: Vector3 = along.cross(out_dir.cross(along))
+		if face.length_squared() < 0.000001:
+			face = up
+		face = face.normalized()
+		if face.dot(up) < 0.0:
+			face = -face
+		var long: float = leaf_long * (0.75 + 0.5 * _mix01(salt + i * 41))
+		plan.append({
+			"at": seat, "foot": seat, "along": along, "face": face,
+			"wide": along.cross(face).normalized(), "long": long,
+			"half": long * float(def.get("leaf_wide", 0.4)) * 0.5,
+			# ЧЕРЕШОК — ТРЕТЬ САМОГО ДЛИННОГО ЛИСТА (её слово 07.09.2026), а не
+			# доля своего: у короткого листа черешок от этого не съёживается, и
+			# лист сидит на стебле так же далеко, как длинный.
+			"stalk": leaf_long * 0.333,
+			"shade": shade * (0.90 + 0.16 * _mix01(salt + i * 43)),
+			"kind": int(_mix01(salt + i * 197) * float(POPPY_LEAF_KINDS))
+				% POPPY_LEAF_KINDS,
+			"flip": _mix01(salt + i * 251) < 0.5,
+		})
+	_emit_stalks(st, plan, p, def, float(def.get("stalk_thick", 0.0016)) * mgrow,
+		float(def.get("stalk_thin", 0.0010)) * mgrow)
+	_emit_boards(st, plan, POPPY_LEAF_COL, p, def["color"],
+		float(def.get("leaf_bow", 0.26)), float(def.get("leaf_sag", 0.30)))
+
+	# =========================================================================
+	#  ГОЛОВКА
+	# =========================================================================
+	var top: Vector3 = path[links]
+	var tip_dir: Vector3 = (path[links] - path[links - 1]).normalized()
+	if is_bud:
+		# БУТОН — ВЫТЯНУТОЕ ОВАЛЬНОЕ ТЕЛО (её слово). Не шарик: на снимках он
+		# заметно длиннее своей ширины и сидит на конце крючка.
+		var bw: float = float(def.get("bud_wide", 0.013)) * bulk * mgrow
+		var bl: float = float(def.get("bud_long", 0.021)) * bulk * mgrow
+		_emit_pill(st, top + tip_dir * (bl * 0.45), tip_dir, bl, bw,
+			stem_c.lightened(0.05), side, stage)
+	elif is_pod:
+		# КОРОБОЧКА — приземистая урна с венчиком-лучиками сверху (её третий
+		# кадр: сизые головки с сухой звёздочкой на макушке).
+		var pw: float = float(def.get("pod_wide", 0.017)) * bulk
+		var pl: float = float(def.get("pod_long", 0.021)) * bulk
+		var pod_c: Color = Color(def.get("pod_color", def["color"])) * shade
+		_emit_pill(st, top + tip_dir * (pl * 0.45), tip_dir, pl, pw,
+			pod_c, side, stage)
+		var crown: Vector3 = top + tip_dir * (pl * 0.92)
+		_emit_twig(st, crown, crown + tip_dir * (pl * 0.10),
+			pw * 1.06, pw * 0.42, side, pod_c.darkened(0.18), stage)
+	else:
+		_emit_poppy_flower(st, p, def, top, tip_dir, side, fore, salt,
+			bulk, mine, open_at, shade, stage)
+
+
+# ЦВЕТОК МАКА: два ряда лепестков, тёмное тело в середине и бублик тычинок.
+#
+# ЕЁ ОПИСАНИЕ ДОСЛОВНО: «лепестки в 2 ряда — первый 4, второй (ближе к центру) 2,
+# в центре находится темное тело, а вокруг него массив из тычинок в форме
+# бублика».
+#
+# РЯДЫ РАЗНЫЕ ПО ЧИСЛУ, и общий прибор лепестков этого не умел: у него на все
+# ряды одно число. Поэтому зовём его ДВАЖДЫ — раз на внешний ряд, раз на
+# внутренний, — и у каждого свой разворот и свой размер. Внутренний ряд стоит
+# круче и чуть мельче: на снимках он приподнят и виден как второй слой.
+func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
+		top: Vector3, along: Vector3, side: Vector3, fore: Vector3,
+		salt: int, bulk: float, mine: float, open_at: float,
+		shade: float, stage: int) -> void:
+	# РАСКРЫТИЕ ИДЁТ НЕ ДО КОНЦА ЖИЗНИ, А ДО ШЕСТОЙ СТУПЕНИ (её расписание
+	# 06.09.2026: «4–6 — бутоны понемногу раскрываются, теперь видны цветки»).
+	# Прежде цветок доходил до полного разворота только к самой смерти растения,
+	# и на кадре все цветы стояли полураскрытыми.
+	var full_at: float = float(def.get("open_full", 1.0))
+	var open_k: float = clampf((mine - open_at) / maxf(full_at - open_at, 0.001),
+		0.0, 1.0)
+	var head: float = float(def.get("head_long", 0.05)) * bulk \
+		* lerpf(0.55, 1.0, open_k)
+	var seat: Vector3 = top + along * (head * 0.08)
+	var tint: Color = poppy_paint(salt, def)
+
+	# ТЁМНОЕ ТЕЛО В СЕРЕДИНЕ — завязь. Приземистая и почти чёрная: у мака она
+	# видна издалека и без неё лепестки читаются лоскутом, а не цветком.
+	var hw: float = float(def.get("heart_wide", 0.011)) * bulk \
+		* lerpf(0.45, 1.0, open_k)
+	if hw > 0.0002:
+		var heart: Color = Color(def.get("heart_color", Color(0.1, 0.1, 0.1)))
+		_emit_pill(st, seat + along * (hw * 0.45), along, hw * 1.6, hw,
+			heart * shade, side, stage)
+
+	# БУБЛИК ТЫЧИНОК ВОКРУГ НЕГО. Каждая — короткая тонкая трубочка, наклонённая
+	# наружу; все вместе они и дают кольцо, которое на снимках читается тёмным
+	# венцом вокруг завязи.
+	#
+	# ЧИСЛО ДЕРЖИМ НЕБОЛЬШИМ НАРОЧНО: тычинка вчетверо тоньше стебля и вдесятеро
+	# короче, на кадре она полпикселя. Полсотни таких стоили бы дороже всего
+	# остального цветка вместе взятого, а видно было бы то же кольцо.
+	var pins: int = int(def.get("stamen_many", 14))
+	if open_k > 0.15 and pins > 0:
+		var ring: float = hw * float(def.get("stamen_ring", 1.5))
+		var pin_long: float = hw * float(def.get("stamen_long", 1.3))
+		var pin_r: float = float(def.get("stamen_thin", 0.0012)) * bulk
+		var pin_c: Color = Color(def.get("stamen_color",
+			Color(0.10, 0.09, 0.11))) * shade
+		var tilt: float = deg_to_rad(float(def.get("stamen_open", 24.0)))
+		for i in range(pins):
+			var a: float = TAU * float(i) / float(pins) + _mix01(salt + 7) * TAU
+			var out_dir: Vector3 = (side * cos(a) + fore * sin(a)).normalized()
+			var pin_at: Vector3 = seat + out_dir * ring
+			var way: Vector3 = (along * cos(tilt) + out_dir * sin(tilt)).normalized()
+			_emit_twig(st, pin_at, pin_at + way * (pin_long * open_k),
+				pin_r, pin_r * 1.35, side, pin_c, stage)
+
+	# ДВА РЯДА ЛЕПЕСТКОВ: внешний из четырёх, внутренний из двух.
+	var outer: Array = [{
+		"at": seat, "along": along, "face": side, "wide": fore,
+		"long": head, "shade": shade, "salt": salt, "tint": tint,
+	}]
+	_emit_petals(st, outer, p, def, POPPY_PETAL_COL, POPPY_PETAL_KINDS,
+		1, int(def.get("petal_outer", 4)),
+		float(def.get("petal_open", 74.0)))
+	var inner: Array = [{
+		"at": seat + along * (head * 0.10), "along": along, "face": fore,
+		"wide": side, "long": head * float(def.get("petal_inner_k", 0.82)),
+		"shade": shade * 0.94, "salt": salt + 991, "tint": tint,
+	}]
+	_emit_petals(st, inner, p, def, POPPY_PETAL_COL, POPPY_PETAL_KINDS,
+		1, int(def.get("petal_inner", 2)),
+		float(def.get("petal_open_in", 52.0)))
+
+
+# СКОЛЬКО У КУСТА СТЕБЛЕЙ, ЧЕЙ ЭТО СТЕБЕЛЬ И КАКОВ ОН ЗРЕЛОСТЬЮ.
+#
+# ТРИ СТРОКИ ЖИВУТ ОТДЕЛЬНО ОТ СБОРКИ, И ЭТО НЕ УКРАШЕНИЕ. Спрашивают их ДВОЕ:
+# сборка меша и проверка числами. Посчитай они порознь — и проверка докладывала
+# бы про куст, которого не видно на кадре. Тем же правилом живёт `head_is_pod`,
+# и по той же причине.
+func poppy_stems(p: Dictionary, def: Dictionary) -> int:
+	var salt: int = int(p["salt"])
+	var many: int = int(lerpf(float(def.get("stems_low", 3)),
+		float(def.get("stems_high", 6)), _mix01(salt + 61)))
+	# Куст набирает стебли не разом: у всхода один, у взрослого все.
+	return maxi(1, int(round(float(maxi(many, 1))
+		* clampf(float(p["m"]) * 1.6, 0.35, 1.0))))
+
+
+func poppy_stem_salt(salt: int, s: int) -> int:
+	return salt + s * 7919
+
+
+# ВОЗРАСТ СТЕБЛЯ — возраст куста со своим сдвигом. Первый идёт вровень, прочие
+# отстают тем сильнее, чем они дальше по счёту: оттого на кусте и оказываются
+# рядом бутон, цветок и коробочка, как на её референсах.
+func poppy_stem_m(p: Dictionary, def: Dictionary, s: int, many: int) -> float:
+	return clampf(float(p["m"]) - poppy_stem_lag(p, def, s, many), 0.02, 1.0)
+
+
+func poppy_stem_lag(p: Dictionary, def: Dictionary, s: int, many: int) -> float:
+	var salt: int = poppy_stem_salt(int(p["salt"]), s)
+	return float(def.get("stem_lag", 0.22)) \
+		* (float(s) / maxf(1.0, float(many - 1))) \
+		* (0.6 + 0.8 * _mix01(salt + 17))
+
+
+# СТАЛ ЛИ ЭТОТ СТЕБЕЛЬ КОРОБОЧКОЙ.
+#
+# ПОРОГ СЧИТАЕТСЯ ОТ СОБСТВЕННОГО ВЕКА СТЕБЛЯ, А НЕ ОТ КУСТА, и это починка
+# замера 06.09.2026. Порог стоял постоянный (`pod_at` 0.88), а младший стебель
+# отстаёт от куста на четверть и выше 0.76 не поднимается ВООБЩЕ — то есть
+# коробочкой не становился никогда, сколько ни жди. Замер это и поймал: доля
+# коробочек 0.14 при заказанной трети, хотя сама жеребьёвка честна (0.334 на
+# десяти тысячах).
+#
+# Теперь порог берётся долей от того, что стеблю ВООБЩЕ доступно: у каждого свой
+# потолок (`1 − отставание`), и до коробочки доживают все, кому выпал жребий.
+# Её правило «треть цветков со временем превращается в коробочки» от этого и
+# держится — треть, а не треть от старших.
+func poppy_stem_pod(p: Dictionary, def: Dictionary, s: int, many: int) -> bool:
+	if not head_is_pod(poppy_stem_salt(int(p["salt"]), s), def):
+		return false
+	var open_at: float = float(def.get("open_at", 0.6))
+	var top: float = 1.0 - poppy_stem_lag(p, def, s, many)
+	var gate: float = open_at + (maxf(top, open_at) - open_at) \
+		* float(def.get("pod_after", 0.55))
+	return poppy_stem_m(p, def, s, many) >= gate
+
+
+# КАКОГО ЦВЕТА ЭТОТ МАК.
+#
+# ЕЁ СЛОВО 05.09.2026: «алый с разбросом (разброс больше к красно-оранжевому),
+# малиновый не брать, можно кроваво-красный». Отсюда всё устройство, и оно не
+# симметрично нарочно:
+#
+#   • середина — алый (`flower_color`), в неё попадает большинство;
+#   • тёплый край — красно-оранжевый (`flower_warm`), и уходит к нему БОЛЬШАЯ
+#     доля бросков (`flower_warm_bias`);
+#   • холодный край — кроваво-красный (`flower_deep`): темнее и глуше, но
+#     по-прежнему красный. МАЛИНОВОГО ТУТ НЕТ ВОВСЕ и быть не может — оба края
+#     заданы цветами, а не сдвигом тона, и синевы в них нет ни в одном.
+#
+# ДАЛЕКО УХОДЯТ НЕМНОГИЕ: доля берётся квадратом броска, поэтому куртина
+# читается алым пятном с искрами оранжевого, а не пёстрой смесью.
+#
+# ПО СОЛИ, А НЕ ПО СЛУЧАЮ — как и головка: цвет у мака один на всю жизнь и не
+# мигает при каждой пересборке. Соль здесь СТЕБЛЕВАЯ, а не кустовая: на снимках
+# соседние цветки одного куста заметно разного оттенка.
+func poppy_paint(salt: int, def: Dictionary) -> Color:
+	var base: Color = def.get("flower_color", Color(0.80, 0.11, 0.09))
+	var far: float = _mix01(salt + 4231)
+	far *= far
+	if _mix01(salt + 911) < float(def.get("flower_warm_bias", 0.68)):
+		return base.lerp(def.get("flower_warm", base), far)
+	return base.lerp(def.get("flower_deep", base), far * 0.85)
+
+
+# КОМУ ИЗ МАКОВ СТАТЬ КОРОБОЧКОЙ. Живёт отдельной строкой затем, что спрашивают
+# её ДВОЕ — сборка головки и проверка числами, — а считаться она обязана
+# одинаково: разойдись они, и проверка докладывала бы про сад, которого нет.
+#
+# По соли, а не по случаю: соль у растения одна на всю жизнь, значит и головка
+# не переигрывается при каждой пересборке.
+func head_is_pod(salt: int, def: Dictionary) -> bool:
+	return _mix01(salt + 1553) < float(def.get("pod_share", 0.0))
+
+
+# ПЕРЕМЕШИВАНИЕ ПОКРЕПЧЕ, ЧЕМ `_hash01`, И ВОТ ЗАЧЕМ ОНО ПОНАДОБИЛОСЬ.
+#
+# `_hash01` — обычный линейный конгруэнтный шаг, и на РЯДЕ соседних чисел он
+# врёт: соль растения складывается из его номера и места (`_next * 7919 + …`),
+# то есть у соседей по куртине соли идут ровным шагом, а на ровном шаге у такого
+# хеша короткий цикл в средних битах. Замерено на доле коробочек, которую она
+# заказала третью: выходило 0.20, а после умножения соли на простое число —
+# 0.12. Оба раза мимо, и оба раза по одной причине.
+#
+# Здесь три шага «сдвинь-и-сложи» с обрезкой до 32 бит — тот самый приём, каким
+# кончаются все приличные хеши: каждый бит входа размазывается по всем битам
+# выхода, и ровный шаг на входе перестаёт быть рядом на выходе.
+#
+# `_hash01` при этом НЕ ТРОГАЕМ: на нём стоит вся раскладка мха, лианы и лиамоха,
+# и подмена сдвинула бы весь сад. Новая мерка — только для нового вида.
+func _mix01(n: int) -> float:
+	var h: int = (n * 2654435761) & 0xffffffff
+	h = ((h ^ (h >> 15)) * 2246822519) & 0xffffffff
+	h = ((h ^ (h >> 13)) * 3266489917) & 0xffffffff
+	h = (h ^ (h >> 16)) & 0xffffffff
+	return float(h) / 4294967296.0
+
+
+# ПРОДОЛГОВАТОЕ ТЕЛЬЦЕ — бутон и коробочка мака. Обе выходят из одной формы:
+# две трубочки встык, нижняя расширяется, верхняя сходится. Отдельного шара
+# заводить не за чем — на таком размере разницы не видно, а трубочка уже есть.
+func _emit_pill(st: SurfaceTool, at: Vector3, along: Vector3, long: float,
+		wide: float, tint: Color, axis: Vector3, stage: int) -> void:
+	if long <= 0.0 or wide <= 0.0:
+		return
+	var foot: Vector3 = at - along * (long * 0.5)
+	var waist: Vector3 = at + along * (long * 0.05)
+	_emit_twig(st, foot, waist, wide * 0.42, wide, axis, tint, stage)
+	_emit_twig(st, waist, at + along * (long * 0.5), wide, wide * 0.30,
+		axis, tint, stage)
+
+
+# =============================================================================
+#  МАК: ЛИСТ И ЛЕПЕСТОК — заглушки, пока они не нарисованы от руки
+# =============================================================================
+#
+# ЛИСТ У МАКА ПЕРИСТО-РАССЕЧЁННЫЙ, и это его главная примета: узкая пластина,
+# изрезанная почти до средней жилки парными долями. Одной формулой это и
+# делается — полуширина идёт вдоль листа не гладко, а волной, и во впадинах
+# волны падает почти до нуля. Ни лопастей рисовать отдельно, ни вырезов не
+# приходится: они выходят сами, как у листа лианы вышел вырез у черешка.
+#
+# ЖИЛКА ОДНА, СРЕДНЯЯ, и она СВЕТЛЕЕ пластины. У мака она сизо-белёсая и на
+# кадре видна даже в тени — по ней узкий лист и читается листом, а не травинкой.
+#
+# ЦВЕТ СИЗЫЙ, а не травяной: у мака лист с восковым налётом, заметно холоднее и
+# бледнее мха. Именно на этом и держится узнавание вида на кадре, потому что
+# розетка есть у мака любого возраста, а цветок — не всегда.
+#
+# С ВОЗРАСТОМ лист длиннее, глуше и рассечён глубже: у всхода пластина короткая,
+# светлая и почти цельная.
+func _paint_poppy_leaf_cell(img: Image, ox: int, oy: int, s: int, kind: int,
+		rng: RandomNumberGenerator) -> void:
+	var age: float = float(s) / float(STAGES - 1)
+	# ДВЕ РАЗНОВИДНОСТИ — не два растения, а два листа одной розетки: у живого
+	# мака соседние листья заметно разной изрезанности и ширины.
+	var cut_k: float = [1.0, 0.72][kind]        # насколько глубоки вырезы
+	var wide_k: float = [1.0, 1.18][kind]       # ширина пластины
+	var lobes: float = [3.5, 2.5][kind]         # сколько пар долей
+	var mid_x: float = float(TILE) * 0.5
+	var long: float = lerpf(0.72, 0.97, age) * float(TILE)
+	var half: float = lerpf(0.16, 0.25, age) * float(TILE) * wide_k
+	var cut: float = lerpf(0.45, 0.78, age) * cut_k       # глубина вырезов
+	# Палитра сизая и приглушённая; к старости холоднее и темнее.
+	var deep := Color(0.27, 0.34, 0.22).lerp(Color(0.23, 0.29, 0.20), age)
+	var body := Color(0.44, 0.53, 0.34).lerp(Color(0.39, 0.47, 0.31), age)
+	var vein := Color(0.62, 0.68, 0.52).lerp(Color(0.55, 0.60, 0.47), age)
+	for y in range(TILE):
+		# Вдоль листа: 0 у основания (низ клетки), 1 у кончика (верх).
+		var v: float = float(TILE - 1 - y) / maxf(long, 1.0)
+		if v > 1.0:
+			continue
+		# Пластина сужается к кончику, а по дороге режется волной на доли.
+		var taper: float = sin(clampf(v, 0.0, 1.0) * PI * 0.92 + 0.18)
+		var wave: float = absf(cos(v * lobes * PI))
+		var w: float = half * taper * lerpf(1.0 - cut, 1.0, wave)
+		if w < 0.6:
+			continue
+		for x in range(TILE):
+			var dx: float = (float(x) - mid_x) / w
+			if absf(dx) >= 1.0:
+				continue
+			var col: Color = body
+			# Край притемнён — иначе соседние листья розетки сливаются в пятно.
+			var rim: float = absf(dx)
+			if rim > 0.62:
+				col = col.lerp(deep, (rim - 0.62) / 0.38)
+			# Средняя жилка: светлая полоса в палец шириной, сходящая к кончику.
+			var mid_w: float = maxf(0.09, 0.22 - 0.12 * v)
+			if rim < mid_w:
+				col = col.lerp(vein, 1.0 - rim / mid_w)
+			# Мелкая рябь вдоль долей — восковой налёт живой, а не крашеный.
+			if (x + int(v * 9.0)) % 4 == 0:
+				col = col.darkened(0.06)
+			if rng.randf() < 0.02:
+				col = col.lightened(0.07)
+			img.set_pixel(ox + x, oy + y, Color(col.r, col.g, col.b, 1.0))
+
+
+# ЛЕПЕСТОК МАКА — широкий веер, а не язычок.
+#
+# Он ШИРЕ, ЧЕМ ДЛИННЕЕ, у основания сужен в короткий ноготок, а верхний край
+# округлый и слегка смятый. Этим он и отличается от лепестка лианы, который
+# узкий и ровный.
+#
+# ЦВЕТ СЮДА НЕ РИСУЕМ, и это не лень. Красим почти в белое, а алый приходит с
+# вершин, из карточки (`flower_color`) — ровно так же, как цвет коры у лианы:
+# рисунок один, а цвет вида свой. Тогда цвет мака меняется одним числом в
+# каталоге и не требует перерисовки, а её рука, когда дойдут руки до листа,
+# рисует ФОРМУ И СКЛАДКИ, а не оттенок.
+#
+# ТЁМНОЕ ПЯТНО У ОСНОВАНИЯ у мака есть почти всегда, и оно переживает любую
+# перекраску: это множитель темноты, а не свой цвет.
+#
+# ПО РЯДАМ — ВОЗРАСТ, как и всюду на листе: у молодого цветка лепесток уже,
+# бледнее и почти без складок, у взрослого — широкий, с глубокими смятыми
+# складками и чётким пятном.
+func _paint_poppy_petal_cell(img: Image, ox: int, oy: int, s: int, kind: int,
+		rng: RandomNumberGenerator) -> void:
+	var age: float = float(s) / float(STAGES - 1)
+	# Две разновидности — два лепестка одного цветка: у мака они заметно разной
+	# ширины и смятости, оттого цветок и не выглядит штампованным.
+	var wide_k: float = [1.0, 0.86][kind]
+	var crimp_k: float = [1.0, 1.35][kind]
+	var mid_x: float = float(TILE) * 0.5
+	var long: float = lerpf(0.78, 0.99, age) * float(TILE)
+	var half: float = lerpf(0.30, 0.49, age) * float(TILE) * wide_k
+	var blot: float = lerpf(0.10, 0.22, age)      # доля лепестка под пятном
+	var wave_a: float = rng.randf_range(0.0, TAU)
+	var wave_b: float = rng.randf_range(0.0, TAU)
+	for y in range(TILE):
+		var v: float = float(TILE - 1 - y) / maxf(long, 1.0)
+		if v > 1.0:
+			continue
+		# Ноготок внизу, веер вверху, округлая макушка: полуширина набирается
+		# быстро и садится у самого верха.
+		var w: float = half * sqrt(clampf(v * 1.25, 0.0, 1.0)) \
+			* sin(clampf(v, 0.0, 1.0) * PI * 0.86 + 0.30)
+		if w < 0.6:
+			continue
+		for x in range(TILE):
+			var dx: float = (float(x) - mid_x) / w
+			if absf(dx) >= 1.0:
+				continue
+			# СКЛАДКИ — вееровые, от основания к краю: у мака лепесток шёлковый
+			# и мятый, и на кадре это его вторая примета после цвета.
+			var crimp: float = sin(dx * 7.4 + wave_a) * 0.055 \
+				+ sin(dx * 13.1 + v * 2.2 + wave_b) * 0.035
+			var tone: float = 0.90 + crimp * crimp_k * lerpf(0.5, 1.0, age)
+			# Край чуть темнее — иначе четыре лепестка сливаются в круг.
+			var rim: float = absf(dx)
+			if rim > 0.72:
+				tone -= (rim - 0.72) / 0.28 * 0.16
+			# Тёмное пятно у самого основания.
+			if v < blot:
+				tone *= lerpf(0.30, 1.0, v / maxf(blot, 0.001))
+			tone = clampf(tone, 0.10, 1.0)
+			img.set_pixel(ox + x, oy + y, Color(tone, tone, tone, 1.0))
+
+
 func _make_blade_texture() -> ImageTexture:
 	var img := Image.create(TILE * COLS, TILE * STAGES, false, Image.FORMAT_RGBA8)
 	img.fill(Color(0, 0, 0, 0))
@@ -1869,6 +2471,12 @@ func _make_blade_texture() -> ImageTexture:
 			_paint_bloom_cell(img, (BLOOM_COL + k) * TILE, s * TILE, s, k, rng)
 		_paint_lia_body_cell(img, LIA_BODY_COL * TILE, s * TILE, s, rng)
 		_paint_lia_fuzz_cell(img, LIA_FUZZ_COL * TILE, s * TILE, s, rng)
+		for k in range(POPPY_LEAF_KINDS):
+			_paint_poppy_leaf_cell(img, (POPPY_LEAF_COL + k) * TILE, s * TILE,
+				s, k, rng)
+		for k in range(POPPY_PETAL_KINDS):
+			_paint_poppy_petal_cell(img, (POPPY_PETAL_COL + k) * TILE, s * TILE,
+				s, k, rng)
 
 	for s in range(STAGES):
 		var age: float = float(s) / float(STAGES - 1)
@@ -2174,6 +2782,19 @@ static func _is_stem(def: Dictionary) -> bool:
 	return String(def.get("shape", "")) == "vine"
 
 
+# МАК — ТРЕТЬЯ ФОРМА РОСТА. Ни купол мха, ни цепь лианы: одиночное растение с
+# розеткой у земли, одним стеблем и одной головкой. Купол ему не нужен, цепь
+# тоже — оттого он и спрашивается отдельно везде, где эти две расходятся.
+static func _is_poppy(def: Dictionary) -> bool:
+	return String(def.get("shape", "")) == "poppy"
+
+
+# НУЖЕН ЛИ ВИДУ КУПОЛ. Тело-купол считается до рождения и стоит недёшево;
+# заводить его стеблю и маку незачем — им хватает горстки общих полей.
+static func _needs_cushion(def: Dictionary) -> bool:
+	return not _is_stem(def) and not _is_poppy(def)
+
+
 # ЕСТЬ ЛИ РАЗВИЛКА ПОБЛИЗОСТИ ВВЕРХ ПО ЦЕПИ. Идём от звена к родителю столько
 # шагов, сколько велено, и если по дороге попалась развилка — этому звену
 # ветвиться рано.
@@ -2277,9 +2898,10 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 	var salt: int = _next * 7919 + int(absf(spot["pos"].x) * 131)
 	var def: Dictionary = PlantsData.ITEMS[id]
 	var body: Dictionary
-	if _is_stem(def):
-		# СТЕБЛЮ КОЧКА НЕ НУЖНА. Тело — это купол, севший на землю ободом; у
-		# лианы же звено рисуется трубкой до родителя, и обод ему не нужен.
+	if not _needs_cushion(def):
+		# СТЕБЛЮ И МАКУ КОЧКА НЕ НУЖНА. Тело — это купол, севший на землю ободом;
+		# у лианы звено рисуется трубкой до родителя, у мака — стебель от земли,
+		# и обод не нужен ни тому, ни другому.
 		# Оставляем ту же горстку полей, что читают общие места (`up`, `rise`), —
 		# иначе пришлось бы обвешивать проверками каждое из них.
 		body = {"up": spot["nrm"], "rise": 1.0, "rim": [],
@@ -2463,7 +3085,11 @@ func _crowded(pos: Vector3, bulk: float, id: String = "") -> bool:
 	# Место требуется ПО СЕБЕ И ПО СОСЕДУ: у крупной кочки локоть шире. Меряем по
 	# взрослым радиусам, а не по нынешним, — иначе на молодняке заросль сбивалась
 	# бы в кучу, а к старости кочки лезли бы одна из другой.
-	var mine: float = _patch_span(1.0, bulk)
+	# И СВОЙ ЛОКОТЬ У ВИДА (`room_k`). Мерка выше считает ширину КОЧКИ, а у мака
+	# кочки нет вовсе — у него розетка листьев, и она шире того, что намерил бы
+	# купол его зрелости. Без прибавки всходы садились бы друг другу в розетку, и
+	# самосев вышел бы ковром, а не куртиной с просветами.
+	var mine: float = _patch_span(1.0, bulk) * float(def.get("room_k", 1.0))
 	var node: Vector3i = main.grid.node_of(home)
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
@@ -2474,8 +3100,11 @@ func _crowded(pos: Vector3, bulk: float, id: String = "") -> bool:
 				for pid in by_cell.get(c, {}):
 					# Зазор ГУЛЯЕТ: без этого выходит правильная упаковка — та же
 					# решётка, только с кружками разного калибра.
+					var his: Dictionary = PlantsData.ITEMS.get(
+						String(patches[pid]["id"]), {})
 					var room: float = SIT_APART * (mine
-						+ _patch_span(1.0, float(patches[pid]["bulk"]))) \
+						+ _patch_span(1.0, float(patches[pid]["bulk"]))
+							* float(his.get("room_k", 1.0))) \
 						* _rng.randf_range(1.0 - vary, 1.0 + vary)
 					if id != "" and String(patches[pid]["id"]) != id:
 						room *= mix
@@ -2793,7 +3422,7 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 		# после предела единицы: недоросшие кисти. По этим же часам им и отмеряется
 		# срок дорастания (`BLOOM_GRACE`), иначе отмерять было бы нечем.
 		p["lived"] = lived + span
-		var rate: float = def["grow_rate"] * (1.0 + def["shade_love"] * _shade(p))
+		var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) * (1.0 + def["shade_love"] * _shade(p))
 		# В складке растению вольготнее: туда наносит землю и дольше держится
 		# сырость. Величину складки считает сама сетка.
 		var fold: float = maxf(0.0, main.grid.cavity_of(int(p["cell"])))
@@ -2834,8 +3463,26 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 		# РАСТЁТ ТОЛЬКО КОНЧИК, а звено с отростком даёт второй редко. Без этого
 		# «сдержанное ветвление» не выйдет ничем: у мха отросток даёт каждая
 		# кочка, и лиана расплылась бы тем же ковром, только вытянутым.
-		var chance: float = float(def["spread_rate"]) \
+		var chance: float = float(def.get("spread_rate", PlantsData.SPREAD_RATE_DEFAULT)) \
 			if (not done or in_bloom) else 0.0
+		# КУРТИНА НЕ РАСХОДИТСЯ ДАЛЬШЕ СВОЕЙ ШИРИНЫ (`clump_wide`).
+		#
+		# Без этого предела самосев — тот же ковёр, только редкий: у мха и у мака
+		# отросток даёт КАЖДОЕ растение, а значит пятно ползёт наружу без конца.
+		# Замерено на первом же прогоне мака: из одного семени за полторы минуты
+		# 11 680 стеблей на весь остров. Куртина — это пятно с краем, и край ей
+		# надо назначить.
+		#
+		# Меряем от КОРНЯ КУРТИНЫ (`root` — тот мак, что посадила рука), а не от
+		# родителя: иначе каждое новое колено отмеряло бы свою ширину заново, и
+		# предел не значил бы ничего — ровно те же грабли, что у часов роста
+		# (см. `GROW_SPAN`, «часы принадлежат организму»).
+		var wide: float = float(def.get("clump_wide", 0.0))
+		if wide > 0.0 and chance > 0.0:
+			var root: int = int(p.get("root", -1))
+			if patches.has(root) and Vector3(p["pos"]).distance_to(
+					Vector3(patches[root]["pos"])) > wide:
+				chance = 0.0
 		if def.has("branch"):
 			var kids: int = int(p.get("kids", 0))
 			# СЕДЬМОЕ ПОКОЛЕНИЕ — ПОСЛЕДНЕЕ (см. `GEN_MAX`): отсюда пошёл бы
@@ -2891,7 +3538,7 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 		if int(p.get("bloom", 0)) >= int(p.get("bloom_max", 1)) \
 				and int(p.get("bloom", 0)) > 0:
 			chance = 0.0
-		if p["m"] >= def["spread_at"] and _rng.randf() < chance * slow * span:
+		if p["m"] >= float(def.get("spread_at", PlantsData.SPREAD_AT_DEFAULT)) and _rng.randf() < chance * slow * span:
 			# СЧИТАЕМ ПОПЫТКИ И УДАЧИ. «Лиана застряла» бывает по двум совершенно
 			# разным причинам: она не пробует расти (частота, зрелость, запрет на
 			# ветвление) или пробует и не находит куда (земля, наклон, шаг). По
@@ -2982,6 +3629,14 @@ func _tick(dt: float, gift: float = 0.0) -> void:
 # растёт вниз головой. Без этой проверки поросль переваливала через кромку
 # острова и свисала с его исподу — в кадре это выглядело как зелёная борода.
 func _fits_surface(nrm: Vector3, def: Dictionary) -> bool:
+	# СВОЙ ПОТОЛОК КРУТИЗНЫ, ЕСЛИ ОН У ВИДА ЕСТЬ. Разбор ниже делит поверхность
+	# на три грубых доли — верх, бок, низ, — и «верхом» у него зовётся всё
+	# положе 63°. Мху и лиане этого хватает: они льнут к склону. А маку нет —
+	# у него сорок сантиметров стебля, и на такой круче он торчал бы вбок.
+	# `flat_at` — минимальная вертикальность нормали, у мака 0.82 (около 35°).
+	var least: float = float(def.get("flat_at", 0.0))
+	if least > 0.0 and nrm.y < least:
+		return false
 	var kinds: Array = def.get("surfaces", [])
 	var where := "under"
 	if nrm.y > 0.45:
@@ -4778,10 +5433,10 @@ func surface_changed(cells: Array = []) -> void:
 		# висеть по старому рельефу. Не нашлось нового места ободу — растение
 		# гибнет: рваного тела быть не должно.
 		#
-		# СТЕБЛЮ ЗДЕСЬ ДЕЛАТЬ НЕЧЕГО. У него нет обода, и попытка посадить его
-		# как кочку кончалась бы отказом на всякой круче — то есть лиана гибла бы
-		# ровно там, куда лезет.
-		var stem: bool = _is_stem(PlantsData.ITEMS[p["id"]])
+		# СТЕБЛЮ И МАКУ ЗДЕСЬ ДЕЛАТЬ НЕЧЕГО. У них нет обода, и попытка посадить
+		# их как кочку кончалась бы отказом на всякой круче — то есть лиана гибла
+		# бы ровно там, куда лезет, а мак — на любом бугре.
+		var stem: bool = not _needs_cushion(PlantsData.ITEMS[p["id"]])
 		var again: Dictionary = p["body"]
 		if not stem:
 			again = _make_cushion(spot, PlantsData.ITEMS[p["id"]],
@@ -6706,20 +7361,38 @@ func _emit_blooms(st: SurfaceTool, p: Dictionary, def: Dictionary,
 # круга (`petal_wide`), и между соседями остаётся просвет.
 const PETAL_ACROSS: int = 2                 # клеток поперёк лепестка
 
+# СТОЛБЕЦ ЛЕПЕСТКА — ПАРАМЕТРОМ, а не гвоздём в коде: у лианы он свой, у мака
+# свой, а прибор один и тот же. Умолчание оставлено лианьим, чтобы её вызов не
+# пришлось трогать вовсе.
+# РЯДЫ И ЧИСЛО ЛЕПЕСТКОВ — ТОЖЕ ПАРАМЕТРАМИ, а не только из карточки. Понадобилось
+# маку: у него ряды РАЗНЫЕ по числу — внешний из четырёх, внутренний из двух (её
+# слово 06.09.2026), — а карточка задаёт одно число на все ряды. Ноль в этих
+# полях значит «взять из карточки», и лианий вызов от этого не меняется вовсе.
 func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
-		def: Dictionary) -> void:
+		def: Dictionary, first_col: int = BLOOM_COL,
+		kinds: int = BLOOM_KINDS, rows_over: int = 0, per_over: int = 0,
+		open_over: float = -1.0) -> void:
 	var tint: Color = def.get("flower_color", Color(1.0, 1.0, 1.0))
 	var lum: float = maxf(0.001, (tint.r + tint.g + tint.b) / 3.0)
 	var hue := Color(1.0, 1.0, 1.0).lerp(
 		Color(tint.r / lum, tint.g / lum, tint.b / lum), 0.5)
 	var stage: int = clampi(int(float(p["m"]) * float(STAGES)), 0, STAGES - 1)
+	# СВОЙ ЦВЕТ У КАЖДОГО ЦВЕТКА, ЕСЛИ ОН ПРИШЁЛ С РАСКЛАДКОЙ (`tint`), — так у
+	# мака: у него разброс от цветка к цветку (её решение 05.09.2026).
+	#
+	# И БЕРЁТСЯ ОН НАПРЯМУЮ, без разбавления белым. Мерка выше нормирует цвет по
+	# яркости и мешает его с белым наполовину — она заведена под лиану, у которой
+	# цветок почти белый, и картинку она бережёт. Алому она не годится вовсе:
+	# нормировка выносит красный канал за единицу, и вместо мака выходит бледный
+	# лосось. У мака цвет и есть цвет — картинка лепестка почти белая нарочно,
+	# чтобы его пропустить.
 	var wide_px: float = float(COLS * TILE)
 	var high_px: float = float(STAGES * TILE)
 	var v_tip: float = (float(stage * TILE) + 0.5) / high_px
 	var v_foot: float = (float((stage + 1) * TILE) - 0.5) / high_px
-	var rows: int = maxi(int(def.get("petal_rows", 2)), 1)
-	var per: int = maxi(int(def.get("petal_per_row", 3)), 1)
-	var open_in: float = deg_to_rad(float(def.get("petal_open", 50.0)))
+	var rows: int = maxi(rows_over if rows_over > 0 else int(def.get("petal_rows", 2)), 1)
+	var per: int = maxi(per_over if per_over > 0 else int(def.get("petal_per_row", 3)), 1)
+	var open_in: float = deg_to_rad(open_over if open_over >= 0.0 else float(def.get("petal_open", 50.0)))
 	var open_out: float = deg_to_rad(float(def.get("petal_open_far", 82.0)))
 	var bend: float = clampf(float(def.get("petal_bend", 0.33)), 0.05, 0.9)
 	var bow: float = float(def.get("petal_bow", 0.25))
@@ -6733,7 +7406,8 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 		var base: Vector3 = f["at"]
 		var salt: int = int(f["salt"])
 		var size: float = float(f["long"])
-		st.set_color((hue * float(f["shade"])).srgb_to_linear())
+		var paint: Color = f["tint"] if f.has("tint") else hue
+		st.set_color((paint * float(f["shade"])).srgb_to_linear())
 		for row in range(rows):
 			var lean: float = open_in
 			if rows > 1:
@@ -6742,7 +7416,18 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 			# всегда старше и шире внутренних.
 			var long: float = size * (1.0 + rank * float(row))
 			var half: float = long * wide_k * 0.5
-			var seat: Vector3 = base - up * (size * rank * float(row))
+			# ЛЕПЕСТОК РАСТЁТ ИЗ ОСНОВАНИЯ ЦВЕТКА, А НЕ ИЗ СЕРДЦЕВИНЫ.
+			#
+			# Её кадр 07.09.2026: «лепестки мака растут не у основания цветка, а
+			# на сердцевине. Это неправильно». Так и было: донце лепестка сидело
+			# ровно в той же точке, что и тёмное тело, и лепестки торчали из него
+			# лучами. У живого цветка они крепятся НИЖЕ — к цветоложу, — а тело с
+			# тычинками стоит внутри получившейся чаши.
+			#
+			# Опускаем донце на `petal_seat` длины лепестка. Ноль по умолчанию,
+			# чтобы у лианы ничего не сдвинулось.
+			var seat: Vector3 = base - up * (size * rank * float(row)
+				+ size * float(def.get("petal_seat", 0.0)))
 			for k in range(per):
 				# ПОВОРОТ РЯДА: половина промежутка между лепестками.
 				var ang: float = TAU * (float(k) / float(per)
@@ -6776,8 +7461,8 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 						line.append(Vector3(mids[iy]) + side * (half * w)
 							+ face * cup)
 					pts.append(line)
-				var col: int = BLOOM_COL + (int(_hash01(salt + row * 131 + k * 29)
-					* float(BLOOM_KINDS)) % BLOOM_KINDS)
+				var col: int = first_col + (int(_hash01(salt + row * 131 + k * 29)
+					* float(kinds)) % kinds)
 				var u0: float = (float(col * TILE) + 0.5) / wide_px
 				var u1: float = (float((col + 1) * TILE) - 0.5) / wide_px
 				var nrms: Array = []
@@ -6958,6 +7643,8 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[p["id"]]
 	if _is_stem(def):
 		return _emit_stem(st, p, def)
+	if _is_poppy(def):
+		return _emit_poppy(st, p, def)
 	var m: float = p["m"]
 	var body: Dictionary = p.get("body", {})
 	if body.is_empty():

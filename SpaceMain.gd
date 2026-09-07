@@ -259,7 +259,8 @@ func _ready() -> void:
 	# Все записанные числа сняты на эталонном зерне, стенды обязаны идти по нему.
 	var bench: bool = false
 	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
-			"--meetbench", "--rockbench", "--scenebench", "--showbench"]:
+			"--meetbench", "--rockbench", "--scenebench", "--showbench",
+			"--dabbench", "--poppybench"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	if not bench and FileAccess.file_exists(SEED_PATH):
@@ -334,6 +335,19 @@ func _ready() -> void:
 		# считает пересборки. См. `_show_bench`.
 		await _fill_world()
 		_show_bench(args)
+		get_tree().quit()
+	elif "--poppybench" in args:
+		# Только мак, без остального сада: облик нового вида крутится десятками
+		# прогонов, а полная самопроверка идёт минутами.
+		await _fill_world()
+		_seed_structures()
+		_poppy_check()
+		get_tree().quit()
+	elif "--dabbench" in args:
+		# Чего стоит ОТКЛИК на руку: мазок идёт кадрами, как в игре. См.
+		# `_dab_bench`.
+		await _fill_world()
+		_dab_bench(args)
 		get_tree().quit()
 	elif "--scenebench" in args:
 		# Новый остров: сколько он стоит и насколько разный. Сад не грузим и не
@@ -413,7 +427,7 @@ func _save_garden() -> void:
 	f.store_var({
 		"v": 1,
 		"seed": world_seed,
-		"edits": grid.edits,
+		"edits": grid.edits_saved(),
 		"stone": grid.stone,
 		"lumps": grid.lumps,
 		"paint": paint,
@@ -710,8 +724,22 @@ func _process(delta: float) -> void:
 		fill_label.visible = fill_done < 1.0
 		if fill_done < 1.0:
 			fill_label.text = "остров достраивается — %d%%" % int(fill_done * 100.0)
-	if not _dirty_chunks.is_empty():
-		_flush_chunks_some()
+	# КАДРУ, КОТОРОМУ ДОСТАЛСЯ МАЗОК, БОЛЬШЕ НЕ ДАЁМ НИЧЕГО. Правку земли не
+	# разложить по кадрам — поле обязано измениться в тот же миг, когда рука
+	# нажала, — и своё такой кадр уже потратил сполна. Складывать в него ещё и
+	# меши значит собирать два расхода в один рывок.
+	#
+	# А в первом же кадре БЕЗ мазка досчитываем отложенный облик (впадину и
+	# наклон света) — и только потом беремся за меши, чтобы свежая тень попала в
+	# них сразу, а не через пересборку. При удержании мазок приходится на один
+	# кадр из восьми, так что пустых кадров вдоволь: один уходит на облик,
+	# остальные шесть — мешам.
+	if not _dabbed_now:
+		if grid.look_pending():
+			grid.flush_look(LOOK_MS)
+		if not _dirty_chunks.is_empty():
+			_flush_chunks_some()
+	_dabbed_now = false
 	# САМ ПО СЕБЕ САД БОЛЬШЕ НЕ ПИШЕТСЯ. Здесь стоял таймер на полминуты; убран
 	# 2026-09-01 по её решению — «если кнопка не нажата, не сохраняй».
 
@@ -760,12 +788,37 @@ func _chunk_of_cube(c: Vector3i) -> Vector3i:
 
 
 # Ячейка входит углом в восемь кубиков — их куски и надо пересобрать.
+#
+# ВОСЕМЬ КУБИКОВ ПОЧТИ ВСЕГДА ЛЕЖАТ В ОДНОМ КУСКЕ, и раньше это никак не
+# учитывалось: на каждую ячейку шло восемь округлений и шестнадцать записей в
+# словари — ради одного-двух разных кусков. А ячеек в широком мазке две с
+# половиной тысячи, и куски у них общие: помечалось их девяносто.
+#
+# Кусок — четыре узла в ряд, значит по каждой оси кубики `n` и `n−1` попадают в
+# разные куски только у каждого четвёртого узла. Считаем куски у двух крайних
+# кубиков и перебираем лишь то, чем они различаются: у пяти ячеек из двенадцати
+# кусок один-единственный, у остальных два-четыре.
 func _touch_chunks(cell: int, dirty: bool = true) -> void:
 	var n: Vector3i = grid.node_of(cell)
-	for dx in range(-1, 1):
-		for dy in range(-1, 1):
-			for dz in range(-1, 1):
-				var ch := _chunk_of_cube(n + Vector3i(dx, dy, dz))
+	var a: Vector3i = _chunk_of_cube(n)
+	var b: Vector3i = _chunk_of_cube(n - Vector3i.ONE)
+	if a == b:
+		chunk_list[a] = true
+		if dirty:
+			_dirty_chunks[a] = true
+		return
+	for ix in range(2):
+		if ix == 1 and b.x == a.x:
+			continue
+		var x: int = a.x if ix == 0 else b.x
+		for iy in range(2):
+			if iy == 1 and b.y == a.y:
+				continue
+			var y: int = a.y if iy == 0 else b.y
+			for iz in range(2):
+				if iz == 1 and b.z == a.z:
+					continue
+				var ch := Vector3i(x, y, a.z if iz == 0 else b.z)
 				chunk_list[ch] = true
 				if dirty:
 					_dirty_chunks[ch] = true
@@ -888,7 +941,38 @@ func material_of(cell: int) -> String:
 # пересобран, кисть рисует по вчерашнему рельефу. Мазок оставляет своё место в
 # `_flush_focus`, и очередь начинается с ближайших к нему кусков.
 const CHUNK_MS: float = 6.0
+# И столько же на облик — впадину и наклон света (см. `flush_look` в сетке). Два
+# запаса, а не один общий: они не спорят за одно и то же. Кадр без мазка тратит
+# на землю самое большее десять миллисекунд из шестнадцати с половиной, и обе
+# работы подвигаются каждый такой кадр, а не по очереди через одну.
+const LOOK_MS: float = 4.0
 var _flush_focus: Vector3 = Vector3.INF
+# Тронуло ли поле хоть что-нибудь в этом кадре. Ставит `_after_field_change` —
+# то есть и удержание, и одиночный щелчок, и размывание, и отмена; гасит
+# `_process` в самом конце.
+var _dabbed_now: bool = false
+
+# ЧЕГО СТОИТ ПЕРЕСБОРКА ЗЕМЛИ — счёт от обнуления. Мерит стенд отклика
+# (`--dabbench`) и самопроверка; порознь форма и тело столкновений, потому что
+# лечатся они разным.
+var built_chunks: int = 0        # кусков собрано
+var built_ms: float = 0.0        # во что обошлись все
+var built_form_ms: float = 0.0   # из них на форму (`Surface.build`)
+var built_body_ms: float = 0.0   # и на тело столкновений
+var built_worst: float = 0.0     # самый дорогой кусок
+# И ЧЕГО СТОЯТ ПОСЛЕДСТВИЯ МАЗКА ЗДЕСЬ, а не в сетке: порода у ячейки появляется
+# и исчезает по уровню заполнения, и тут же метятся куски на пересборку.
+var after_ms: float = 0.0
+
+
+# Обнулить счёт пересборки. Зовут стенды перед замером.
+func built_reset() -> void:
+	built_chunks = 0
+	built_ms = 0.0
+	built_form_ms = 0.0
+	built_body_ms = 0.0
+	built_worst = 0.0
+	after_ms = 0.0
 
 func _flush_chunks_some() -> void:
 	var order: Array = _dirty_chunks.keys()
@@ -916,6 +1000,10 @@ func _flush_chunks_some() -> void:
 
 
 func _flush_chunks() -> void:
+	# ГДЕ ЖДУТ ОТВЕТА СЕЙЧАС, ОБЛИК НЕ ОТКЛАДЫВАЕТСЯ. Сюда ходят загрузка сада,
+	# расстановка сцены, отмена и все стенды: меш собирается тут же, и собрать его
+	# по недосчитанной впадине значило бы запечь в него вчерашнюю тень.
+	grid.flush_look()
 	for ch in _dirty_chunks:
 		_rebuild_chunk(ch)
 	_dirty_chunks.clear()
@@ -955,9 +1043,20 @@ func _flush_chunks() -> void:
 # мерцание идёт всё время мазка. Лечится тем же приёмом, каким это давно
 # сделано у кочек: узел и тело остаются свои, меняется только меш.
 func _rebuild_chunk(chunk: Vector3i) -> void:
+	var t0: int = Time.get_ticks_usec()
+	_build_chunk(chunk)
+	var spent: float = float(Time.get_ticks_usec() - t0) / 1000.0
+	built_chunks += 1
+	built_ms += spent
+	built_worst = maxf(built_worst, spent)
+
+
+func _build_chunk(chunk: Vector3i) -> void:
 	var lo: Vector3i = chunk * CHUNK_NODES
 	var hi: Vector3i = lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES)
+	var t_form: int = Time.get_ticks_usec()
 	var mesh: ArrayMesh = SurfaceScript.build(grid, lo, hi)
+	built_form_ms += float(Time.get_ticks_usec() - t_form) / 1000.0
 	if mesh == null:
 		# Кусок опустел — убираем его СРАЗУ, а не в очередь: иначе он проживёт
 		# лишний кадр там, где земли уже нет.
@@ -968,11 +1067,15 @@ func _rebuild_chunk(chunk: Vector3i) -> void:
 			chunk_nodes.erase(chunk)
 		return
 
+	var t_body: int = Time.get_ticks_usec()
+	var shape: Shape3D = mesh.create_trimesh_shape()
+	built_body_ms += float(Time.get_ticks_usec() - t_body) / 1000.0
+
 	if chunk_nodes.has(chunk):
 		var mi_old: MeshInstance3D = chunk_nodes[chunk]
 		mi_old.mesh = mesh
 		var col_old: CollisionShape3D = mi_old.get_child(0).get_child(0)
-		col_old.shape = mesh.create_trimesh_shape()
+		col_old.shape = shape
 		return
 
 	var mi := MeshInstance3D.new()
@@ -980,7 +1083,7 @@ func _rebuild_chunk(chunk: Vector3i) -> void:
 	mi.material_override = rock_mat
 	var body := StaticBody3D.new()
 	var col := CollisionShape3D.new()
-	col.shape = mesh.create_trimesh_shape()
+	col.shape = shape
 	body.add_child(col)
 	mi.add_child(body)
 	add_child(mi)
@@ -1083,8 +1186,21 @@ func _brush_radius(erase: bool = false) -> float:
 
 func _stroke(at: Vector3, radius: float, amount: float, material: String,
 		stone_push: float = 0.0) -> void:
+	# ПРЕЖНЮЮ ОКРУГУ ДОСЧИТЫВАЕМ ДО НОВОГО МАЗКА, и это не мелочь, а точность.
+	#
+	# Впадина считается по полю, а поле следующий мазок меняет. Оставь долг
+	# висеть — и округа первого мазка досчитается уже по полю ПОСЛЕ второго:
+	# на её краю разглаживание ляжет иначе. Замерено: мир от этого поехал —
+	# лиана в самопроверке дала 674 звена вместо 669.
+	#
+	# В игре это не стоит ничего: между мазками при удержании три-семь пустых
+	# кадров, и облик успевает досчитаться в них задолго до следующего. А вот
+	# стенды и расстановка кладут мазки подряд, без единого кадра между, — и
+	# только там эта строка и срабатывает.
+	if grid.look_pending():
+		grid.flush_look()
 	_flush_focus = at
-	var touched: Array = grid.stroke_at(at, radius, amount, stone_push)
+	var touched: PackedInt32Array = grid.stroke_at(at, radius, amount, stone_push)
 	if amount > 0.0:
 		for c in touched:
 			paint[c] = material
@@ -1094,7 +1210,7 @@ func _stroke(at: Vector3, radius: float, amount: float, material: String,
 # Поле в этих ячейках изменилось — разбираемся с последствиями. Порода у ячейки
 # появляется и исчезает САМА, по уровню заполнения; куски метим на пересборку.
 # Общее для лепки и размывания: и то и другое двигает одно и то же поле.
-func _after_field_change(touched: Array) -> void:
+func _after_field_change(touched) -> void:
 	# ПОДСВЕТКА УСТАРЕВАЕТ ВМЕСТЕ С ЗЕМЛЁЙ. Накладка под курсором — это КОПИЯ
 	# поверхности, собранная отдельным мешем и нарисованная просвечивающей. Она
 	# пересобиралась только при смене ЯЧЕЙКИ под прицелом, а при удержании кисти
@@ -1103,6 +1219,8 @@ func _after_field_change(touched: Array) -> void:
 	#
 	# Это и есть «баги при мазке»: не двойной меш куска (тот вылечен), а вот эта
 	# застывшая копия. Помечаем её на пересборку всякий раз, когда поле тронуто.
+	var t_after: int = Time.get_ticks_usec()
+	_dabbed_now = true
 	frame_id = ""
 	for c in touched:
 		_touched_cells[c] = true
@@ -1114,6 +1232,7 @@ func _after_field_change(touched: Array) -> void:
 			solid.erase(c)
 			_forget_buried(c)
 		_touch_chunks(c)
+	after_ms += float(Time.get_ticks_usec() - t_after) / 1000.0
 
 
 func _place(cell: int, material: String = "ground", record: bool = true) -> void:
@@ -2255,6 +2374,7 @@ func _hold_tick(delta: float) -> void:
 	_apply_at(at, held_erase)
 
 
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
@@ -2642,6 +2762,14 @@ func _selftest() -> void:
 	# месте повторно. В игре между наведением и щелчком проходит время, и
 	# подсветка контура успевает прогреть место заранее — то есть настоящий
 	# щелчок ближе ко второму числу.
+	#
+	# МЕСТО ДЛЯ МАЗКА ИЩЕМ ЗАРАНЕЕ, А НЕ ВНУТРИ ЗАМЕРА. Грабли, и они врали
+	# годами: `_test_spot` перебирает ВСЕ триста тысяч семян, и стоял он внутри
+	# секундомера. То есть строка «Кисть» показывала цену поиска места плюс
+	# мазок — 246 и 307 мс там, где сам мазок стоит 21 и 44. Число росло от
+	# правок, к мазку не относящихся, и не двигалось от тех, что его удешевляли.
+	# Чего стоит мазок кадру, меряет стенд отклика (`--dabbench`).
+	var brush_at: Vector3 = _test_spot()
 	for width in [2, 3]:
 		brush = width
 		var was := solid.size()
@@ -2650,7 +2778,7 @@ func _selftest() -> void:
 		var warm := 0.0
 		for pass_i in range(2):
 			var t_brush := Time.get_ticks_usec()
-			_dab(_test_spot(), _stroke_amount(), "ground")
+			_dab(brush_at, _stroke_amount(), "ground")
 			_flush_chunks()
 			var ms := (Time.get_ticks_usec() - t_brush) / 1000.0
 			if pass_i == 0:
@@ -2897,6 +3025,18 @@ func _selftest() -> void:
 	save_path = keep_path
 
 	_meet_stand()
+
+	# МАК — ПОСЛЕ СТЕНДА ВСТРЕЧИ, И ЭТО НЕ ВКУС, А ЗАМЕР.
+	#
+	# Сперва он стоял перед ним — и числа встречи поехали: треугольников на
+	# кочку 95.9 → 95.6, спорангиев 196 → 206. Никакой поломки, причина
+	# бухгалтерская: соль растения складывается из его НОМЕРА (`_next`), а мак,
+	# посаженный раньше, сдвигает нумерацию всему, что за ним. Раскладка кочек от
+	# соли и зависит.
+	#
+	# Правило отсюда общее: НОВАЯ ПРОВЕРКА ВСТАЁТ В КОНЕЦ, а не в середину — иначе
+	# она молча обесценивает все записанные прежде числа.
+	_poppy_check()
 
 	await get_tree().physics_frame
 	await get_tree().physics_frame
@@ -3431,6 +3571,57 @@ func _seed_scene() -> void:
 		"% — по ним и лазает лоза; поставлена за ",
 		Time.get_ticks_msec() - started, " мс, из них мазки ", dabbed,
 		" мс и пересборка мешей ", flushed, " мс")
+	# СВЯЗНА ЛИ ПОСТАВЛЕННАЯ ПОРОДА — главное число всей правки 05.09.2026.
+	#
+	# Её просьба была «крупнее и ВЗАИМОСВЯЗАННЕЕ», и вот тут-то одного счёта
+	# ячеек мало: три тысячи ячеек могут лежать одной жилой, а могут — тремя
+	# десятками отдельных прыщиков, и по счёту это одно и то же число. Прибор
+	# уже есть, тот же, каким судят раскол глыбы: обход по соседям считает
+	# ОТДЕЛЬНЫЕ ТЕЛА.
+	#
+	# ЧИТАТЬ ТАК: тел мало и первое много больше прочих — камень связный, как на
+	# её рисунке. Тел десятки и все примерно равны — это россыпь, ради ухода от
+	# которой всё и делалось.
+	_scene_bodies_report()
+
+
+# Отдельные тела во ВСЕЙ поставленной породе — не вокруг одной точки, как у
+# `_bodies_report`, а по всему острову.
+func _scene_bodies_report() -> void:
+	var mine: Dictionary = {}
+	for j in range(grid.seeds.size()):
+		if grid.in_play(j) and grid.stone_of(j) > 0.02 and grid.fill_of(j) > 0.5:
+			mine[j] = true
+	var seen: Dictionary = {}
+	var sizes: Array = []
+	for start in mine:
+		if seen.has(start):
+			continue
+		var queue: Array = [start]
+		seen[start] = true
+		var size := 0
+		while not queue.is_empty():
+			var j: int = queue.pop_back()
+			size += 1
+			for s in grid.neighbors_of(j):
+				var n := int(s)
+				if mine.has(n) and not seen.has(n):
+					seen[n] = true
+					queue.append(n)
+		sizes.append(size)
+	sizes.sort()
+	sizes.reverse()
+	var big: Array = []
+	for i in range(mini(5, sizes.size())):
+		big.append(sizes[i])
+	var whole: int = 0
+	for s in sizes:
+		whole += int(s)
+	print("Сцена: тел в камне — ", sizes.size(), ", крупнейшие ", big,
+		"; в самом крупном ", snappedf(100.0 * float(big[0] if not big.is_empty()
+			else 0) / maxf(1.0, float(whole)), 0.1),
+		"% всей породы — связная жила даёт одно тело на большую часть камня,",
+		" россыпь даёт десятки равных")
 
 
 # =============================================================================
@@ -3672,8 +3863,139 @@ const SCENE_FORCE: float = 9.0
 # растёт ровно на столько за каждый прибавленный. 14 мазков — 1.13 с, 18 — около
 # 1.4 с, 22 — 1.6 с. Это то самое число, которым и торгуются «богаче» против
 # «быстрее»; прочее в постановке острова не решает почти ничего.
-const SCENE_DABS: int = 18
+# ЗАПАС МАЗКОВ НА ОБСТАНОВКУ. Поднят с 18 до 64 (05.09.2026): связной массе на
+# треть острова столько и нужно — жила в полтора десятка звеньев плюс отростки,
+# по три-пять мазков на звено. Прежних восемнадцати хватало ровно на четыре-шесть
+# отдельных форм, оттого камень и читался пятнами.
+#
+# ЦЕНА ЗАМЕРЕНА, А НЕ ПРИКИНУТА: см. «Остров» в README. Мазок камня широкой
+# кистью стоит около 26 мс правки плюс сборка мешей, и весь этот расход ложится
+# на кнопку «новый остров».
+# Запас поднят вместе с числом массивов: на двоих прежних сорока не хватило бы
+# и на один полноценный.
+const SCENE_DABS: int = 72
+# Классическая постановка живёт на прежнем запасе — на нём стоят все её кадры.
+const SCENE_DABS_CLASSIC: int = 18
 var _scene_dabs: int = 0
+# ЗАПАС СВОЙ У КАЖДОЙ ПОСТАНОВКИ, и это не мелочь: классическая обязана остаться
+# СЛОВО В СЛОВО прежней (её решение 05.09.2026 — новый камень только на новых
+# островах). Подняв общий запас с 18 до 64, я нечаянно изменил и её: на её зерне
+# породы стало 3613 ячеек вместо 2290. Теперь запас ставится под каждую.
+var _scene_cap: int = SCENE_DABS_CLASSIC
+
+# ЖИЛА: сколько звеньев в главной нитке и сколько отростков от неё.
+# СКОЛЬКО СВЯЗНЫХ МАССИВОВ СТАВИТСЯ. Её слово 06.09.2026 — «в два раза больше
+# таких массивов»; было по одному на остров.
+const VEIN_MASSES: int = 2
+const VEIN_LINKS: int = 9
+const VEIN_ARMS_LOW: int = 2
+const VEIN_ARMS_HIGH: int = 4
+const VEIN_ARM_LOW: int = 2
+const VEIN_ARM_HIGH: int = 4
+# Шаг между звеньями — ПОД расстоянием слияния глыб (1.8 м), иначе жила
+# распадётся на цепочку отдельных камней со швом между каждой парой.
+const VEIN_STEP_LOW: float = 1.1
+const VEIN_STEP_HIGH: float = 1.6
+# Насколько жила виляет на каждом шаге, в долях оборота.
+const VEIN_TURN: float = 0.55
+
+
+# ОДНА ЖИЛА ЦЕЛИКОМ: главная нитка плюс отростки от неё.
+#
+# НАЧАЛО — НА ВОЗВЫШЕНИИ. Скала, начатая в яме, просто засыпает яму, не давая ни
+# высоты, ни стены: замерено на острове с 43% ям — 80 ячеек породы и ни одного
+# отвесного места. Пробуем три точки и берём самую высокую.
+func _scene_one_vein(rng: RandomNumberGenerator, span: float,
+		home: float) -> void:
+	var root := Vector3.ZERO
+	for _try in range(3):
+		# Массивы разводим по острову: своя сторона у каждого, чтобы они не
+		# слились обратно в один.
+		var ang: float = home + rng.randf_range(-0.45, 0.45)
+		var far: float = rng.randf_range(SCENE_NEAR * 0.4, SCENE_FAR * 0.8) * span
+		var spot: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
+		if spot != Vector3.ZERO and (root == Vector3.ZERO or spot.y > root.y):
+			root = spot
+	if root == Vector3.ZERO:
+		return
+	var dir: float = rng.randf_range(0.0, TAU)
+	var spine: Array = _scene_vein(rng, root, dir, VEIN_LINKS, span)
+	# ОТРОСТКИ УХОДЯТ ОТ УЖЕ ПОЛОЖЕННОЙ ЖИЛЫ, а не от случайного места: иначе
+	# это не отросток, а вторая скала по соседству.
+	var arms: int = rng.randi_range(VEIN_ARMS_LOW, VEIN_ARMS_HIGH)
+	for a in range(arms):
+		if _scene_dabs >= _scene_cap or spine.is_empty():
+			break
+		var from: Vector3 = spine[rng.randi_range(0, spine.size() - 1)]
+		# Вбок, а не вдоль: угол к жиле от сорока градусов и круче, иначе
+		# отросток ложится на неё же и не читается отдельным рукавом.
+		var away: float = dir + rng.randf_range(0.7, 2.4) \
+			* (1.0 if rng.randf() < 0.5 else -1.0)
+		_scene_vein(rng, from, away,
+			rng.randi_range(VEIN_ARM_LOW, VEIN_ARM_HIGH), span)
+
+
+# ОДНО ЗВЕНО ЖИЛЫ ЗА ДРУГИМ. Отдаёт точки, по которым прошла, — по ним потом
+# пускают отростки.
+func _scene_vein(rng: RandomNumberGenerator, from: Vector3, dir: float,
+		links: int, span: float) -> Array:
+	var spine: Array = []
+	var head: Vector3 = from
+	var way: float = dir
+	for k in range(links):
+		if _scene_dabs >= _scene_cap:
+			break
+		var ground: Vector3 = _ground_at(head.x, head.z)
+		if ground == Vector3.ZERO:
+			break
+		# ЗА КРАЙ ОСТРОВА ЖИЛА НЕ ВЫХОДИТ: там кромка, самое тонкое место мира, и
+		# скала на ней обрывается стенкой в воду.
+		if Vector2(ground.x, ground.z).length() > SCENE_FAR * span:
+			break
+		spine.append(ground)
+		# ВЫСОТА ИДЁТ ПЛАВНОЙ ДУГОЙ ВДОЛЬ ЖИЛЫ, а не берётся заново у каждого
+		# звена — и это починка её кадра 06.09.2026 («при генерации появляются
+		# такие шипы, это недопустимо»).
+		#
+		# ОТЧЕГО БЫЛИ ШИПЫ. Звенья стоят в полутора метрах друг от друга, а мазок
+		# камня — шар радиусом почти в пять. Дай соседним звеньям высоту врозь,
+		# случаем, и разойтись они могут на две ступени: тогда шапка одного шара
+		# торчит над плечом другого, и на стыке двух шапок выходит не склон, а
+		# ребро. Ряд таких рёбер и читается на кадре пилой.
+		#
+		# Теперь высота — дуга: жила начинается низко, поднимается к середине и
+		# опускается к концу, как настоящее обнажение. Соседи от этого разнятся
+		# самое большее на ступень, и шапки сходятся склоном, а не ребром.
+		var along: float = float(k) / maxf(1.0, float(links - 1))
+		var arc: float = sin(along * PI)            # 0 у концов, 1 в середине
+		var up: int = int(round(lerpf(float(SCENE_LOW), float(SCENE_HIGH), arc)))
+		# Разброс оставляем, но РОВНО НА СТУПЕНЬ: жила одной высоты читается
+		# забором, а на две ступени — снова пилой.
+		up = clampi(up + (1 if rng.randf() < 0.3 else 0), SCENE_LOW, SCENE_HIGH)
+		_scene_tower(ground, up)
+		# И ФОРМА ИЗРЕДКА ПОВЕРХ ЗВЕНА: плита, столб или короткая гряда. Кладём не
+		# каждому звену, иначе жила становится сплошным столом; а без них она
+		# читается одной длинной колбасой, и обломочности в ней нет вовсе.
+		# ФОРМЫ СО СВОЕЙ СЛУЧАЙНОЙ ВЫСОТОЙ — ТОЛЬКО НА КОНЦАХ ЖИЛЫ, и это то же
+		# лекарство от пилы. Столб и гряда берут высоту сами, врозь от дуги; сядь
+		# такая форма посреди жилы — и она вернёт на гребень ровно тот перепад,
+		# ради ухода от которого дуга и заведена. На концах, где жила и так сходит
+		# на нет, лишняя ступень читается обломком, а не зубцом.
+		#
+		# ПЛИТА ЖЕ ИДЁТ ГДЕ УГОДНО: она кладётся плоско и гребня не трогает.
+		if _scene_dabs < _scene_cap:
+			var kind: float = rng.randf()
+			var tail: bool = arc < 0.55
+			if kind < 0.26:
+				_scene_slab(rng, ground)      # плита — самая частая
+			elif kind < 0.34 and tail:
+				_scene_column(rng, ground)    # столб — обломок помельче
+			elif kind < 0.40 and tail:
+				_scene_ridge(rng, ground, rng.randf() < 0.3)
+		way += rng.randf_range(-VEIN_TURN, VEIN_TURN)
+		var step: float = rng.randf_range(VEIN_STEP_LOW, VEIN_STEP_HIGH)
+		head = ground + Vector3(cos(way), 0.0, sin(way)) * step
+	return spine
 
 func _scene_rocks() -> void:
 	var rng := RandomNumberGenerator.new()
@@ -3683,6 +4005,8 @@ func _scene_rocks() -> void:
 	# НА ПРЕЖНЕМ ЗЕРНЕ — ПРЕЖНЯЯ ПОСТАНОВКА, слово в слово: на ней стоят все
 	# воспроизводимые кадры, и сравнение «до/после» живо, пока эта ветка цела.
 	if world_seed == WORLD_SEED:
+		_scene_dabs = 0
+		_scene_cap = SCENE_DABS_CLASSIC
 		_scene_rocks_classic(rng)
 		# Плитняк идёт и сюда: он появился по её референсу 02.09.2026, и смотреть
 		# она будет прежде всего обычный остров. Классическая четвёрка обнажений
@@ -3700,54 +4024,37 @@ func _scene_rocks() -> void:
 	# СПЕРВА ЗЕМЛЯ, ПОТОМ КАМЕНЬ: скалы встают на найденную землю, и лепить её
 	# после них значило бы поднимать холмы прямо сквозь скалу.
 	_scene_dabs = 0
+	_scene_cap = SCENE_DABS
 	_scene_relief(rng)
-	# СКАЛЫ СТОЯТ КУЧАМИ, А НЕ ПОРОВНУ ПО КРУГУ (решение пользователя 2026-09-02
-	# по её референсам). На снимках камень выходит НА ПОВЕРХНОСТЬ ГНЕЗДАМИ:
-	# крупный кусок, а вокруг него мельче, и между гнёздами чистый луг. Ровная
-	# раскладка по кругу — это ровно те «2-3 круглых прыщика», на которые она и
-	# жаловалась: каждый сам по себе, и ни одного скопления.
+	# КАМЕНЬ — ОДНА СВЯЗНАЯ МАССА С ОТРОСТКАМИ, а не россыпь гнёзд.
 	#
-	# Гнёзд одно-два, в каждом две-три формы. Внутри гнезда формы стоят ближе
-	# расстояния слияния плюс шаг — то есть местами срастаются в одно тело, а
-	# местами оставляют щель, и это и есть обломочность.
-	var nests: int = rng.randi_range(1, 2)
-	var forms: int = nests * rng.randi_range(2, 3)
+	# Её решение 05.09.2026 по рисунку поверх кадра: голубым обведена одна
+	# ветвящаяся масса примерно на треть острова, и из трёх предложенных долей
+	# (одна масса на треть / две поменьше / масса во полострова) выбрана первая.
+	#
+	# ЧЕМ ЭТО ОТЛИЧАЕТСЯ ОТ ПРЕЖНЕГО. Прежде ставились ГНЁЗДА — одно-два
+	# скопления по две-три формы, разнесённые по кругу. Внутри гнезда формы
+	# срастались, между гнёздами лежал чистый луг, и на кадре это читалось
+	# отдельными пятнами: связи между ними не было никакой.
+	#
+	# Теперь камень идёт ЖИЛОЙ: она выходит из одной точки, вьётся по острову и
+	# по дороге пускает отростки вбок. Шаг между звеньями держим ПОД РАССТОЯНИЕМ
+	# СЛИЯНИЯ (1.8 м) — тем же правилом, по которому собрана гряда (`_scene_ridge`):
+	# соседние звенья срастаются в одно тело, и вся жила выходит связной, а не
+	# цепочкой глыб со швом между каждой парой.
+	#
+	# ОТРОСТКИ И ДЕЛАЮТ ЕЁ ВЕТВЯЩЕЙСЯ. Без них жила — просто длинная гряда;
+	# на её рисунке же от главной массы отходят рукава, и между ними остаются
+	# заливы луга.
+	# ДВЕ ЖИЛЫ, А НЕ ОДНА — её слово 06.09.2026: «скала симпатичная, можно
+	# сделать в два раза больше таких массивов при генерации». Устройство у
+	# каждой прежнее (одна связная масса с отростками), просто их теперь две, и
+	# ставятся они в разных концах острова.
+	var span: float = _scene_scale()
 	var turn: float = rng.randf_range(0.0, TAU)
-	var nest_at: Array = []
-	for n in range(nests):
-		nest_at.append(turn + TAU * float(n) / float(nests)
-			+ rng.randf_range(-0.4, 0.4))
-	for i in range(forms):
-		if _scene_dabs >= SCENE_DABS:
-			break
-		# СКАЛА ВСТАЁТ НА ВОЗВЫШЕНИИ, А НЕ В ЯМЕ. Теперь, когда в земле есть
-		# настоящие ямы, случайная точка запросто попадает на дно одной из них —
-		# и мазки камня просто засыпают яму, не давая ни высоты, ни стены.
-		# Замер поймал это на острове с 43% ям: 80 ячеек породы и НИ ОДНОГО
-		# отвесного места. Пробуем три точки и берём самую высокую.
-		var at := Vector3.ZERO
-		var home: float = float(nest_at[i % nests])
-		for _try in range(3):
-			# Разброс внутри гнезда узкий: это одно обнажение, разбитое на куски,
-			# а не три скалы в разных концах острова.
-			var ang: float = home + rng.randf_range(-0.22, 0.22)
-			var far: float = rng.randf_range(SCENE_NEAR, SCENE_FAR) * _scene_scale()
-			var spot: Vector3 = _ground_at(cos(ang) * far, sin(ang) * far)
-			if spot != Vector3.ZERO and (at == Vector3.ZERO or spot.y > at.y):
-				at = spot
-		if at == Vector3.ZERO:
-			continue
-		# ПЛИТА — САМАЯ ЧАСТАЯ ФОРМА: именно её не хватало на кадре. Столб
-		# оставлен как обломок помельче рядом с крупным, гряда — как связка.
-		var kind: float = rng.randf()
-		if kind < 0.40:
-			_scene_slab(rng, at)
-		elif kind < 0.60:
-			_scene_column(rng, at)
-		elif kind < 0.85:
-			_scene_ridge(rng, at, false)
-		else:
-			_scene_ridge(rng, at, true)
+	for v in range(VEIN_MASSES):
+		_scene_one_vein(rng, span, turn + TAU * float(v) / float(VEIN_MASSES)
+			+ rng.randf_range(-0.5, 0.5))
 	# Ямы в земле — отдельно от скал, на свободных местах.
 	for i in range(rng.randi_range(0, 2)):
 		var ang: float = rng.randf_range(0.0, TAU)
@@ -3775,10 +4082,19 @@ func _scene_rocks() -> void:
 # яма в земле — это колодец, а решётка при ячейке 0.67 м держит только пологое.
 const SCENE_HILLS_LOW: int = 2    # сколько неровностей кладём, от и до
 const SCENE_HILLS_HIGH: int = 4
-const SCENE_HILL_NEAR: float = 3.5   # полуширина холма, м
-const SCENE_HILL_FAR: float = 5.5
+# ШИРЕ И ПЛАВНЕЕ (её слово 06.09.2026: «все генерируемые массивы земли должны
+# быть более крупными и плавными»). Было 3.5–5.5 м.
+const SCENE_HILL_NEAR: float = 5.0   # полуширина холма, м
+const SCENE_HILL_FAR: float = 8.0
 const SCENE_HILL_FORCE: float = 24.0 # во сколько раз сильнее обычного мазка
 const SCENE_HILL_UP: float = 0.70    # доля холмов; остальное — ямы
+# ИЗ СКОЛЬКИХ МАЗКОВ СОБРАН ОДИН ХОЛМ. Один — это купол, «прыщик» (её слово
+# 06.09.2026); три-пять вдоль линии — вытянутая гряда с направлением.
+const SCENE_HILL_LINKS_LOW: int = 3
+const SCENE_HILL_LINKS_HIGH: int = 5
+# Насколько прибавить силу, раз она делится между звеньями: без прибавки гряда
+# из пяти мазков выходит впятеро ниже прежнего холма и не читается вовсе.
+const SCENE_HILL_LONG: float = 2.2
 
 func _scene_relief(rng: RandomNumberGenerator) -> void:
 	var many: int = rng.randi_range(SCENE_HILLS_LOW, SCENE_HILLS_HIGH)
@@ -3790,7 +4106,6 @@ func _scene_relief(rng: RandomNumberGenerator) -> void:
 			continue
 		var wide: float = rng.randf_range(SCENE_HILL_NEAR, SCENE_HILL_FAR)
 		# Сила обратна ширине — то же правило, что у руки.
-		var mass: float = STROKE * (CELL_SPACING * 2.4) / wide * SCENE_HILL_FORCE
 		# СЕРЕДИНА МАЗКА ЛЕЖИТ ВЫШЕ ЗЕМЛИ — И У ХОЛМА, И У ЯМЫ. Мазок правит поле
 		# в шаре своего радиуса, а радиус тут 4…7 м: посади середину на землю —
 		# и яма выйдет в полострова глубиной, а холм наполовину уйдёт внутрь.
@@ -3799,11 +4114,65 @@ func _scene_relief(rng: RandomNumberGenerator) -> void:
 		#
 		# ХОЛМЫ ИДУТ ВНЕ ЗАПАСА НА СКАЛЫ: иначе на одном острове они съедали его
 		# целиком, и остров выходил без камня вовсе (замер: 80 ячеек породы).
-		var lift: float = wide * (0.45 if rng.randf() < SCENE_HILL_UP else 0.62)
-		if lift < wide * 0.5:
-			_stroke(at + Vector3(0, lift, 0), wide, mass, "ground", 0.0)
-		else:
-			_stroke(at + Vector3(0, lift, 0), wide, -mass, "", 0.0)
+		# ХОЛМ ВЫТЯНУТ, А НЕ КРУГЛ — её правило 06.09.2026: «земля не должна
+		# генерироваться такими прыщиками» (кадр с круглыми шапками на лугу).
+		#
+		# ПРЫЩИК — ЭТО НЕ НАСТРОЙКА, А ПОСТРОЕНИЕ. Мазок правит поле в ШАРЕ:
+		# вдави шар в землю — и получишь купол, ровно то, что на её кадре. Ни
+		# ширина, ни сила тут не помогут: круглым он останется при любых числах,
+		# а шире станет — станет круглее и заметнее.
+		#
+		# Лечится единственным: класть не один мазок, а НЕСКОЛЬКО ВДОЛЬ ЛИНИИ.
+		# Тогда выходит вытянутая гряда, у которой есть направление, — а
+		# направление и отличает форму рельефа от шапки. Тем же приёмом собрана
+		# каменная жила, и по той же причине.
+		var raise_hill: bool = rng.randf() < SCENE_HILL_UP
+
+		var steps: int = rng.randi_range(SCENE_HILL_LINKS_LOW, SCENE_HILL_LINKS_HIGH)
+		# ЗВЕНО УЖЕ ЦЕЛОГО ХОЛМА — И ЭТО НЕ ЭКОНОМИЯ ФОРМЫ, А ЦЕНА.
+		#
+		# ГРАБЛИ, ЗАМЕРЕННЫЕ СРАЗУ: сперва я разложил холм на пять мазков ПРЕЖНЕЙ
+		# ширины — и обстановка острова подорожала с 2.5 до 16 секунд. Цена мазка
+		# растёт почти как КУБ радиуса, а мазки эти самые широкие в игре.
+		#
+		# Делим радиус на корень кубический из числа звеньев: пять узких мазков
+		# стоят тогда примерно столько же, сколько стоил один широкий, а гряда
+		# выходит той же длины. Ширина холма поперёк от этого убывает — но именно
+		# она и делала его круглым.
+		var thin: float = wide / pow(float(steps), 1.0 / 3.0)
+		var way: float = rng.randf_range(0.0, TAU)
+		var walk: Vector3 = at
+		for k in range(steps):
+			var ground: Vector3 = _ground_at(walk.x, walk.z, ISLAND_BOTTOM)
+			if ground == Vector3.ZERO:
+				break
+			# Сила обратна ширине — то же правило, что у руки.
+			var part: float = STROKE * (CELL_SPACING * 2.4) / thin \
+				* SCENE_HILL_FORCE / float(steps) * SCENE_HILL_LONG
+			if raise_hill:
+				# СЕРЕДИНА ХОЛМА ЛЕЖИТ ПОД ЗЕМЛЁЙ, А НЕ НАД НЕЙ — её кадр
+				# 06.09.2026: «при генерации земля не должна нависать так».
+				#
+				# ОТЧЕГО БЫЛО НАВИСАНИЕ. Мазок прибавляет поле в ШАРЕ. Посади шар
+				# серединой ВЫШЕ земли — и наружу выйдет его широкий пояс: сверху
+				# он висит над склоном, снизу под ним пусто. Это и был тот гриб
+				# на её кадре. Числами такое не лечится: при любой ширине и силе
+				# у поднятого шара есть пояс, и он всегда нависает.
+				#
+				# Опустив середину ПОД землю, мы оставляем наружу только ВЕРХНЮЮ
+				# ШАПКУ — а шапка выпукла со всех сторон и нависать не умеет по
+				# построению. Заодно холм выходит площе и шире, чего и просили:
+				# «более крупными и плавными».
+				_stroke(ground - Vector3(0, thin * 0.35, 0), thin, part,
+					"ground", 0.0)
+			else:
+				# У ЯМЫ ВСЁ НАОБОРОТ: середина над землёй, и внутрь режет только
+				# нижняя шапка. Там нависанию тоже взяться неоткуда.
+				_stroke(ground + Vector3(0, thin * 0.62, 0), thin, -part, "", 0.0)
+			# Шаг МЕНЬШЕ ширины мазка — иначе вместо гряды выйдет цепочка тех же
+			# прыщиков, только в ряд.
+			way += rng.randf_range(-0.6, 0.6)
+			walk = ground + Vector3(cos(way), 0.0, sin(way)) * (thin * 0.6)
 
 
 # Одиночное обнажение: кучка столбов, как в классической постановке.
@@ -3968,7 +4337,7 @@ func _scene_tower(at: Vector3, up: int, rise: float = SCENE_RISE,
 		lean: Vector3 = Vector3.ZERO) -> void:
 	var head: Vector3 = at
 	for level in range(up + 1):
-		if _scene_dabs >= SCENE_DABS:
+		if _scene_dabs >= _scene_cap:
 			return
 		var cell: int = grid.cell_at(head + lean
 			+ Vector3(0, CELL_SPACING * rise, 0))
@@ -5076,6 +5445,42 @@ func _meet_stand() -> void:
 	print("Стенд встречи: метёлки со спорангиями — на ", pods.x,
 		" кочках лиамоха, спорангиев ", pods.y,
 		"; ноль значил бы, что кисть не собирается вовсе")
+
+	# ВСТАЁТ ЛИ ВЕСЬ САД, А НЕ ОДНА ЛОЗА (её слово 05.09.2026: «ограничение в 90
+	# секунд... это касается ВСЕХ растений — будущих и существующих, гибридов и
+	# оригиналов»).
+	#
+	# Проверка предела (`_grow_limit_check`) идёт по ЧИСТОЙ ЛОЗЕ: мох перед ней
+	# снят, а третьего вида там не бывает вовсе. Значит, ни про ковёр, ни про
+	# рождающихся на стыке она не говорит ничего.
+	#
+	# ЧИТАТЬ ЭТУ СТРОКУ НАДО ТАК. Первый срок садом ЕЩЁ ПРИБАВЛЯЕТСЯ, и это не
+	# поломка, а её решение (05.09.2026): «гибриды не наследуют время, а начинают
+	# с нуля». Родившийся на стыке заводит свои девяносто секунд с рождения —
+	# значит, после того как родители встали, куртина лиамоха ещё разворачивается.
+	# ДОКАЗЫВАЕТСЯ ЗДЕСЬ ДРУГОЕ: что этот хвост КОНЕЧЕН. Гоняем два срока, потом
+	# ещё два, и вторая пара обязана совпасть — иначе цепочка встреч тянулась бы
+	# без конца, а сад не встал бы никогда.
+	var was_all: int = plants.patches.size()
+	var was_lia: int = _plant_count("liamoss")
+	var t_idle := Time.get_ticks_usec()
+	for _i in range(int(2.0 * plants.GROW_SPAN / 0.15)):
+		plants._tick(0.15)
+	var mid_all: int = plants.patches.size()
+	var mid_lia: int = _plant_count("liamoss")
+	for _i in range(int(2.0 * plants.GROW_SPAN / 0.15)):
+		plants._tick(0.15)
+	var idle_ms := float(Time.get_ticks_usec() - t_idle) / 1000.0
+	print("Предел роста по всему саду: растений было ", was_all, ", через два",
+		" срока ", mid_all, ", ещё через два ", plants.patches.size(),
+		" — ПОСЛЕДНИЕ ДВА ОБЯЗАНЫ СОВПАСТЬ (первое отстаёт по её решению: гибрид",
+		" заводит свои часы с нуля, и его куртина доворачивается после родителей)")
+	print("Предел роста по всему саду: лиамоха ", was_lia, " → ", mid_lia,
+		" → ", _plant_count("liamoss"), ", мха ", _plant_count("moss"),
+		" (расти не должен вовсе), звеньев лозы ", _vine_count(),
+		"; в живых ", plants.live_count(), " — норма ноль")
+	print("Предел роста по всему саду: шесть минут тиканья встали в ",
+		snappedf(idle_ms, 0.1), " мс — доросший сад кадру ничего не стоит")
 	# СТЕНД ЗА СОБОЙ УБИРАЕТ. Он идёт последним, а сад после него остаётся
 	# расти в каждом кадре: с полутысячей звеньев и сотнями кочек выход из игры
 	# растягивался на минуты.
@@ -5087,6 +5492,148 @@ func _meet_stand() -> void:
 # ВЫРАСТИТЬ ОДИН ВИД НА ЧИСТОМ МЕСТЕ и вернуть, сколько его стало и во сколько
 # треугольников он обошёлся. Пересобрать сад тут необходимо: рост меши не
 # строит, только помечает, — а без сборки не проверить и саму геометрию.
+# =============================================================================
+#  МАК ГЛАЗАМИ ЧИСЕЛ  (`--poppybench` и строки в самопроверке)
+# =============================================================================
+#
+# ЧТО ТУТ ВООБЩЕ МОЖНО ПРОВЕРИТЬ ЧИСЛОМ, а что нельзя. Красив мак или нет —
+# судит кадр, и только он. Числа отвечают на другое, и на это они отвечают
+# честно:
+#
+#   • ВЫРОС ЛИ ОН ВООБЩЕ — куртина есть, стебли есть, высота набралась;
+#   • КУРТИНА ЛИ ЭТО, А НЕ КОВЁР — между стеблями есть просветы (меряем
+#     расстояние до ближайшего соседа: у ковра оно было бы с ячейку);
+#   • СОБЛЮДЕНА ЛИ ЕЁ ДОЛЯ — при полной зрелости две трети цветов и треть
+#     коробочек. Это её решение, и число тут проверяемое;
+#   • НЕ ЗАЛЕЗ ЛИ НА КРУЧУ — правило «земля и пологие склоны» держится
+#     `flat_at`, и проверка смотрит на самое крутое занятое место;
+#   • ВСТАЛ ЛИ ОН НА СРОКЕ — как и все прочие виды.
+func _poppy_check() -> void:
+	for pid in plants.patches.keys():
+		plants.remove_at(pid)
+	plants.flush_now()
+	# МЕСТО ИЩЕМ, А НЕ БЕРЁМ ПЕРВОЕ ПОПАВШЕЕСЯ. `_test_spot` отдаёт ячейку у
+	# середины острова, и ровной она быть не обязана: маку нужен пологий склон
+	# (`flat_at`), и стоило подвинуться рельефу — стенд доложил «НЕ ПОСАЖЕН» там,
+	# где с маком всё в порядке. Пробуем середину, потом кольцо вокруг неё.
+	var seed_at: Vector3 = _test_spot()
+	var seeded: int = plants.plant_at(seed_at, "poppy")
+	for ring in [1.5, 3.0, 4.5]:
+		if seeded >= 0:
+			break
+		for k in range(12):
+			var a: float = TAU * float(k) / 12.0
+			var spot: Vector3 = _ground_at(seed_at.x + cos(a) * ring,
+				seed_at.z + sin(a) * ring)
+			if spot == Vector3.ZERO:
+				continue
+			seeded = plants.plant_at(spot, "poppy")
+			if seeded >= 0:
+				seed_at = spot
+				break
+	if seeded < 0:
+		print("Мак: НЕ ПОСАЖЕН — проверять нечего")
+		return
+	# Полторы минуты, как и у прочих проверок сада, — до самого предела роста.
+	for _i in range(600):
+		plants._tick(0.15)
+	plants.flush_now()
+	var n := 0                      # стеблей во всей куртине
+	# СЧИТАЕМ ГОЛОВКИ ПО ТОМУ ЖЕ ПРАВИЛУ, ПО КОТОРОМУ ИХ РИСУЕТ СБОРКА, а не
+	# заново: разойдись эти два места — и проверка докладывала бы про сад,
+	# которого не видно на кадре.
+	var card: Dictionary = PlantsData.ITEMS["poppy"]
+	var buds := 0
+	var flowers := 0
+	var pods := 0
+	var high_max := 0.0
+	var steep := 1.0
+	var near_min := 99.0
+	var near_sum := 0.0
+	var near_n := 0
+	# СЧИТАЕМ СТЕБЛИ, А НЕ КУСТЫ, и правила берём У САМОЙ СБОРКИ (`poppy_stems`,
+	# `poppy_stem_m`, `head_is_pod`), а не переписываем их здесь заново. С
+	# переходом мака на куст (06.09.2026) это стало важно вдвойне: у каждого
+	# стебля свой возраст и свой жребий, и посчитай проверка по кусту — она
+	# докладывала бы про сад, которого не видно на кадре.
+	var bushes := 0
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) != "poppy":
+			continue
+		bushes += 1
+		steep = minf(steep, float(Vector3(p["nrm"]).y))
+		var many: int = plants.poppy_stems(p, card)
+		n += many
+		for s in range(many):
+			var mine: float = plants.poppy_stem_m(p, card, s, many)
+			high_max = maxf(high_max, float(card["stem_high"]) * float(p["bulk"])
+				* pow(mine, 0.75))
+			if mine < float(card["open_at"]):
+				buds += 1
+			elif plants.poppy_stem_pod(p, card, s, many):
+				pods += 1
+			else:
+				flowers += 1
+		# До ближайшего соседа: у куртины это заметно больше ячейки, у ковра —
+		# меньше её.
+		var best := 99.0
+		for qid in plants.patches:
+			if qid == pid or String(plants.patches[qid]["id"]) != "poppy":
+				continue
+			best = minf(best, Vector3(p["pos"]).distance_to(
+				Vector3(plants.patches[qid]["pos"])))
+		if best < 90.0:
+			near_min = minf(near_min, best)
+			near_sum += best
+			near_n += 1
+	var grown: int = flowers + pods
+	print("Мак: кустов — ", bushes, ", стеблей в них ", n,
+		" — из них бутонов ", buds, ", цветов ", flowers,
+		", коробочек ", pods, "; самый высокий ",
+		snappedf(high_max * 100.0, 0.1), " см — мерка взрослого ",
+		snappedf(float(card["stem_high"]) * 100.0, 0.1),
+		" см, и она для среднего размера: у самых крупных он до полутора раз",
+		" больше, у мелких меньше")
+	# ЧЕСТНА ЛИ САМА ЖЕРЕБЬЁВКА, А НЕ ТОЛЬКО ЭТА КУРТИНА. На полусотне стеблей
+	# доля гуляет и без всякой поломки, и по одной куртине невезение от кривого
+	# хеша не отличить. Поэтому гоняем ту же мерку по десяти тысячам солей,
+	# сложенных ровно так же, как их складывает игра.
+	var lots := 0
+	for i in range(10000):
+		if plants.head_is_pod(i * 7919 + (i % 37) * 131, card):
+			lots += 1
+	print("Мак: доля коробочек среди доросших — ",
+		snappedf(float(pods) / maxf(1.0, float(grown)), 0.01), " на ", grown,
+		" стеблях, а на десяти тысячах жребиев — ",
+		snappedf(float(lots) / 10000.0, 0.001),
+		" при заказанной ", snappedf(float(card["pod_share"]), 0.01),
+		" (её решение: две трети цветов, треть коробочек)")
+	print("Мак: до ближайшего соседа — в среднем ",
+		snappedf(near_sum / maxf(1.0, float(near_n)) * 100.0, 0.1),
+		" см, самое тесное ", snappedf(near_min * 100.0, 0.1),
+		" см при ячейке ", snappedf(CELL_SPACING * 100.0, 0.1),
+		" — куртина, а не ковёр, если просвет с ячейку и шире")
+	# ЧТО КУСТ СТОИТ ТРЕУГОЛЬНИКАМИ. У мака их заведомо больше, чем у кочки:
+	# четыре стебля дугой, листья, два ряда лепестков и кольцо тычинок. Число
+	# нужно знать — новый вид легко сделать вдесятеро дороже прежних и заметить
+	# это только по кадру, который встал.
+	var tris := 0
+	for cell in plants.cell_nodes:
+		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
+		for si in range(mesh.get_surface_count()):
+			var indexed: int = mesh.surface_get_array_index_len(si)
+			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
+	print("Мак: треугольников — ", tris, ", то есть ",
+		snappedf(float(tris) / maxf(1.0, float(bushes)), 0.1), " на куст и ",
+		snappedf(float(tris) / maxf(1.0, float(n)), 0.1),
+		" на стебель; у кочки мха их около 96")
+	print("Мак: самое крутое занятое место — вертикальность нормали ",
+		snappedf(steep, 0.01), " при пороге ",
+		snappedf(float(card["flat_at"]), 0.01),
+		" — ниже порога садиться не должен вовсе")
+
+
 func _solo_grow(id: String, ticks: int) -> Vector2i:
 	for pid in plants.patches.keys():
 		plants.remove_at(pid)
@@ -5280,6 +5827,154 @@ func _show_bench(args: PackedStringArray) -> void:
 	print("Показ роста: весь прогон ", snappedf(whole, 0.1), " мс, из них ",
 		snappedf(100.0 * plants.built_ms / maxf(whole, 0.001), 0.1),
 		"% — пересборка; остальное сам рост")
+
+
+# =============================================================================
+#  СТЕНД ОТКЛИКА  (`--dabbench`)
+# =============================================================================
+#
+# ЗАЧЕМ ОН ЕСТЬ. Самопроверка меряет мазок ОДНИМ ЧИСЛОМ — `_dab` плюс пересборка
+# всех помеченных кусков разом. В игре так не бывает никогда: куски собирает
+# кадр за кадром `_flush_chunks_some` с запасом. Значит, за одним числом прячутся
+# ДВЕ РАЗНЫЕ БЕДЫ, и лечатся они разным:
+#
+#   1. ДОРОГОЙ КАДР — рывок. Кусок пересобирается целиком, и если он один стоит
+#      дороже запаса, кадр всё равно столько стоит: запас его не удержит.
+#   2. ОТСТАВАНИЕ — земля догоняет руку не сразу. Само по себе не беда (рост
+#      именно так и показывается), но у ЗЕМЛИ есть тонкость, которой нет у
+#      растений: курсор целится по телу столкновений куска. Пока кусок не
+#      пересобран, кисть бьёт по вчерашнему рельефу.
+#
+# Стенд идёт кадрами, как игра, и печатает обе порознь. Три случая:
+#
+#   • ОДИН МАЗОК — щелчок. Сколько кусков помечено, во что они обходятся и
+#     сколько кадров земля догоняет руку.
+#   • УДЕРЖАНИЕ НА МЕСТЕ — так насыпают холм. Кисть повторяется сама, метя раз
+#     за разом те же куски.
+#   • ВЕДЁННЫЙ МАЗОК — так проводят гряду. Худший случай: под кисть всё время
+#     заходят новые куски, и очередь пополняется быстрее, чем убывает.
+#
+# Скорость руки в ведённом мазке взята 2 м/с и меняется ключом `--speed=`:
+# остров 32 м поперёк, то есть это неспешное движение секунд на пятнадцать
+# через весь мир. Число условное, и потому вынесено в ключ.
+func _dab_bench(args: PackedStringArray) -> void:
+	var load: float = _load_factor()
+	print("Нагрузка машины: ", snappedf(load, 0.01),
+		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if load > LOAD_ALARM
+			else "замерам можно верить"))
+	var speed: float = _arg_num(args, "--speed", 2.0)
+	var secs: float = _arg_num(args, "--secs", 2.0)
+	print("Запас на кадр ", snappedf(CHUNK_MS, 0.1), " мс; весь кадр при 60 в",
+		" секунду — 16.7 мс")
+	var home: Vector3 = _test_spot()
+	for width in [1, 2, 3]:
+		brush = width
+		var rad: float = _brush_radius()
+		# КАЖДАЯ ШИРИНА РАБОТАЕТ ПО СВОЕЙ ЗЕМЛЕ, а не по перекопанной предыдущей:
+		# иначе третья кисть мерила бы холм, насыпанный первыми двумя.
+		var at: Vector3 = home + Vector3(0.0, 0.0, float(width - 2) * 9.0)
+
+		# --- один мазок -----------------------------------------------------
+		_flush_chunks()
+		built_reset()
+		grid.dab_reset()
+		var t_dab: int = Time.get_ticks_usec()
+		_dab(at, _stroke_amount(), "ground", false)
+		var dab_ms: float = float(Time.get_ticks_usec() - t_dab) / 1000.0
+		var marked: int = _dirty_chunks.size()
+		var frames: int = 0
+		var worst_frame: float = 0.0
+		while not _dirty_chunks.is_empty() and frames < 900:
+			var t0: int = Time.get_ticks_usec()
+			_flush_chunks_some()
+			worst_frame = maxf(worst_frame,
+				float(Time.get_ticks_usec() - t0) / 1000.0)
+			frames += 1
+		# САМА ПРАВКА ЗЕМЛИ И СБОРКА МЕШЕЙ — ДВЕ РАЗНЫЕ ЦЕНЫ, и путать их нельзя.
+		# Правку кадр платит ЦЕЛИКОМ И СРАЗУ: её не разложить по кадрам, поле
+		# должно измениться в тот же миг, когда рука нажала. Меши идут с запасом.
+		print("Кисть ", width, " (радиус ", snappedf(rad, 0.01),
+			" м), щелчок: правка земли ", snappedf(dab_ms, 0.1),
+			" мс ЦЕЛИКОМ В ОДНОМ КАДРЕ, меши ", snappedf(built_ms, 0.1),
+			" мс на ", marked, " кусков с запасом — из них форма ",
+			snappedf(built_form_ms, 0.1), ", тело столкновений ",
+			snappedf(built_body_ms, 0.1), "; самый дорогой кусок ",
+			snappedf(built_worst, 0.2), " мс")
+		print("Кисть ", width, ", правка земли по частям: семена ",
+			snappedf(grid.dab_seeds_ms, 0.1), " (перебрано ", grid.dab_seeds_seen,
+			", правку получили ", grid.dab_seeds_hit, "), растушёвка ",
+			snappedf(grid.dab_relax_ms, 0.1), ", складки и швы ",
+			snappedf(grid.dab_stone_ms, 0.1), ", поле и огранка ",
+			snappedf(grid.dab_fill_ms, 0.1), ", впадина и затенение ",
+			snappedf(grid.dab_look_ms, 0.1), ", порода и метка кусков ",
+			snappedf(after_ms, 0.1), " мс")
+		print("Кисть ", width, ", щелчок кадрами: земля догнала руку за ", frames,
+			" кадров (", snappedf(float(frames) / 60.0, 0.01),
+			" с), самый дорогой кадр ", snappedf(worst_frame, 0.1), " мс")
+
+		# --- удержание на месте и мазок с ведением --------------------------
+		for moving in [false, true]:
+			built_reset()
+			var step: float = _hold_step()
+			var wait: float = HOLD_FIRST
+			var pos: Vector3 = at
+			var nframes: int = int(secs * 60.0)
+			var worst: float = 0.0
+			var over: int = 0
+			var queue_top: int = 0
+			var queue_sum: float = 0.0
+			var dabs: int = 0
+			# КАДР МЕРЯЕМ ЦЕЛИКОМ, вместе с правкой земли. В игре обе работы
+			# делает один и тот же `_process`: сперва `_hold_tick` повторяет
+			# мазок, следом `_flush_chunks_some` собирает меши. Мерить их порознь
+			# значит не увидеть самого рывка — он-то и приходится на кадр,
+			# которому досталось и то и другое.
+			for _f in range(nframes):
+				var dt: float = 1.0 / 60.0
+				var t1: int = Time.get_ticks_usec()
+				wait -= dt
+				var hit: bool = false
+				if wait <= 0.0:
+					wait = step
+					_dab(pos, _stroke_amount(), "ground", false)
+					dabs += 1
+					hit = true
+				# Ровно как в игре (см. `_process`): кадру с мазком не даём
+				# ничего, в первом пустом досчитываем облик, в остальных меши.
+				if not hit:
+					if grid.look_pending():
+						grid.flush_look(LOOK_MS)
+					if not _dirty_chunks.is_empty():
+						_flush_chunks_some()
+				var ms: float = float(Time.get_ticks_usec() - t1) / 1000.0
+				if moving:
+					pos += Vector3(1, 0, 0) * speed * dt
+				worst = maxf(worst, ms)
+				if ms > 16.7:
+					over += 1
+				queue_top = maxi(queue_top, _dirty_chunks.size())
+				queue_sum += float(_dirty_chunks.size())
+			# И ДОГОНЯЕМ ХВОСТ: сколько кадров земля доводит начатое уже после
+			# того, как руку отпустили. Это и есть то, что видно глазом.
+			var tail: int = 0
+			while (grid.look_pending() or not _dirty_chunks.is_empty()) and tail < 900:
+				if grid.look_pending():
+					grid.flush_look(LOOK_MS)
+				if not _dirty_chunks.is_empty():
+					_flush_chunks_some()
+				tail += 1
+			print("Кисть ", width, ", ", ("ведённый мазок" if moving
+					else "удержание на месте"), ": ", dabs, " мазков за ",
+				snappedf(secs, 0.1), " с, повтор раз в ", snappedf(step, 0.01),
+				" с; кадров дороже 16.7 мс — ", over, " из ", nframes,
+				", самый дорогой ", snappedf(worst, 0.1), " мс")
+			print("Кисть ", width, ", ", ("ведённый мазок" if moving
+					else "удержание на месте"), ": очередь в среднем ",
+				snappedf(queue_sum / maxf(float(nframes), 1.0), 0.1),
+				" кусков, самая длинная ", queue_top, "; после отпускания земля",
+				" догоняла ещё ", tail, " кадров (",
+				snappedf(float(tail) / 60.0, 0.01), " с)")
+	brush = 1
 
 
 # =============================================================================
