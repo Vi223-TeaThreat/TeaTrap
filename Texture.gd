@@ -28,18 +28,29 @@ extends SceneTree
 
 const Plants = preload("res://SpacePlants.gd")
 
-const TILE: int = 32
-const STAGES: int = 9
-const KINDS: int = 4
-const BODY_COL: int = 4
-const BARK_COL: int = 5
-const LEAF_COL: int = 6
-const LEAF_KINDS: int = 3
-const BLOOM_COL: int = 9
-const BLOOM_KINDS: int = 2
-const LIA_BODY_COL: int = 11
-const LIA_FUZZ_COL: int = 12
-const COLS: int = 13
+# РАЗМЕТКА ЛИСТА БЕРЁТСЯ У САМОЙ ИГРЫ, а не переписывается здесь заново.
+#
+# ГРАБЛИ, И ОНИ УЖЕ СРАБОТАЛИ. Своя копия была: `COLS` стояло 13, пока в игре
+# столбцов уже семнадцать — четыре маковых прибавились 05–07.09.2026 и в этот
+# список не попали. Всё, что тут пишет лист целиком, обрезало бы мака начисто.
+#
+# Второй такой копии быть не должно: разметка — свойство ЛИСТА, а лист один.
+const TILE: int = Plants.TILE
+const STAGES: int = Plants.STAGES
+const KINDS: int = Plants.KINDS
+const BODY_COL: int = Plants.BODY_COL
+const BARK_COL: int = Plants.BARK_COL
+const LEAF_COL: int = Plants.LEAF_COL
+const LEAF_KINDS: int = Plants.LEAF_KINDS
+const BLOOM_COL: int = Plants.BLOOM_COL
+const BLOOM_KINDS: int = Plants.BLOOM_KINDS
+const LIA_BODY_COL: int = Plants.LIA_BODY_COL
+const LIA_FUZZ_COL: int = Plants.LIA_FUZZ_COL
+const POPPY_LEAF_COL: int = Plants.POPPY_LEAF_COL
+const POPPY_LEAF_KINDS: int = Plants.POPPY_LEAF_KINDS
+const POPPY_PETAL_COL: int = Plants.POPPY_PETAL_COL
+const POPPY_PETAL_KINDS: int = Plants.POPPY_PETAL_KINDS
+const COLS: int = Plants.COLS
 
 const ART := "res://art/moss.png"
 const HAND := "res://art/moss_hand.png"
@@ -98,6 +109,20 @@ const PARTS := {
 		"cols": [LIA_FUZZ_COL], "solid": false, "seed": 7107,
 		"ru": "ворсинка лиамоха", "knobs": ["many", "long"],
 		"ax": ["густота пучка", "длина волоска"]},
+	# МАК. Её просьба 07.09.2026: «мне нужны текстуры мака для aseprite, чтобы я
+	# могла нарисовать замену заглушкам».
+	#
+	# СЕТКИ ВАРИАНТОВ У НИХ НЕТ, и это не упущение: заглушки мака рисует свой код
+	# (`_paint_poppy_leaf_cell`, `_paint_poppy_petal_cell`), рецептов у них не
+	# заведено вовсе, а она их и не просила — просила ФАЙЛ, чтобы рисовать
+	# поверх. Здесь они затем, чтобы работала `--hand-from`: без строки в этой
+	# таблице нарисованное от руки переносить некуда.
+	"poppy_leaf": {
+		"cols": [POPPY_LEAF_COL, POPPY_LEAF_COL + 1], "solid": false,
+		"seed": 7108, "ru": "лист мака", "knobs": [], "ax": []},
+	"poppy_petal": {
+		"cols": [POPPY_PETAL_COL, POPPY_PETAL_COL + 1], "solid": false,
+		"seed": 7109, "ru": "лепесток мака", "knobs": [], "ax": []},
 }
 
 # Числа мха-заглушки — те же, что в игре.
@@ -433,8 +458,9 @@ func _freeze_hand() -> void:
 #  дощечки картинка тянется от соседнего столбца, и на силуэте это черта чужого
 #  цвета). Отказ печатается, файл не трогается.
 func _take_hand(path: String, part: String) -> void:
-	if not PARTS.has(part):
-		print("Чью работу берём? --part=", ", ".join(PARTS.keys()))
+	if part != "all" and not PARTS.has(part):
+		print("Чью работу берём? --part=all (весь лист разом) или ",
+			", ".join(PARTS.keys()))
 		return
 	var src := Image.load_from_file(ProjectSettings.globalize_path(path))
 	if src == null:
@@ -444,9 +470,51 @@ func _take_hand(path: String, part: String) -> void:
 		print("Лист должен быть ", TILE * STAGES, " точек в высоту, а он ",
 			src.get_height())
 		return
-	var cols: Array = PARTS[part]["cols"]
-	var solid: bool = PARTS[part]["solid"]
+	# ВЕСЬ ЛИСТ РАЗОМ — `--part=all` (её просьба 08.09.2026: «объедини текстуры
+	# для мака и прошлые текстуры в один файл»). Рисовать в одном файле и
+	# возвращать по частям было бы работой на ровном месте.
+	#
+	# ПЛОТНОСТЬ У СТОЛБЦОВ РАЗНАЯ, и на неё сторож смотрит по-разному: тело мха,
+	# кора и тело лиамоха — сплошные, они занимают клетку целиком и края
+	# касаются по построению; всё прочее вырезано, и заезд на край у него —
+	# брак. Поэтому помним плотность НЕ на всю работу, а на каждый столбец.
+	var cols: Array = []
+	var solid_of: Dictionary = {}
+	if part == "all":
+		for pn in PARTS:
+			for c in PARTS[pn]["cols"]:
+				cols.append(int(c))
+				solid_of[int(c)] = bool(PARTS[pn]["solid"])
+		cols.sort()
+	else:
+		for c in PARTS[part]["cols"]:
+			cols.append(int(c))
+			solid_of[int(c)] = bool(PARTS[part]["solid"])
 	var have: int = int(src.get_width() / TILE)
+	# ФАЙЛ РОВНО В ШИРИНУ ЧАСТИ — ЭТО САМА ЧАСТЬ, а не лист целиком.
+	#
+	# Заведено 07.09.2026 под мак: его четыре столбца лежат в конце листа
+	# семнадцатой ширины, и искать их там глазами — работа на ровном месте.
+	# `Sheet.gd` выкладывает вырезку в четыре столбца, и рисовать она будет по
+	# ней. Правило само себя объясняет: файл шириной с часть — это часть.
+	#
+	# Лист целиком по-прежнему годится: у него ширина другая, и столбцы берутся
+	# по их настоящим номерам, как и раньше.
+	var cut: bool = have == cols.size() and have < COLS
+	if cut:
+		# РАЗВОРАЧИВАЕМ ВЫРЕЗКУ В ПОЛНЫЙ ЛИСТ ПРЯМО ЗДЕСЬ, а не тащим второй
+		# номер столбца через всю проверку и запись. Дальше по коду столбцы
+		# берутся по настоящим номерам, и ни одна строка ниже об этом не знает.
+		var full := Image.create(TILE * COLS, TILE * STAGES, false,
+			Image.FORMAT_RGBA8)
+		full.fill(Color(0, 0, 0, 0))
+		for i in range(cols.size()):
+			full.blit_rect(src, Rect2i(i * TILE, 0, TILE, TILE * STAGES),
+				Vector2i(int(cols[i]) * TILE, 0))
+		src = full
+		have = COLS
+		print("Файл шириной ровно с часть — принят как вырезка «",
+			PARTS[part]["ru"], "»")
 	var bad := 0
 	var soft := 0
 	var empty := 0
@@ -455,6 +523,7 @@ func _take_hand(path: String, part: String) -> void:
 		if col >= have:
 			print("В файле нет столбца ", col + 1, " — он всего ", have, " шириной")
 			return
+		var solid: bool = bool(solid_of[col])
 		for s in range(STAGES):
 			var seen := 0
 			for x in range(TILE):
@@ -486,7 +555,13 @@ func _take_hand(path: String, part: String) -> void:
 		return
 	if soft > 0:
 		print("Мягкий край округлён по порогу шейдера (0.5): точек ", soft)
-		src = _harden(src, cols)
+		# Округляем ТОЛЬКО вырезанные столбцы: у сплошных полупрозрачных точек не
+		# бывает по построению, и трогать их незачем.
+		var soft_cols: Array = []
+		for c in cols:
+			if not bool(solid_of[int(c)]):
+				soft_cols.append(int(c))
+		src = _harden(src, soft_cols)
 	if empty > 0:
 		print("ВНИМАНИЕ: пустых клеток ", empty,
 			" — в этих возрастах картинки не будет вовсе")
@@ -496,6 +571,25 @@ func _take_hand(path: String, part: String) -> void:
 		print("Игрового листа ", ART, " нет — брать некуда")
 		return
 	_save(art, PREV)
+	# ЛИСТ РАСШИРЯЕМ ДО ПОЛНОГО, ПРЕЖДЕ ЧЕМ ПИСАТЬ В НЕГО.
+	#
+	# ГРАБЛИ, ПОЙМАННЫЕ 07.09.2026 ДО ТОГО, КАК ОНИ СРАБОТАЛИ. Её `art/moss.png`
+	# нарисован, когда столбцов было тринадцать, а маковые стоят с четырнадцатого
+	# по семнадцатый. `blit_rect` за край картинки не ругается — он молча ничего
+	# не делает: команда отработала бы, доложила «взято», и не взяла бы ничего.
+	#
+	# Недостающие столбцы остаются ПРОЗРАЧНЫМИ, а не рисуются кодом: пустую
+	# клетку игра дорисовывает сама (`_widen_sheet`), а вот заглушку, записанную
+	# в файл, она приняла бы за работу от руки и трогать не стала бы.
+	if art.get_width() < TILE * COLS:
+		var full_art := Image.create(TILE * COLS, TILE * STAGES, false,
+			Image.FORMAT_RGBA8)
+		full_art.fill(Color(0, 0, 0, 0))
+		full_art.blit_rect(art, Rect2i(0, 0, art.get_width(), art.get_height()),
+			Vector2i.ZERO)
+		print("Лист был ", int(art.get_width() / TILE), " столбцов — расширен до ",
+			COLS, ", прибавленные остались прозрачными")
+		art = full_art
 	# И В ЗАМОРОЗКУ РУКИ. Файл мог быть узким (в нём только мховые столбцы) —
 	# расширяем до полного, недостающее остаётся прозрачным.
 	var hand := _hand_from_file()
@@ -511,7 +605,8 @@ func _take_hand(path: String, part: String) -> void:
 		keep.blit_rect(src, box, Vector2i(col * TILE, 0))
 	_save(art, ART)
 	_save(keep, HAND)
-	print("Взято от руки: «", PARTS[part]["ru"], "», столбцов ", cols.size(),
+	var whose: String = "весь лист" if part == "all" else String(PARTS[part]["ru"])
+	print("Взято от руки: «", whose, "», столбцов ", cols.size(),
 		" — легли в art/moss.png и заморожены в art/moss_hand.png")
 	print("Прежний лист сохранён в art/moss_prev.png — один шаг отмены")
 
@@ -555,6 +650,21 @@ func _build(rec: Dictionary, hand: Image) -> Image:
 		_column(img, "moss", rec["moss"])
 	for p in ["body", "bark", "leaf", "bloom", "liabody", "liafuzz"]:
 		_column(img, p, rec[p])
+	# МАКОВЫЕ СТОЛБЦЫ БЕРЁМ У ИГРЫ, а не оставляем пустыми.
+	#
+	# ГРАБЛИ, УЖЕ СТОИВШИЕ ЕЁ КАДРА («не видно листьев, не видно лепестков»).
+	# Заглушки мака рисует своя пара `_paint_poppy_*` в игре, рецептов у них нет,
+	# и генератор их не рисует вовсе. Собери он лист без них — маковые клетки
+	# ушли бы в `art/moss.png` ПУСТЫМИ, и лист с пустыми клетками игра взяла бы
+	# как есть: он же полной ширины, дорисовывать нечего.
+	var plants := Plants.new()
+	var stock: Image = plants._make_blade_texture().get_image()
+	plants.free()
+	if stock.get_format() != Image.FORMAT_RGBA8:
+		stock.convert(Image.FORMAT_RGBA8)
+	for c in range(POPPY_LEAF_COL, COLS):
+		img.blit_rect(stock, Rect2i(c * TILE, 0, TILE, TILE * STAGES),
+			Vector2i(c * TILE, 0))
 	return img
 
 
@@ -726,16 +836,22 @@ func _check() -> void:
 	for s in range(STAGES):
 		for k in range(KINDS):
 			_paint("moss", mine, k * TILE, s * TILE, s, k, rng, def["moss"])
+	# СВЕРЯЕМ ТОЛЬКО ТО, ЧТО ЭТОТ ГЕНЕРАТОР РИСУЕТ САМ.
+	#
+	# Маковые столбцы (последние четыре) он не рисует вовсе: их заглушки —
+	# своя пара `_paint_poppy_*` в игре, рецептов у них не заведено. Сверять их
+	# тут не с чем, и включи мы их в счёт — сторож ругался бы на пустоту,
+	# которой и полагается быть пустой.
 	var off: int = 0
-	for col in range(COLS):
+	for col in range(POPPY_LEAF_COL):
 		for s in range(STAGES):
 			for y in range(TILE):
 				for x in range(TILE):
 					if full.get_pixel(col * TILE + x, s * TILE + y) \
 							!= mine.get_pixel(col * TILE + x, s * TILE + y):
 						off += 1
-	print("Сверка с рисовальщиками игры (все 13 столбцов): расхождений ", off,
-		" (норма 0)")
+	print("Сверка с рисовальщиками игры (столбцов ", POPPY_LEAF_COL,
+		" из ", COLS, ", маковые рисует игра): расхождений ", off, " (норма 0)")
 
 	# Сторожа собранного листа.
 	_freeze_hand()

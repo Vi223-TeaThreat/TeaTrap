@@ -3638,6 +3638,15 @@ func _scene_bodies_report() -> void:
 #  РАЗНООБРАЗИЯ, а разнообразие — это разброс между островами, и одним прогоном
 #  его не увидеть, как и у лозы.
 func _scene_bench(args: PackedStringArray) -> void:
+	# НАГРУЗКА ПЕЧАТАЕТСЯ ПЕРВОЙ СТРОКОЙ, как и в самопроверке: стенд меряет
+	# СЕКУНДЫ, а секунды на занятой машине врут втрое. Без этой строки нельзя
+	# отличить подорожавшую обстановку от чужого процесса рядом.
+	var load: float = _load_factor()
+	if load > LOAD_ALARM:
+		print("НАГРУЗКА ", snappedf(load, 0.01), "× — ВРЕМЕНАМ НИЖЕ НЕ ВЕРИТЬ.",
+			" Машина занята чем-то ещё (редактор Godot? запущенная игра?)")
+	else:
+		print("Нагрузка машины: ", snappedf(load, 0.01), "× — замерам можно верить")
 	var many: int = int(_arg_num(args, "--islands", 3.0))
 	var seed0: int = int(_arg_num(args, "--seed", float(WORLD_SEED + 1)))
 	scene_id = "rocks"
@@ -3939,12 +3948,16 @@ func _scene_one_vein(rng: RandomNumberGenerator, span: float,
 # пускают отростки.
 func _scene_vein(rng: RandomNumberGenerator, from: Vector3, dir: float,
 		links: int, span: float) -> Array:
+	# ПЕРВЫЙ ПРОХОД — ТОЛЬКО ПУТЬ, БЕЗ ЕДИНОГО МАЗКА.
+	#
+	# Раньше жила шла и лепила разом, и другого пути не было: высота звена
+	# зависела только от него самого. Теперь у жилы есть ПОСАДКА, общая на всю
+	# длину, — а её не вычислить, не зная, по какой земле жила пройдёт вся.
+	# Проход этот дешёвый: он ищет землю и поворачивает, поля не трогает вовсе.
 	var spine: Array = []
 	var head: Vector3 = from
 	var way: float = dir
 	for k in range(links):
-		if _scene_dabs >= _scene_cap:
-			break
 		var ground: Vector3 = _ground_at(head.x, head.z)
 		if ground == Vector3.ZERO:
 			break
@@ -3953,6 +3966,41 @@ func _scene_vein(rng: RandomNumberGenerator, from: Vector3, dir: float,
 		if Vector2(ground.x, ground.z).length() > SCENE_FAR * span:
 			break
 		spine.append(ground)
+		way += rng.randf_range(-VEIN_TURN, VEIN_TURN)
+		var step: float = rng.randf_range(VEIN_STEP_LOW, VEIN_STEP_HIGH)
+		head = ground + Vector3(cos(way), 0.0, sin(way)) * step
+	# ПОСАДКА ЖИЛЫ — ПРЯМАЯ, ПРОВЕДЁННАЯ ПО ЗЕМЛЕ ПОД ВСЕЙ ЕЁ ДЛИНОЙ.
+	#
+	# Не средняя высота и не высота начала: жила в двадцать метров запросто
+	# пересекает склон холма, и горизонтальная посадка на нём то зарыла бы её,
+	# то подвесила. Прямая идёт вместе со склоном, а складки и зерно — то, ради
+	# чего всё затевалось, — на прямую не влияют вовсе: они по обе стороны от неё
+	# поровну.
+	#
+	# Наклон берём наименьшими квадратами. Это ровно та же мысль, что у дуги
+	# высоты ниже: гребень задаёт ЗАМЫСЕЛ, а не то, что подвернулось под ногой.
+	var span_n: int = spine.size()
+	var seat_at: float = 0.0
+	var seat_by: float = 0.0
+	if span_n > 0:
+		var mid_k: float = float(span_n - 1) * 0.5
+		var mean_y: float = 0.0
+		for p in spine:
+			mean_y += (p as Vector3).y
+		mean_y /= float(span_n)
+		var top: float = 0.0
+		var bottom: float = 0.0
+		for k in range(span_n):
+			var off_k: float = float(k) - mid_k
+			top += off_k * ((spine[k] as Vector3).y - mean_y)
+			bottom += off_k * off_k
+		seat_by = 0.0 if bottom < 0.0001 else top / bottom
+		seat_at = mean_y - seat_by * mid_k
+	# ВТОРОЙ ПРОХОД — МАЗКИ.
+	for k in range(span_n):
+		if _scene_dabs >= _scene_cap:
+			break
+		var ground: Vector3 = spine[k]
 		# ВЫСОТА ИДЁТ ПЛАВНОЙ ДУГОЙ ВДОЛЬ ЖИЛЫ, а не берётся заново у каждого
 		# звена — и это починка её кадра 06.09.2026 («при генерации появляются
 		# такие шипы, это недопустимо»).
@@ -3966,13 +4014,18 @@ func _scene_vein(rng: RandomNumberGenerator, from: Vector3, dir: float,
 		# Теперь высота — дуга: жила начинается низко, поднимается к середине и
 		# опускается к концу, как настоящее обнажение. Соседи от этого разнятся
 		# самое большее на ступень, и шапки сходятся склоном, а не ребром.
-		var along: float = float(k) / maxf(1.0, float(links - 1))
+		# ДУГУ МЕРЯЕМ ПО ПРОЙДЕННОЙ ДЛИНЕ, а не по заказанной: жила часто
+		# обрывается раньше срока — упёрлась в кромку или не нашла земли, — и,
+		# считая по заказанной, такая жила не доходила до середины дуги вовсе,
+		# то есть выходила приземистой без всякой на то причины.
+		var along: float = float(k) / maxf(1.0, float(span_n - 1))
 		var arc: float = sin(along * PI)            # 0 у концов, 1 в середине
 		var up: int = int(round(lerpf(float(SCENE_LOW), float(SCENE_HIGH), arc)))
 		# Разброс оставляем, но РОВНО НА СТУПЕНЬ: жила одной высоты читается
 		# забором, а на две ступени — снова пилой.
 		up = clampi(up + (1 if rng.randf() < 0.3 else 0), SCENE_LOW, SCENE_HIGH)
-		_scene_tower(ground, up)
+		_scene_tower(ground, up, SCENE_RISE, Vector3.ZERO,
+			seat_at + seat_by * float(k))
 		# И ФОРМА ИЗРЕДКА ПОВЕРХ ЗВЕНА: плита, столб или короткая гряда. Кладём не
 		# каждому звену, иначе жила становится сплошным столом; а без них она
 		# читается одной длинной колбасой, и обломочности в ней нет вовсе.
@@ -3992,9 +4045,6 @@ func _scene_vein(rng: RandomNumberGenerator, from: Vector3, dir: float,
 				_scene_column(rng, ground)    # столб — обломок помельче
 			elif kind < 0.40 and tail:
 				_scene_ridge(rng, ground, rng.randf() < 0.3)
-		way += rng.randf_range(-VEIN_TURN, VEIN_TURN)
-		var step: float = rng.randf_range(VEIN_STEP_LOW, VEIN_STEP_HIGH)
-		head = ground + Vector3(cos(way), 0.0, sin(way)) * step
 	return spine
 
 func _scene_rocks() -> void:
@@ -4217,7 +4267,10 @@ func _scene_slab(rng: RandomNumberGenerator, at: Vector3) -> void:
 		var ground: Vector3 = _ground_at(head.x, head.z)
 		if ground == Vector3.ZERO:
 			break
-		_scene_tower(ground, maxi(1, tall - k), SCENE_RISE, lean)
+		# ПОСАДКА У ПЛИТЫ — ТОЧКА, С КОТОРОЙ ОНА НАЧАЛАСЬ. Плита это плоскость:
+		# её верх обязан идти ровным клином, а не повторять складки земли под
+		# собой — иначе от плоскости не остаётся ничего, кроме имени.
+		_scene_tower(ground, maxi(1, tall - k), SCENE_RISE, lean, at.y)
 		head = ground + way * rng.randf_range(1.15, 1.6)
 
 
@@ -4234,7 +4287,10 @@ func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void
 		if ground == Vector3.ZERO:
 			break
 		spine.append(ground)
-		_scene_tower(ground, rng.randi_range(SCENE_LOW, SCENE_HIGH))
+		# Посадка у гряды — тоже её начало: три её звена стоят вплотную и должны
+		# сойтись одним телом, а не тремя шапками вразнобой.
+		_scene_tower(ground, rng.randi_range(SCENE_LOW, SCENE_HIGH),
+			SCENE_RISE, Vector3.ZERO, at.y)
 		dir += rng.randf_range(-0.7, 0.7)
 		# ШАГ ГРЯДЫ ДЕРЖИМ ПОД РАССТОЯНИЕМ СЛИЯНИЯ (1.8 м), и это её кадр 2:
 		# «слишком заострённый и пильчатый край нависающего камня».
@@ -4334,7 +4390,28 @@ func _scene_slabs(rng: RandomNumberGenerator) -> void:
 # Столб камня от земли вверх — только от найденной земли: скала не появляется
 # в воздухе по построению.
 func _scene_tower(at: Vector3, up: int, rise: float = SCENE_RISE,
-		lean: Vector3 = Vector3.ZERO) -> void:
+		lean: Vector3 = Vector3.ZERO, seat: float = INF) -> void:
+	# СТУПЕНИ СЧИТАЮТСЯ ОТ ПОСАДКИ, А НЕ ОТ ЗЕМЛИ ПОД НОГОЙ, — и это починка
+	# её правила «шипы недопустимы» (07.09.2026).
+	#
+	# ОТЧЕГО БЕДА. Столб растёт ОТ найденной земли вверх на `up` ступеней, и
+	# высота гребня выходит «земля плюс ступени». Пока земля под обнажением была
+	# гладкой, ровных ступеней хватало, чтобы гребень шёл ровно. Стоило положить
+	# на землю мелкий рисунок — и всякая складка под ногой поехала прямо в
+	# гребень: соседние столбы стоят в полутора метрах, а мазок камня шар почти в
+	# пять, и лишние двадцать сантиметров под одним из них выворачивают стык двух
+	# шапок ребром. ЗАМЕРЕНО: со складками шипов 73 на шести островах против 32.
+	#
+	# ПОСАДКА — та высота, ОТ КОТОРОЙ обнажение задумано: у жилы это прямая,
+	# проведённая по земле под всей её длиной, у плиты и гряды — точка, с которой
+	# они начались. Зная её, столб сам добирает или сбрасывает ступени, и гребень
+	# идёт задуманной линией, какой бы ни была земля под ним.
+	#
+	# ОДНОЙ СТУПЕНИ ВНИЗ НЕ ОТДАЁМ (`maxi(1, …)`): столб, у которого их не
+	# осталось, — это уже не скала, а шапка вровень с землёй, и рим у неё
+	# бритвенный. Пусть лучше торчит выше задуманного.
+	if seat < INF:
+		up = maxi(1, up + int(round((seat - at.y) / (CELL_SPACING * rise))))
 	var head: Vector3 = at
 	for level in range(up + 1):
 		if _scene_dabs >= _scene_cap:
@@ -5567,8 +5644,12 @@ func _poppy_check() -> void:
 		n += many
 		for s in range(many):
 			var mine: float = plants.poppy_stem_m(p, card, s, many)
+			# РАЗМЕР БЕРЁМ У САМОЙ СБОРКИ (`poppy_grow`), а не переписываем
+			# степень заново: пока здесь стояла своя копия, стенд докладывал
+			# про мак, которого на кадре уже не было — правило «5% за ступень»
+			# сменило формулу, а копия осталась прежней.
 			high_max = maxf(high_max, float(card["stem_high"]) * float(p["bulk"])
-				* pow(mine, 0.75))
+				* plants.poppy_grow(card, mine))
 			if mine < float(card["open_at"]):
 				buds += 1
 			elif plants.poppy_stem_pod(p, card, s, many):
@@ -5609,6 +5690,274 @@ func _poppy_check() -> void:
 		snappedf(float(lots) / 10000.0, 0.001),
 		" при заказанной ", snappedf(float(card["pod_share"]), 0.01),
 		" (её решение: две трети цветов, треть коробочек)")
+	# ЛЕПЕСТКИ РАСТУТ СТРОГО ПОД СЕРДЦЕВИНОЙ И ПОД ТЫЧИНКАМИ — её требование
+	# 07.09.2026. Требование про взаимное расположение трёх частей головки, и
+	# на глаз тут верить нечему: донце-то лежало ниже тёмного тела и раньше, а
+	# лепесток всё равно шёл сквозь него — потому что от донца поднимался ПРЯМО
+	# ВВЕРХ ПО ОСИ и только потом отгибался.
+	#
+	# Поэтому меряем не донце, а ВСЮ ЛИНИЮ ЛЕПЕСТКА, и тем же прибором, каким её
+	# строит сборка (`petal_path`). Смотрим самую высокую её точку ВНУТРИ головки
+	# — то есть ближе к оси, чем кольцо тычинок. Она обязана лежать ниже низа
+	# тёмного тела; просвет и печатаем.
+	#
+	# ПО ВСЕМУ РАСКРЫТИЮ, а не только у распустившегося: головка и лепесток
+	# растут врозь (тело с 0.45 своей ширины, лепесток с 0.55 длины), и самое
+	# тесное место может прийтись на середину пути.
+	var tight := 99.0
+	var tight_at := 0.0
+	for shut in range(11):
+		var ok: float = float(shut) / 10.0
+		var plan: Dictionary = plants.poppy_head_plan(card, 1.0, ok)
+		var ring: float = float(plan["pin_ring"])
+		var floor_y: float = minf(float(plan["heart_low"]), float(plan["pin_low"]))
+		for row in range(2):
+			var foot: float = float(plan["foot_out"] if row == 0
+				else plan["foot_in"])
+			var long: float = float(plan["head"]) * (1.0 if row == 0
+				else float(card.get("petal_inner_k", 0.82)))
+			var lean: float = deg_to_rad(float(card.get("petal_open", 74.0))
+				if row == 0 else float(card.get("petal_open_in", 52.0)))
+			# ДОНЦЕ ОТНЕСЕНО ОТ ОСИ на край цветоложа — тем же числом, каким его
+			# относит сборка. Мерить его на оси значило бы мерить цветок,
+			# которого нет: у оси лепестка не бывает вовсе.
+			# ДОНЦЕ ОТНЕСЕНО ОТ ОСИ на край чашечки — тем же числом, каким его
+			# относит сборка. Мерить его на оси значило бы мерить цветок,
+			# которого нет: у оси лепестка не бывает вовсе.
+			var line: Dictionary = plants.petal_path(
+				Vector3(float(plan["cup_r"]) * (0.95 if row == 0 else 0.80), foot, 0.0),
+				Vector3.UP, Vector3.RIGHT, long,
+				float(card.get("petal_bend", 0.22)), lean,
+				deg_to_rad(float(card.get("petal_dip", -1.0))),
+				float(card.get("petal_curl", 0.5)))
+			var pts: Array = line["pts"]
+			for i in range(pts.size() - 1):
+				for t in range(9):
+					var at: Vector3 = Vector3(pts[i]).lerp(Vector3(pts[i + 1]),
+						float(t) / 8.0)
+					if at.x > ring:
+						continue          # уже вне головки — не о ней речь
+					if floor_y - at.y < tight:
+						tight = floor_y - at.y
+						tight_at = ok
+	# ЛЕПЕСТКИ НЕ ПРОХОДЯТ СКВОЗЬ ЧУЖОЕ — её слово 07.09.2026. Считает это сама
+	# сборка, по той самой линии, что ложится в меш (стенду её взять неоткуда);
+	# здесь только сносим счёт и пересобираем сад заново, чтобы он набрался.
+	plants.petal_watch_clear()
+	for cell in plants.cell_nodes:
+		plants._dirty[cell] = true
+	plants.flush_now()
+	print("Мак: лепестки против помех — отвернулось или сложилось ",
+		plants.petals_folded, " из ", plants.petals_seen,
+		"; самый тесный просвет ", snappedf(plants.petal_gap_raw * 1000.0, 0.1),
+		" → ", snappedf(plants.petal_gap_min * 1000.0, 0.1),
+		" мм. Первое — как встал бы лепесток без всякой проверки, второе — как",
+		" встал на деле; ниже нуля значит, что он всё же вошёл в стебель, лист",
+		" или чужую головку")
+	# ВЫХОДИТ ЛИ СТЕБЕЛЬ ИЗ ЗЕМЛИ, А НЕ ПОЯВЛЯЕТСЯ ГОТОВЫМ — её слово 08.09.2026.
+	# Печатаем длину по ступеням: на первых трёх она обязана НАБИРАТЬСЯ, а не
+	# стоять почти взрослой.
+	var by_stage := ""
+	for st_j in range(plants.STAGES):
+		var mm: float = (float(st_j) + 0.5) / float(plants.STAGES)
+		var tall: float = float(card.get("stem_high", 0.4)) \
+			* plants.poppy_grow(card, mm) * plants.poppy_stem_out(card, mm)
+		by_stage += ("%d:%s" % [st_j + 1, str(snappedf(tall * 100.0, 0.1))])
+		if st_j < plants.STAGES - 1:
+			by_stage += "  "
+	print("Мак: длина стебля по ступеням, см — ", by_stage,
+		" (среднего размера куст); на первых трёх стебель должен НАБИРАТЬ",
+		" длину, а не стоять почти взрослым")
+	# ВИДНО ЛИ ЧЕРЕШОК — её жалоба 08.09.2026 повторно: «лист всё ещё не сидит на
+	# конце черешка». Сама посадка была верна с 07.09 (пластина начинается за
+	# трубочкой), а вот трубочки не было ВИДНО: 13 см при листе в 30–49, и её
+	# закрывало широкое основание пластины. Мерка отвечает ровно на это: сколько
+	# черешка остаётся голым и какова при этом пластина.
+	var leaf_m: float = float(card.get("leaf_long", 0.1))
+	var st_of: Dictionary = plants.poppy_stalk_of(card, leaf_m)
+	print("Мак: черешок — весь ", snappedf(float(st_of["stalk"]) * 100.0, 0.1),
+		" см, из них голым видно ", snappedf(float(st_of["bare"]) * 100.0, 0.1),
+		" см при пластине ", snappedf(leaf_m * 100.0, 0.1),
+		" см, то есть голого ", snappedf(float(st_of["bare"]) / maxf(leaf_m,
+		0.0001) * 100.0, 0.1), "% длины листа — ноль значил бы, что лист сидит",
+		" прямо на стебле")
+	# РАЗБРОС ЦВЕТА ПО КУРТИНЕ — её кадр 08.09.2026: «сейчас они все одного
+	# цвета». Мерки не было вовсе, оттого и не видно было, что жребий почти не
+	# расходится.
+	#
+	# МЕРЯЕМ ПО ЖИВЫМ ЦВЕТКАМ, а не по десяти тысячам жребиев: важно не то, что
+	# может выпасть, а то, что стоит на лугу. Разброс берём как среднее
+	# расстояние между цветом цветка и средним цветом куртины — по трём
+	# составляющим сразу, потому что «алый против оранжевого» это разница
+	# прежде всего в зелёной.
+	var tints: Array = []
+	for pid2 in plants.patches:
+		var pt: Dictionary = plants.patches[pid2]
+		if String(pt["id"]) != "poppy":
+			continue
+		var pd: Dictionary = card
+		var st_many: int = plants.poppy_stems(pt, pd)
+		for s_i in range(st_many):
+			if plants.poppy_stem_pod(pt, pd, s_i, st_many):
+				continue
+			tints.append(plants.poppy_paint(
+				plants.poppy_stem_salt(int(pt["salt"]), s_i), pd))
+	if not tints.is_empty():
+		var mid := Color(0, 0, 0)
+		for t in tints:
+			mid += Color(t)
+		mid = mid / float(tints.size())
+		var off := 0.0
+		var far := 0.0
+		for t in tints:
+			var c: Color = t
+			var d: float = (absf(c.r - mid.r) + absf(c.g - mid.g)
+				+ absf(c.b - mid.b)) / 3.0
+			off += d
+			far = maxf(far, d)
+		print("Мак: разброс цвета — в среднем ",
+			snappedf(off / float(tints.size()) * 255.0, 0.1),
+			" ступени из 255 от среднего, дальше всех ",
+			snappedf(far * 255.0, 0.1), " на ", tints.size(),
+			" цветках; ноль значил бы, что все одного цвета")
+	# ДЕРЖАТСЯ ЛИ ДОНЦА ЗА ЧАШЕЧКУ — её кадр 08.09.2026: «лепестки и тычинки
+	# сейчас левитируют над чашечкой цветка, что недопустимо».
+	#
+	# ЧИСЛОМ ЭТО СУДИТСЯ ТОЧНО, и прежде мерки не было вовсе. Чашечка — конус:
+	# у края радиус `cup_r`, на глубине `cup_h` он сходится к толщине стебля.
+	# Значит на всякой глубине у неё есть свой радиус, и донце сидит НА теле
+	# ровно тогда, когда его собственный радиус этого не превышает.
+	#
+	# Меряем при самом тесном раскрытии из проверяемых: у полураскрытого цветка
+	# чашечка ещё узкая, а кольцо тычинок от раскрытия не зависит вовсе — на
+	# этом расхождении левитация и вылезла.
+	var hang := 9.9
+	var hang_who := ""
+	for step_i in range(6):
+		var ok2: float = 0.2 + 0.16 * float(step_i)
+		var hp: Dictionary = plants.poppy_head_plan(card, 1.0, ok2)
+		var cr: float = float(hp["cup_r"])
+		var ch: float = maxf(float(hp["cup_h"]), 0.000001)
+		var cf: float = float(hp["cup_foot"])
+		var seat_k2: float = float(card.get("petal_seat", 0.0))
+		var rise_k: float = float(card.get("petal_rise_in", 0.0))
+		var inner_k: float = float(card.get("petal_inner_k", 0.82))
+		var hd: float = float(hp["head"])
+		# Каждое донце: на какой глубине под краем сидит и какого оно радиуса.
+		for who in [
+			["внешний ряд", float(hp["ring_out"]), hd * seat_k2],
+			["внутренний ряд", float(hp["ring_in"]),
+				hd * inner_k * seat_k2 - hd * rise_k],
+			["тычинки", float(hp["pin_ring"]), 0.0]]:
+		# Радиус конуса на этой глубине. Глубина отрицательная — донце ВЫШЕ
+		# края, и тела там нет вовсе, кроме плоской макушки радиусом `cup_r`.
+			var deep: float = maxf(float(who[2]), 0.0)
+			var body: float = cr - clampf(deep / ch, 0.0, 1.0) * (cr - cf)
+			var slack: float = body - float(who[1])
+			if slack < hang:
+				hang = slack
+				hang_who = String(who[0]) + " при раскрытии " \
+					+ str(snappedf(ok2, 0.01))
+	print("Мак: держится ли цветок за чашечку — самое тесное место ",
+		snappedf(hang * 1000.0, 0.1), " мм (", hang_who,
+		"); ниже нуля значит, что донце висит В ВОЗДУХЕ за краем чашечки")
+	# РАЗМЕР ЗА СТУПЕНЬ МЕНЯЕТСЯ НЕ БОЛЕЕ ЧЕМ НА 5% — её правило 06.09.2026,
+	# подтверждённое и уточнённое 07.09. Мерки на него до сих пор не было вовсе,
+	# и это честно было записано в README: проверить его можно только тем, чтобы
+	# сравнить размеры на соседних ступенях. Теперь сравниваем — тем же прибором,
+	# каким размер считает сборка (`poppy_grow`).
+	var jump := 0.0
+	var jump_at := 0
+	for st_i in range(plants.STAGES - 1):
+		var a: float = plants.poppy_grow(card,
+			(float(st_i) + 0.5) / float(plants.STAGES))
+		var b: float = plants.poppy_grow(card,
+			(float(st_i) + 1.5) / float(plants.STAGES))
+		var d: float = b / maxf(a, 0.000001) - 1.0
+		if d > jump:
+			jump = d
+			jump_at = st_i + 1
+	print("Мак: прибавка за ступень — самая большая ",
+		snappedf(jump * 100.0, 0.1), "% (со ступени ", jump_at, " на ",
+		jump_at + 1, "), всход в ",
+		snappedf(plants.poppy_grow(card, 0.0), 0.001),
+		" взрослого — её правило: не более 5% за ступень")
+	# ВНУТРЕННИЙ РЯД СТОИТ В ПРОСВЕТАХ ВНЕШНЕГО, А ВЕНЧИКИ ПОВЁРНУТЫ ВРАЗНОБОЙ —
+	# её кадры 07.09.2026. Оба требования проверяемы числом, и оба до сих пор
+	# нарушались НЕ случайно, а по построению: внутренние два лепестка садились
+	# точно на внешние второй и четвёртый ВСЕГДА, а закрутки венчика не было
+	# вовсе, и все цветки смотрели одинаково.
+	#
+	# Углы берём тем же прибором, каким их считает сборка (`petal_angle`,
+	# `poppy_inner_gap`, `poppy_flower_spin`), — иначе проверка доложила бы про
+	# цветок, которого на кадре нет.
+	var lap := 9.9                    # самое тесное схождение рядов, градусов
+	var spins := PackedFloat32Array()
+	var jit: float = deg_to_rad(float(card.get("petal_jitter", 0.0)))
+	var outer_n: int = int(card.get("petal_outer", 4))
+	var inner_n: int = int(card.get("petal_inner", 2))
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) != "poppy":
+			continue
+		var many: int = plants.poppy_stems(p, card)
+		for s in range(many):
+			if plants.poppy_stem_m(p, card, s, many) < float(card["open_at"]) \
+					or plants.poppy_stem_pod(p, card, s, many):
+				continue          # не цветок — лепестков нет
+			var salt: int = plants.poppy_stem_salt(int(p["salt"]), s)
+			spins.append(plants.poppy_flower_spin(salt))
+			var turn_in: float = plants.poppy_inner_gap(salt, card)
+			for ki in range(inner_n):
+				var ai: float = plants.petal_angle(salt + 991, 0, ki, inner_n,
+					1, jit) + turn_in
+				for ko in range(outer_n):
+					var ao: float = plants.petal_angle(salt, 0, ko, outer_n,
+						1, jit)
+					var d: float = absf(wrapf(ai - ao, -PI, PI))
+					lap = minf(lap, d)
+	# РАЗБРОС ЗАКРУТКИ — по среднему вектору. Считать разброс углов напрямую
+	# нельзя: круг замкнут, и 359° с 1° разошлись бы на 358 вместо двух. Длина
+	# среднего вектора равна единице у строя и нулю у полного разнобоя.
+	var vx := 0.0
+	var vy := 0.0
+	for a in spins:
+		vx += cos(a)
+		vy += sin(a)
+	var order: float = Vector2(vx, vy).length() / maxf(1.0, float(spins.size()))
+	print("Мак: венчик — внутренний ряд отстоит от ближайшего внешнего лепестка",
+		" на ", snappedf(rad_to_deg(lap), 0.1), "°, самое тесное по всей куртине;",
+		" ноль значил бы, что второй ряд лёг прямо на первый")
+	print("Мак: закрутка венчиков — строй ", snappedf(order, 0.001), " на ",
+		spins.size(), " цветках; единица значила бы, что все смотрят в одну",
+		" сторону, ноль — полный разнобой")
+	# ЧАША — ТОЖЕ ЧИСЛОМ. Её слова: у донца лепесток смотрит чуть в землю, дальше
+	# изгибается кверху. Значит у линии есть НИЗ (ниже донца) и КОНЕЦ (выше
+	# донца), и оба обязаны быть по свою сторону. Ноль в обоих значил бы прямую
+	# доску, а низ без подъёма — зонтик вместо чаши.
+	var cup_plan: Dictionary = plants.poppy_head_plan(card, 1.0, 1.0)
+	var cup_line: Dictionary = plants.petal_path(Vector3.ZERO, Vector3.UP,
+		Vector3.RIGHT, float(cup_plan["head"]),
+		float(card.get("petal_bend", 0.22)),
+		deg_to_rad(float(card.get("petal_open", 74.0))),
+		deg_to_rad(float(card.get("petal_dip", -1.0))),
+		float(card.get("petal_curl", 0.5)))
+	var cup_low := 0.0
+	for at in cup_line["pts"]:
+		cup_low = minf(cup_low, Vector3(at).y)
+	var cup_pts: Array = cup_line["pts"]
+	print("Мак: чаша лепестка — от донца вниз на ",
+		snappedf(-cup_low * 1000.0, 0.1), " мм, конец выше донца на ",
+		snappedf(Vector3(cup_pts[cup_pts.size() - 1]).y * 1000.0, 0.1),
+		" мм при длине ", snappedf(float(cup_plan["head"]) * 1000.0, 0.1),
+		" мм — оба числа положительны только у чаши: ноль внизу это доска,",
+		" ноль вверху это зонтик")
+	print("Мак: лепестки под головкой — самый малый просвет ",
+		snappedf(tight * 1000.0, 0.1), " мм, при раскрытии ",
+		snappedf(tight_at, 0.1),
+		"; меряется от низа тёмного тела до самой высокой точки лепестка внутри",
+		" кольца тычинок, и ниже нуля значило бы, что лепесток растёт СКВОЗЬ",
+		" головку, а не под ней")
 	print("Мак: до ближайшего соседа — в среднем ",
 		snappedf(near_sum / maxf(1.0, float(near_n)) * 100.0, 0.1),
 		" см, самое тесное ", snappedf(near_min * 100.0, 0.1),
