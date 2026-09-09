@@ -195,12 +195,26 @@ var _play_low: float = 0.0
 var _play_high: float = 0.0
 # Зерно, от которого пляшет разброс семян. См. `_node_jitter`.
 var _scatter_salt: int = 0
+# ВРЕМЯ ПОСТРОЙКИ ПО ЧАСТЯМ, мс. Наружу отдаётся затем, что решать, где дорого,
+# приходится по числам, а не по догадке.
+var step_ms: Dictionary = {}
+
+# СОСЕДИ, КОТОРЫЕ ПОСТАВЛЕНЫ РАНЬШЕ НАС. Обход россыпи идёт i → k → j, и раньше
+# нас те, у кого меньше i; при равном i — меньше k; при равных i и k — меньше j.
+# Тринадцать из двадцати шести; разбор — в `_scatter`.
+const SCATTER_BACK: Array = [
+	Vector3i(-1, -1, -1), Vector3i(-1, 0, -1), Vector3i(-1, 1, -1),
+	Vector3i(-1, -1, 0), Vector3i(-1, 0, 0), Vector3i(-1, 1, 0),
+	Vector3i(-1, -1, 1), Vector3i(-1, 0, 1), Vector3i(-1, 1, 1),
+	Vector3i(0, -1, -1), Vector3i(0, 0, -1), Vector3i(0, 1, -1),
+	Vector3i(0, -1, 0),
+]
 
 
 func generate(radius: float, top: float, bottom: float, headroom: float,
-		underroom: float, spacing: float, grid_seed: int) -> void:
-	_spacing = spacing
-	_cell_size = spacing * 1.4
+		underroom: float, step: float, grid_seed: int) -> void:
+	_spacing = step
+	_cell_size = step * 1.4
 	_scatter_salt = grid_seed
 	# ИГРАБЕЛЬНЫЙ ОБЪЁМ: сам остров плюс запас по высоте — вверх и вниз.
 	#
@@ -224,8 +238,8 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	#
 	# Теперь запас берётся от самого виляния. Платим кольцом лишних семян по
 	# краю — около полутора процентов их числа.
-	_play_radius = radius + EDGE_SWING + spacing * 0.6
-	_play_low = bottom - maxf(underroom, spacing * 0.6)
+	_play_radius = radius + EDGE_SWING + step * 0.6
+	_play_low = bottom - maxf(underroom, step * 0.6)
 	_play_high = top + headroom
 
 	# Рельеф ОДНОЙ волной. Второй, мелкий слой шума (частота 0.26, высота 0.9
@@ -329,21 +343,36 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	_ledge_warp.seed = grid_seed + 909
 	_ledge_warp.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_ledge_warp.frequency = 0.085
+	# ВРЕМЯ ПО ЧАСТЯМ. Её просьба 09.09.2026 — «сделать генерацию мира дешевле и
+	# быстрее». Одним числом на всю постройку тут ничего не решить: пока не
+	# видно, что именно дорого, всякая правка это гадание. Разбивку читает
+	# `SpaceMain`, печатает её стенд острова и самопроверка.
+	step_ms.clear()
+	var mark: int = Time.get_ticks_msec()
 	_build_joints(grid_seed)
+	step_ms["трещины"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
 
 	# Семена берём с запасом за краем: у крайних ячеек нет всех соседей,
 	# их не удаётся замкнуть, и мы их отбрасываем.
-	var margin := spacing * 2.0
+	var margin := step * 2.0
 	_scatter(_play_radius + margin, _play_high + margin, _play_low - margin)
+	step_ms["россыпь семян"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
 	_build_seed_hash()
+	step_ms["сетка поиска"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
 	_build_nodes()
 	_build_neighbours()
 	_build_slope_basis()
 	_build_cells()
+	step_ms["узлы и соседи"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
 	# `top` сюда больше не идёт: рельеф считается в метрах сам по себе, а не
 	# долей от макушки острова — см. `_land_height`. Макушка осталась тем, чем
 	# и была: подошвой запаса по высоте (`_play_high`).
 	_fill_terrain(radius, bottom, shape)
+	step_ms["высота земли"] = Time.get_ticks_msec() - mark
 
 
 # --- Семена ------------------------------------------------------------------
@@ -417,20 +446,33 @@ func _scatter(radius: float, top_edge: float, bottom: float) -> void:
 				if p.y < bottom or p.y > top_edge:
 					continue
 				# Отодвигаем от уже поставленных соседей по решётке.
-				for dx in range(-1, 2):
-					for dy in range(-1, 2):
-						for dz in range(-1, 2):
-							var key := Vector3i(i + dx, j + dy, k + dz)
-							if not _node_index.has(key):
-								continue
-							var other: Vector3 = seeds[_node_index[key]]
-							# Раздвигаем ТОЛЬКО в плане: подняв семя, мы вернули бы
-							# ту самую пляску высот, из-за которой поверхность
-							# идёт буграми.
-							var away: Vector3 = p - other
-							var far: float = away.length()
-							if far > 0.0001 and far < gap:
-								p = other + away / far * gap
+				#
+				# СМОТРИМ ТОЛЬКО НАЗАД, И ЭТО НЕ ПРИБЛИЖЕНИЕ. Прежде обходились
+				# все двадцать семь соседей, но четырнадцать из них к этому мигу
+				# ещё НЕ ПОСТАВЛЕНЫ — обход шёл в таблицу и возвращался ни с чем.
+				# На трёхстах тысячах семян это восемь миллионов пустых обращений.
+				#
+				# Расстояние — вещь взаимная: если два семени сойдутся ближе
+				# положенного, то поставленное вторым увидит первое и отодвинется.
+				# Значит достаточно смотреть на тех, кто уже стоит, а кто ещё
+				# будет — увидит нас сам. Итог тот же ДО ПОСЛЕДНЕГО СЕМЕНИ, а
+				# работы вдвое меньше: замерено 2355 → 1226 мс.
+				#
+				# Порядок обхода снаружи внутрь — i, потом k, потом j; отсюда и
+				# список: раньше нас те, у кого меньше i, при равном i — меньше k,
+				# при равных i и k — меньше j.
+				for back in SCATTER_BACK:
+					var key: Vector3i = Vector3i(i, j, k) + back
+					if not _node_index.has(key):
+						continue
+					var other: Vector3 = seeds[_node_index[key]]
+					# Раздвигаем ТОЛЬКО в плане: подняв семя, мы вернули бы
+					# ту самую пляску высот, из-за которой поверхность
+					# идёт буграми.
+					var away: Vector3 = p - other
+					var far: float = away.length()
+					if far > 0.0001 and far < gap:
+						p = other + away / far * gap
 				# Далеко от своего узла семя не уходит: разбиение решётки на
 				# тетраэдры держится на том, что семя остаётся «своим» углом.
 				var off: Vector3 = p - node
@@ -705,14 +747,14 @@ func _finish_cell(poly: Dictionary) -> Dictionary:
 			return {"faces": [], "valid": false}
 
 	var local: Array = poly["verts"]
-	var remap: Dictionary = {}
+	var new_index: Dictionary = {}
 	var faces_out: Array = []
 	for f in poly["faces"]:
 		var loop := PackedInt32Array()
 		for idx in f["loop"]:
-			if not remap.has(idx):
-				remap[idx] = _add_vertex(local[idx])
-			loop.append(remap[idx])
+			if not new_index.has(idx):
+				new_index[idx] = _add_vertex(local[idx])
+			loop.append(new_index[idx])
 		if loop.size() >= 3:
 			faces_out.append({"loop": loop, "nb": int(f["nb"])})
 	return {"faces": faces_out, "valid": faces_out.size() >= 4}
@@ -865,9 +907,9 @@ func _clip(poly: Dictionary, point: Vector3, normal: Vector3, nb: int) -> Dictio
 # навсегда остаётся прежней, и раннее прекращение не срабатывает.
 func _compact(poly: Dictionary) -> Dictionary:
 	var pv: Array = poly["verts"]
-	var remap := PackedInt32Array()
-	remap.resize(pv.size())
-	remap.fill(-1)
+	var new_index := PackedInt32Array()
+	new_index.resize(pv.size())
+	new_index.fill(-1)
 	var nv: Array = []
 	var nf: Array = []
 	for f in poly["faces"]:
@@ -876,10 +918,10 @@ func _compact(poly: Dictionary) -> Dictionary:
 		out.resize(loop.size())
 		for k in range(loop.size()):
 			var i: int = loop[k]
-			if remap[i] < 0:
-				remap[i] = nv.size()
+			if new_index[i] < 0:
+				new_index[i] = nv.size()
 				nv.append(pv[i])
-			out[k] = remap[i]
+			out[k] = new_index[i]
 		nf.append({"loop": out, "nb": f["nb"]})
 	return {"verts": nv, "faces": nf}
 
@@ -1610,17 +1652,17 @@ func flush_look(budget: float = 0.0) -> void:
 			_look_ring = PackedInt32Array()
 			_look_step = 0
 
-func _ring_of(cells: PackedInt32Array) -> PackedInt32Array:
+func _ring_of(from_cells: PackedInt32Array) -> PackedInt32Array:
 	if _mark.size() != seeds.size():
 		_mark.resize(seeds.size())
 		_mark.fill(0)
 	_mark_stamp += 1
 	var stamp: int = _mark_stamp
 	var out := PackedInt32Array()
-	for j in cells:
+	for j in from_cells:
 		_mark[j] = stamp
 		out.append(j)
-	for j in cells:
+	for j in from_cells:
 		var at: int = j * 6
 		for k in range(6):
 			var n: int = nb_table[at + k]
@@ -2014,10 +2056,10 @@ func _snap_to_facet(at: Vector3, home: int, calm: bool = false) -> Dictionary:
 	# срез, а в чужой по соседству. Такому месту верить нельзя.
 	if not found or best_room < -0.35 or best.distance_to(at) > _spacing * 0.6:
 		return {}
-	var cell: int = cell_at(best)
-	if cell < 0 or not in_play(cell):
+	var hit_cell: int = cell_at(best)
+	if hit_cell < 0 or not in_play(hit_cell):
 		return {}
-	return {"pos": best, "cell": cell}
+	return {"pos": best, "cell": hit_cell}
 
 
 # НА СКОЛЬКО ТОЧКА ОТОРВАЛАСЬ ОТ ВИДИМОЙ ЗЕМЛИ, в метрах. Меньше нуля — земли
@@ -2030,10 +2072,10 @@ func surface_gap(p: Vector3, calm: bool = false) -> float:
 	var j: int = cell_at(p)
 	if j < 0:
 		return -1.0
-	var snapped: Dictionary = _snap_to_facet(p, j, calm)
-	if snapped.is_empty():
+	var hit: Dictionary = _snap_to_facet(p, j, calm)
+	if hit.is_empty():
 		return -1.0
-	return p.distance_to(snapped["pos"])
+	return p.distance_to(hit["pos"])
 
 
 # РАЗГЛАЖИВАЕМ ВПАДИНУ по соседям. Она считается вторым перегибом поля, а
@@ -2044,9 +2086,9 @@ func surface_gap(p: Vector3, calm: bool = false) -> float:
 #
 # Сглаживание — единственное настоящее лекарство: подсовывать под порог ровную
 # величину, а не подкрашивать последствия.
-func _smooth_cavity(cells = []) -> void:
+func _smooth_cavity(only_cells = []) -> void:
 	var soft := PackedFloat32Array()
-	var which = cells
+	var which = only_cells
 	if which.is_empty():
 		which = range(cavity.size())
 	soft.resize(which.size())
@@ -2553,11 +2595,11 @@ func blur_at(point: Vector3, radius: float, strength: float) -> Dictionary:
 # (с обратным знаком).
 # `stone_delta` — что мазок сделал с каменистостью. У размывания его нет, оно
 # породы не трогает; у мазка есть всегда.
-func apply_delta(delta: Dictionary, sign: float,
+func apply_delta(delta: Dictionary, mult: float,
 		stone_delta: Dictionary = {}) -> Array:
 	var zone: Dictionary = {}
 	for j in delta:
-		edit_val[j] += float(delta[j]) * sign
+		edit_val[j] += float(delta[j]) * mult
 		# Порог выброса ЗДЕСЬ МЕЛЬЧЕ, чем у лепки, и это не придирка. Кисть
 		# размывания обязана отменяться в точности — иначе за отменой нечем
 		# восстановить, сколько она сняла. А выброс несимметричен: ячейку с
@@ -2572,7 +2614,7 @@ func apply_delta(delta: Dictionary, sign: float,
 	# свою прибавку уже не из него, а из нуля.
 	var hot: Dictionary = {}
 	for j in stone_delta:
-		var left: float = float(stone.get(j, 0.0)) + float(stone_delta[j]) * sign
+		var left: float = float(stone.get(j, 0.0)) + float(stone_delta[j]) * mult
 		if absf(left) < 0.0002:
 			stone.erase(j)
 		else:
@@ -2744,7 +2786,7 @@ func _facet(index: int) -> float:
 	# ловит впадина, и по ним же садится зелень.
 	var steep: float = _steepness(index)
 	var out: float = n * s * s * (0.55 + 0.75 * high) * (0.6 + 0.6 * steep) * facet_amp
-	out += _joints(p, s, base_fill[index] + _edit_of(index))
+	out += _joints(p, s)
 	if index < crack_cut.size():
 		crack_cut[index] = _cut_here
 	# ШОВ МЕЖДУ ГЛЫБАМИ, положенными разными мазками. Вычитание, а не прибавка:
@@ -3283,7 +3325,7 @@ func _refresh_seam(index: int) -> void:
 	seam[index] = 1.0 - smoothstep(0.0, SEAM_WIDE, (d2 - d1) * 0.5)
 
 
-func _joints(p: Vector3, s: float, body: float) -> float:
+func _joints(p: Vector3, s: float) -> float:
 
 
 	if _ledge_warp == null or _joint_sets.is_empty():
@@ -3487,10 +3529,6 @@ func node_index() -> Dictionary:
 func node_of(index: int) -> Vector3i:
 	var at: int = index * 3
 	return Vector3i(_node_xyz[at], _node_xyz[at + 1], _node_xyz[at + 2])
-
-
-func spacing() -> float:
-	return _spacing
 
 
 # --- Запросы наружу ----------------------------------------------------------

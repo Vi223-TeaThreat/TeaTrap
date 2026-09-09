@@ -325,6 +325,7 @@ func _pick_sheet(part: String, base: Dictionary, move: float) -> void:
 
 	for n in range(9):
 		var col: int = n % 3
+		@warning_ignore("integer_division")
 		var row: int = n / 3
 		var ox: int = GAP + col * (card_w + GAP)
 		var oy: int = GAP + row * (card_h + NUM_H + GAP)
@@ -383,6 +384,7 @@ func _over(dst: Image, src: Image, ox: int, oy: int) -> void:
 func _blow(dst: Image, src: Image, ox: int, oy: int) -> void:
 	for y in range(src.get_height() * ZOOM):
 		for x in range(src.get_width() * ZOOM):
+			@warning_ignore("integer_division")
 			dst.set_pixel(ox + x, oy + y, src.get_pixel(x / ZOOM, y / ZOOM))
 
 
@@ -490,6 +492,7 @@ func _take_hand(path: String, part: String) -> void:
 		for c in PARTS[part]["cols"]:
 			cols.append(int(c))
 			solid_of[int(c)] = bool(PARTS[part]["solid"])
+	@warning_ignore("integer_division")
 	var have: int = int(src.get_width() / TILE)
 	# ФАЙЛ РОВНО В ШИРИНУ ЧАСТИ — ЭТО САМА ЧАСТЬ, а не лист целиком.
 	#
@@ -587,6 +590,7 @@ func _take_hand(path: String, part: String) -> void:
 		full_art.fill(Color(0, 0, 0, 0))
 		full_art.blit_rect(art, Rect2i(0, 0, art.get_width(), art.get_height()),
 			Vector2i.ZERO)
+		@warning_ignore("integer_division")
 		print("Лист был ", int(art.get_width() / TILE), " столбцов — расширен до ",
 			COLS, ", прибавленные остались прозрачными")
 		art = full_art
@@ -752,6 +756,7 @@ func _guards(img: Image) -> int:
 	for col in PARTS["leaf"]["cols"]:
 		for s in range(STAGES):
 			var stuck := false
+			@warning_ignore("integer_division")
 			for x in [TILE / 2 - 1, TILE / 2]:
 				for y in range(TILE - 12, TILE):
 					if img.get_pixel(int(col) * TILE + x, s * TILE + y).a > 0.0:
@@ -862,7 +867,6 @@ func _check() -> void:
 
 	# Рельеф тела мха: игра знает высоты точно, пока лист четырёхстолбцовый.
 	# После записи полного листа она станет снимать их с яркости — меряем обе.
-	var told := plants._make_bumps(plants._blade_texture())
 	print("Уклон тела мха по яркости собранного листа: %.4f" % _slope(built, BODY_COL))
 	print("  (у чистой заглушки игры: %.4f)" % _slope(full, BODY_COL))
 	plants.free()
@@ -1033,12 +1037,12 @@ func _field() -> PackedFloat32Array:
 # у лепестка неполную ступень (то есть каёмку, которой на трети контура нет), а у
 # листа — почти две.
 #
-# `wrap` — заворот по клетке для бесшовных образцов: у них соседом левого края
-# служит правый, и чистить сор надо с этим же заворотом, иначе при замощении
+# `seamless` — заворот по клетке для бесшовных образцов: у них соседом левого
+# края служит правый, и чистить сор надо с этим же заворотом, иначе при замощении
 # вычищенная середина сходится с невычищенной рамкой.
 func _finish(img: Image, ox: int, oy: int, lv: PackedFloat32Array,
 		ramp: PackedColorArray, dither: float, tidy: int = 1,
-		rim: int = 0, wrap: bool = false) -> void:
+		rim: int = 0, seamless: bool = false) -> void:
 	var top: int = ramp.size() - 1
 	var idx := PackedInt32Array()
 	idx.resize(TILE * TILE)
@@ -1060,7 +1064,7 @@ func _finish(img: Image, ox: int, oy: int, lv: PackedFloat32Array,
 				gate = lerpf(0.5, bay, clampf(dither, 0.0, 1.0))
 			idx[p] = clampi(i + (1 if frac > gate else 0), 0, top)
 	for _pass in range(tidy):
-		idx = _declutter(idx, wrap)
+		idx = _declutter(idx, seamless)
 	# КАЁМКА — ПОСЛЕ ЧИСТКИ. Прежде она наводилась до неё, и чистка видела в
 	# обводе цепочку точек, у которых меньше двух родных соседей, и притягивала
 	# её обратно к телу фигурки: у лепестка и у ворсинки лиамоха обвода не
@@ -1143,7 +1147,7 @@ func _bleed(img: Image, ox: int, oy: int, idx: PackedInt32Array,
 # самому частому соседу — не к среднему, иначе родится новый оттенок и одиночка
 # просто переедет. Обход идёт по образу, снятому до правки: иначе исправленная
 # точка тут же начинает влиять на следующую, и чистка ползёт волной.
-func _declutter(src: PackedInt32Array, wrap: bool = false) -> PackedInt32Array:
+func _declutter(src: PackedInt32Array, seamless: bool = false) -> PackedInt32Array:
 	var out := src.duplicate()
 	for y in range(TILE):
 		for x in range(TILE):
@@ -1161,7 +1165,7 @@ func _declutter(src: PackedInt32Array, wrap: bool = false) -> PackedInt32Array:
 						continue
 					var nx: int = x + dx
 					var ny: int = y + dy
-					if wrap:
+					if seamless:
 						nx = posmod(nx, TILE)
 						ny = posmod(ny, TILE)
 					elif nx < 0 or nx >= TILE or ny < 0 or ny >= TILE:
@@ -1196,7 +1200,7 @@ func _declutter(src: PackedInt32Array, wrap: bool = false) -> PackedInt32Array:
 # настоящего пиксельарта. Верное между ними — ПЯТНА размером в несколько точек:
 # после укладки ступенями они дают острова соседних тонов, то есть ту самую
 # фактуру, какую рисуют рукой.
-func _blobs(x: int, y: int, cells: int, seed: int) -> float:
+func _blobs(x: int, y: int, cells: int, salt: int) -> float:
 	var fx: float = float(x) / float(TILE) * float(cells)
 	var fy: float = float(y) / float(TILE) * float(cells)
 	var x0: int = int(floorf(fx))
@@ -1207,7 +1211,7 @@ func _blobs(x: int, y: int, cells: int, seed: int) -> float:
 	ty = ty * ty * (3.0 - 2.0 * ty)
 	var at := func(ax: int, ay: int) -> float:
 		return _hash01(posmod(ax, cells) * 374761393
-			+ posmod(ay, cells) * 668265263 + seed * 1442695041)
+			+ posmod(ay, cells) * 668265263 + salt * 1442695041)
 	return lerpf(lerpf(at.call(x0, y0), at.call(x0 + 1, y0), tx),
 		lerpf(at.call(x0, y0 + 1), at.call(x0 + 1, y0 + 1), tx), ty)
 
@@ -1265,6 +1269,7 @@ func _moss(img: Image, ox: int, oy: int, s: int, kind: int,
 		# подушки один силуэт и ни одного оторванного куска.
 		var shag: float = 0.0
 		if fuzz > 0:
+			@warning_ignore("integer_division")
 			shag = float(fuzz) * (0.45 + 0.55
 				* _hash01((x / 2) * 7919 + s * 61 + kind * 977))
 		var top: int = TILE - 1 - int(round(high * (dome + lump) + shag))
@@ -1299,7 +1304,6 @@ func _moss(img: Image, ox: int, oy: int, s: int, kind: int,
 		# живёт ни при уменьшении, ни в игре. Теперь ворсинка — зубец, стоящий
 		# на теле подушки, и она не тоньше двух точек.
 
-	var base := Color(0.33, 0.47, 0.22).lerp(Color(0.29, 0.42, 0.19), age)
 	var gp: PackedColorArray = _palette(rec)["green"]
 	var sh: int = int(round(age * 2.0))
 	_finish(img, ox, oy, lv, _slice(gp, 2 - sh, 9 - sh), 0.16, 2, 1)
@@ -1320,7 +1324,6 @@ func _body(img: Image, ox: int, oy: int, s: int, rng: RandomNumberGenerator,
 	var age: float = float(s) / float(STAGES - 1)
 	var big_k: float = rec["clump"]
 	var mottle: float = rec["mottle"]
-	var base := Color(0.31, 0.44, 0.21).lerp(Color(0.27, 0.39, 0.18), age)
 	var lv := _field()
 	var span: float = float(TILE)
 	var half: float = span * 0.5
@@ -1516,7 +1519,6 @@ func _leaf(img: Image, ox: int, oy: int, s: int, kind: int,
 	# зелёное пятно. Наводится она теперь ВНУТРИ `_finish`, после чистки, и
 	# меряется ступенями пандуса.
 
-	var base := Color(0.31, 0.44, 0.20).lerp(Color(0.26, 0.37, 0.17), age)
 	var gp3: PackedColorArray = _palette(rec)["green"]
 	var sh3: int = int(round(age * 2.0))
 	_finish(img, ox, oy, lv, _slice(gp3, 2 - sh3, 8 - sh3), 0.26, 1, 2)
@@ -1699,6 +1701,7 @@ func _vein(p: Vector2, a: Vector2, tips: Array, out: float) -> float:
 		return 0.0
 	var best: float = 0.0
 	for i in range(tips.size()):
+		@warning_ignore("integer_division")
 		var main: bool = i == int(tips.size() / 2)
 		var wide: float = 0.95 if main else 0.62
 		var reach: float = 0.86 if main else 0.66
@@ -1779,7 +1782,6 @@ func _bloom(img: Image, ox: int, oy: int, s: int, kind: int,
 	# Чистый белый не берём — на солнце он выжигается в плоское пятно без формы.
 	# Цветок ТЕПЛЕЕТ к свету, потому сдвиг тона у него со знаком плюс: у зелени
 	# свет уходит в жёлтое от зелёного, у кремового — в жёлто-розовое.
-	var base := Color(0.55, 0.60, 0.38).lerp(Color(0.88, 0.86, 0.72), open)
 	var bp: PackedColorArray = _palette(rec)["bloom"]
 	var lo: int = int(round((1.0 - open) * 2.0))
 	_finish(img, ox, oy, lv, _slice(bp, lo, lo + 5), 0.10, 2, 0)

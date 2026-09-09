@@ -185,7 +185,13 @@ func _rebuild(key: Vector3i) -> void:
 	mi.mesh = st.commit()
 	# Каменное — тем же шейдером, что и порода; дерево остаётся деревом.
 	var shape := str(def["shape"])
-	mi.material_override = _stone_material if shape == "rock" or shape == "debris" else _material
+	# Ветвление, а не тернарник: у камня шейдерный материал, у дерева обычный, и
+	# общий у них только предок `Material` — вилку из двух разных типов Godot не
+	# берётся вывести и ругается.
+	var skin: Material = _material
+	if shape == "rock" or shape == "debris":
+		skin = _stone_material
+	mi.material_override = skin
 	add_child(mi)
 	entry["node"] = mi
 

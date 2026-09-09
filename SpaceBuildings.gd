@@ -108,7 +108,7 @@ func _build(members: Array) -> void:
 	if storeys == 2:
 		_flat_roof(st, top_ring, centre, reach * 0.12)
 	else:
-		_peaked_roof(st, top_ring, centre, reach * (0.55 if storeys == 1 else 0.95))
+		_peaked_roof(st, top_ring, reach * (0.55 if storeys == 1 else 0.95))
 
 	var mi := MeshInstance3D.new()
 	mi.mesh = st.commit()
@@ -175,7 +175,7 @@ func _flat_roof(st: SurfaceTool, ring: Array, centre: Vector3, lip: float) -> vo
 		_tri(st, top[i], top[(i + 1) % n], mid, centre - Vector3.UP * 10.0)
 
 
-func _peaked_roof(st: SurfaceTool, ring: Array, centre: Vector3, rise: float) -> void:
+func _peaked_roof(st: SurfaceTool, ring: Array, rise: float) -> void:
 	var mid := Vector3.ZERO
 	for p in ring:
 		mid += p

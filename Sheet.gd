@@ -60,6 +60,8 @@ func _init() -> void:
 	var zoom := Image.create(wide * ZOOM, high * ZOOM, false, Image.FORMAT_RGBA8)
 	for y in range(high * ZOOM):
 		for x in range(wide * ZOOM):
+			# Деление нацело намеренно: это номер исходной точки, ближайший сосед.
+			@warning_ignore("integer_division")
 			zoom.set_pixel(x, y, img.get_pixel(x / ZOOM, y / ZOOM))
 	_save(zoom, "res://art/moss_zoom.png")
 

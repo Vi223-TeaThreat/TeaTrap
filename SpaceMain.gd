@@ -233,16 +233,13 @@ func _ready() -> void:
 	# или сжатия окна: без пересчёта панель оставалась той, что была скроена
 	# под прежний размер. Масштаб при этом каждый раз берётся исходный — иначе
 	# ужатое единожды меню оставалось бы мелким навсегда.
-	get_viewport().size_changed.connect(func():
-		if _resize_wait:
-			return
-		_resize_wait = true
-		get_tree().create_timer(0.4).timeout.connect(func():
-			_resize_wait = false
-			ui_scale = _screen_ui_scale()
-			_clear_toolbar()
-			_setup_toolbar()
-			_fit_menu()))
+	#
+	# ПОДПИСЫВАЕМСЯ МЕТОДОМ, А НЕ ЛЯМБДОЙ, и это не вкусовщина. Окно переживает
+	# перечитывание сцены («новый остров», «заново»), а вместе с ним переживает
+	# и подписка. У метода связь рвётся сама, как только старая сцена умерла; у
+	# лямбды не рвётся — она хватает сцену с собой, и после перечитывания движок
+	# ругается в отладчик: «захваченное лямбдой уже освобождено».
+	get_viewport().size_changed.connect(_on_window_resized)
 	_setup_materials()
 	_setup_environment()
 	_setup_light()
@@ -518,6 +515,7 @@ func _try_pixel_frame() -> void:
 	if pixel_zoom <= 0:
 		return
 	var win := get_window()
+	@warning_ignore("integer_division")
 	var small := Vector2i(maxi(win.size.x / pixel_zoom, 160),
 		maxi(win.size.y / pixel_zoom, 90))
 	win.content_scale_mode = Window.CONTENT_SCALE_MODE_VIEWPORT
@@ -543,9 +541,9 @@ func _setup_materials() -> void:
 		# нигде (наклон выше единицы недостижим), щели не темнеют, ступеней
 		# тона нет. См. `--plain` в `_ready`.
 		var grey := Color(0.55, 0.55, 0.55)
-		for name in ["rock_dark", "rock_light", "soil_dark", "soil_light",
+		for pname in ["rock_dark", "rock_light", "soil_dark", "soil_light",
 				"turf_deep", "turf_lit", "turf_dry"]:
-			rock_mat.set_shader_parameter(name, grey)
+			rock_mat.set_shader_parameter(pname, grey)
 		rock_mat.set_shader_parameter("mantle_soil", 9.0)
 		rock_mat.set_shader_parameter("mantle_stone", 9.0)
 		rock_mat.set_shader_parameter("moss_crack", 0.0)
@@ -772,13 +770,16 @@ func _build_world() -> void:
 	solid = {}
 	for i in grid.solid:
 		solid[i] = "ground"
-	var built := Time.get_ticks_msec()
 
 	for i in solid:
 		_touch_chunks(i, false)
 	print("Объёмная сетка: семян — ", grid.seeds.size(), ", породы — ", solid.size(),
 		", кусков — ", chunk_list.size())
-	print("Время: семена и заполнение ", Time.get_ticks_msec() - started, " мс")
+	var parts := ""
+	for k in grid.step_ms:
+		parts += ", %s %d" % [k, int(grid.step_ms[k])]
+	print("Время: семена и заполнение ", Time.get_ticks_msec() - started,
+		" мс", parts)
 
 
 # Кусок, которому принадлежит кубик решётки.
@@ -1629,6 +1630,25 @@ var toolbar_layer: CanvasLayer
 var toolbar_panel: PanelContainer
 
 
+# ОКНО ПЕРЕКРОИЛИ — ЖДЁМ, ПОКА ПЕРЕСТАНУТ ТЯНУТЬ. Пересобирать панель на каждом
+# кадре растягивания незачем: считаем от последнего изменения размера.
+func _on_window_resized() -> void:
+	if _resize_wait:
+		return
+	_resize_wait = true
+	get_tree().create_timer(0.4).timeout.connect(_refit_ui)
+
+
+# Отложенный вызов — тоже методом: пока тикает эта пауза, сцену могли перечитать
+# («новый остров»), и лямбда потащила бы за собой уже мёртвую сцену.
+func _refit_ui() -> void:
+	_resize_wait = false
+	ui_scale = _screen_ui_scale()
+	_clear_toolbar()
+	_setup_toolbar()
+	_fit_menu()
+
+
 func _fit_menu() -> void:
 	# Ужимаем шагами: множитель целый, и одного пересчёта хватает почти всегда,
 	# но запас на случай, если доля окажется совсем тесной.
@@ -1994,9 +2014,12 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		_save_garden()
 		_game_on = was
 		save_btn.text = " записано "
-		get_tree().create_timer(2.0).timeout.connect(func():
-			if is_instance_valid(save_btn):
-				save_btn.text = " сохранить "))
+		# ПОДПИСЬ ВОЗВРАЩАЕТ САМА КНОПКА (`set_text`), а не лямбда. Панель может
+		# пересобраться раньше срока — лямбда потащила бы за собой мёртвую
+		# кнопку и движок ругался бы в отладчик; у подписки на метод связь
+		# рвётся вместе с кнопкой, сама собой.
+		get_tree().create_timer(2.0).timeout.connect(
+			save_btn.set_text.bind(" сохранить ")))
 	row.add_child(save_btn)
 
 	# СНИМОК ЭКРАНА — отдельной кнопкой (решение пользователя 2026-09-01,
@@ -2008,9 +2031,8 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 	shot_btn.pressed.connect(func():
 		var mark: String = await _save_shot()
 		shot_btn.text = " %s " % mark
-		get_tree().create_timer(2.5).timeout.connect(func():
-			if is_instance_valid(shot_btn):
-				shot_btn.text = " снимок "))
+		get_tree().create_timer(2.5).timeout.connect(
+			shot_btn.set_text.bind(" снимок ")))
 	row.add_child(shot_btn)
 
 	# НАЧАТЬ ЗАНОВО. Стирает сохранённый сад и перечитывает сцену. Действие
@@ -2027,9 +2049,8 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		else:
 			armed[0] = now
 			rb.text = " точно? "
-			get_tree().create_timer(3.0).timeout.connect(func():
-				if is_instance_valid(rb):
-					rb.text = " заново "))
+			get_tree().create_timer(3.0).timeout.connect(
+				rb.set_text.bind(" заново ")))
 	row.add_child(rb)
 
 	var nb := _list_button(-1, true)
@@ -2043,9 +2064,8 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 		else:
 			armed_n[0] = now
 			nb.text = " точно? "
-			get_tree().create_timer(3.0).timeout.connect(func():
-				if is_instance_valid(nb):
-					nb.text = " новый остров "))
+			get_tree().create_timer(3.0).timeout.connect(
+				nb.set_text.bind(" новый остров ")))
 	row.add_child(nb)
 
 	# С ПАЛЬЦА НЕТ НИ ОТМЕНЫ, НИ НАКЛОНА: Ctrl+Z на стекле не нажать, а тангаж
@@ -2415,9 +2435,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					LIFT_LOW, LIFT_HIGH)
 			else:
 				var flat := _camera_flat_axes()
-				var scale := cur_zoom * MOUSE_PAN
+				var pan_k := cur_zoom * MOUSE_PAN
 				target_pivot += (-flat.right * event.relative.x
-					+ flat.forward * event.relative.y) * scale
+					+ flat.forward * event.relative.y) * pan_k
 	elif event is InputEventScreenTouch or event is InputEventScreenDrag:
 		_touch_input(event)
 	elif event is InputEventKey and event.pressed:
@@ -2560,8 +2580,8 @@ func _gesture_update() -> void:
 	# земля идёт ЗА пальцами, а не против них.
 	var shift: Vector2 = mid - _pinch_mid
 	var flat := _camera_flat_axes()
-	var scale: float = cur_zoom * TOUCH_PAN
-	target_pivot += (-flat.right * shift.x + flat.forward * shift.y) * scale
+	var pan_k: float = cur_zoom * TOUCH_PAN
+	target_pivot += (-flat.right * shift.x + flat.forward * shift.y) * pan_k
 
 	# Скручивание пары — поворот вокруг вертикали. Мёртвая зона тут не
 	# придирка: при панораме пальцы всегда чуть перекашиваются, и без неё
@@ -2707,12 +2727,12 @@ func _load_factor() -> float:
 
 
 func _selftest() -> void:
-	var load: float = _load_factor()
-	if load > LOAD_ALARM:
-		print("НАГРУЗКА ", snappedf(load, 0.01), "× — ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ.",
+	var busy: float = _load_factor()
+	if busy > LOAD_ALARM:
+		print("НАГРУЗКА ", snappedf(busy, 0.01), "× — ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ.",
 			" Машина занята чем-то ещё (редактор Godot? запущенная игра?)")
 	else:
-		print("Нагрузка машины: ", snappedf(load, 0.01), "× — замерам можно верить")
+		print("Нагрузка машины: ", snappedf(busy, 0.01), "× — замерам можно верить")
 
 	# ПОДОГНАНЫ ЛИ ТЕНИ ПОД ОСТРОВ (`_fit_shadow`). Саму резкость числом не
 	# померить — её судит кадр, — а вот ДАЛЬ, на которую тень растянута, померить
@@ -2932,6 +2952,7 @@ func _selftest() -> void:
 		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
 		for si in range(mesh.get_surface_count()):
 			var indexed: int = mesh.surface_get_array_index_len(si)
+			@warning_ignore("integer_division")
 			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
 	print("Растения: треугольников всего — ", tris, ", на растение — ",
 		snappedf(float(tris) / maxf(1.0, float(plants.patches.size())), 0.1),
@@ -3641,12 +3662,12 @@ func _scene_bench(args: PackedStringArray) -> void:
 	# НАГРУЗКА ПЕЧАТАЕТСЯ ПЕРВОЙ СТРОКОЙ, как и в самопроверке: стенд меряет
 	# СЕКУНДЫ, а секунды на занятой машине врут втрое. Без этой строки нельзя
 	# отличить подорожавшую обстановку от чужого процесса рядом.
-	var load: float = _load_factor()
-	if load > LOAD_ALARM:
-		print("НАГРУЗКА ", snappedf(load, 0.01), "× — ВРЕМЕНАМ НИЖЕ НЕ ВЕРИТЬ.",
+	var busy: float = _load_factor()
+	if busy > LOAD_ALARM:
+		print("НАГРУЗКА ", snappedf(busy, 0.01), "× — ВРЕМЕНАМ НИЖЕ НЕ ВЕРИТЬ.",
 			" Машина занята чем-то ещё (редактор Godot? запущенная игра?)")
 	else:
-		print("Нагрузка машины: ", snappedf(load, 0.01), "× — замерам можно верить")
+		print("Нагрузка машины: ", snappedf(busy, 0.01), "× — замерам можно верить")
 	var many: int = int(_arg_num(args, "--islands", 3.0))
 	var seed0: int = int(_arg_num(args, "--seed", float(WORLD_SEED + 1)))
 	scene_id = "rocks"
@@ -3677,6 +3698,7 @@ func _scene_bench(args: PackedStringArray) -> void:
 				high = grid.seeds[c]
 		if high != Vector3.ZERO:
 			_stone_surface_check(high, 5.0)
+	@warning_ignore("integer_division")
 	print("Стенд острова: ", many, " островов, обстановка в среднем ",
 		total / maxi(1, many), " мс — к ней прибавьте семена и достройку выше,",
 		" их платит всякий «новый остров»")
@@ -3748,6 +3770,7 @@ func _relief_report() -> void:
 			continue
 		runs.append(0.5 * RELIEF_STEP / dy)
 	runs.sort()
+	@warning_ignore("integer_division")
 	print("Земля: столбцов ", ys.size(), ", высота от ", snappedf(sorted[0], 0.01),
 		" до ", snappedf(sorted[sorted.size() - 1], 0.01), " м при средней ",
 		snappedf(mid, 0.01), "; выше средней на полметра — ",
@@ -4307,6 +4330,7 @@ func _scene_ridge(rng: RandomNumberGenerator, at: Vector3, hollow: bool) -> void
 		head = ground + Vector3(cos(dir), 0.0, sin(dir)) * rng.randf_range(1.15, 1.7)
 	if not hollow or spine.size() < 2:
 		return
+	@warning_ignore("integer_division")
 	var mid: Vector3 = spine[spine.size() / 2]
 	if rng.randf() < 0.5:
 		# АРКА: проём выедается насквозь у подножия, двумя ударами в одно
@@ -4595,10 +4619,10 @@ func _stroke_spread_report() -> void:
 		" радиуса) — по разглаженной работают складки, трещины и швы")
 
 
-func _arg_num(args: PackedStringArray, name: String, fallback: float) -> float:
+func _arg_num(args: PackedStringArray, key: String, fallback: float) -> float:
 	for a in args:
-		if a.begins_with(name + "="):
-			var tail: String = a.substr(name.length() + 1)
+		if a.begins_with(key + "="):
+			var tail: String = a.substr(key.length() + 1)
 			if tail.is_valid_float():
 				return tail.to_float()
 	return fallback
@@ -4606,10 +4630,10 @@ func _arg_num(args: PackedStringArray, name: String, fallback: float) -> float:
 
 # То же для слова, а не числа: `--scene=rocks`. Незнакомое имя не молчит —
 # иначе опечатка в ключе тихо давала бы сцену по умолчанию.
-func _arg_word(args: PackedStringArray, name: String, fallback: String) -> String:
+func _arg_word(args: PackedStringArray, key: String, fallback: String) -> String:
 	for a in args:
-		if a.begins_with(name + "="):
-			var tail: String = a.substr(name.length() + 1)
+		if a.begins_with(key + "="):
+			var tail: String = a.substr(key.length() + 1)
 			for s in SCENES:
 				if String(s["id"]) == tail:
 					return tail
@@ -4638,6 +4662,7 @@ func _rock_cavity_report(reach: float) -> void:
 		print("Впадина на камне: мерить нечего")
 		return
 	vals.sort()
+	@warning_ignore("integer_division")
 	print("Впадина на камне: мест ", vals.size(), ", середина ",
 		snappedf(vals[vals.size() / 2], 0.001), ", девять из десяти до ",
 		snappedf(vals[int(vals.size() * 0.9)], 0.001), ", наибольшая ",
@@ -4672,6 +4697,7 @@ func _turf_cavity_report(turf: PackedFloat32Array) -> void:
 			dim += 1
 		if v > 0.30:
 			dark += 1
+	@warning_ignore("integer_division")
 	print("Впадина у подошвы (земля, не камень): мест ", turf.size(),
 		", середина ", snappedf(turf[turf.size() / 2], 0.001),
 		", наибольшая ", snappedf(turf[turf.size() - 1], 0.001),
@@ -5050,6 +5076,7 @@ func _vine_bench() -> void:
 					snappedf(rad_to_deg(came.angle_to(Vector3(p["nrm"]))), 1.0),
 					"° к нормали земли — 90° это вдоль земли, 0° прямо от неё")
 	got.sort()
+	@warning_ignore("integer_division")
 	print("Стенд лианы: середина ", got[got.size() / 2], ", от ", got[0],
 		" до ", got[got.size() - 1])
 	get_tree().quit()
@@ -5182,6 +5209,7 @@ func _vine_grown_check() -> void:
 		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
 		for si in range(mesh.get_surface_count()):
 			var indexed: int = mesh.surface_get_array_index_len(si)
+			@warning_ignore("integer_division")
 			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
 	print("Лиана взрослая: треугольников — ", tris, ", то есть ",
 		snappedf(float(tris) / links, 0.1), " на звено")
@@ -5754,6 +5782,98 @@ func _poppy_check() -> void:
 		" мм. Первое — как встал бы лепесток без всякой проверки, второе — как",
 		" встал на деле; ниже нуля значит, что он всё же вошёл в стебель, лист",
 		" или чужую головку")
+	# ПРОХОДЯТ ЛИ СТЕБЛИ СКВОЗЬ ДРУГ ДРУГА — её слово 09.09.2026 («подтяни
+	# проверку от лозы»). Считаем по живым кустам: сколько пар стеблей сошлось
+	# ближе суммы толщин и насколько глубоко зашла худшая пара.
+	var cross_n := 0
+	var cross_seen := 0
+	var cross_deep := 0.0
+	for pid3 in plants.patches:
+		var pt3: Dictionary = plants.patches[pid3]
+		if String(pt3["id"]) != "poppy":
+			continue
+		var seat3: Vector3 = pt3["pos"]
+		var nrm3: Vector3 = pt3["nrm"]
+		var s3: Vector3 = nrm3.cross(Vector3.RIGHT)
+		if s3.length_squared() < 0.000001:
+			s3 = nrm3.cross(Vector3.UP)
+		s3 = s3.normalized()
+		var many3: int = plants.poppy_stems(pt3, card)
+		var paths3: Array = plants.poppy_bush_paths(pt3, card, many3, seat3,
+			nrm3, s3, nrm3.cross(s3).normalized(),
+			float(pt3.get("bulk", 1.0)))
+		for i3 in range(paths3.size()):
+			var mine3: Dictionary = paths3[i3]
+			var before: Array = []
+			for j3 in range(i3):
+				before.append(paths3[j3])
+			if before.is_empty():
+				continue
+			cross_seen += 1
+			var g3: float = plants._poppy_stem_gap(mine3, before, card)
+			if g3 < 0.0:
+				cross_n += 1
+				cross_deep = minf(cross_deep, g3)
+	print("Мак: стебли сквозь стебли — задевают ", cross_n, " пар из ",
+		cross_seen, ", худшая зашла на ", snappedf(-cross_deep * 1000.0, 0.1),
+		" мм. Ноль был бы недостижим: полтора десятка стеблей растут из ОДНОЙ",
+		" точки, и вплотную они стоят по построению")
+	# БУТОН: РАЗМЕР И РАСКОЛ ПО СТУПЕНЯМ — её слово 08.09.2026 («втрое больше, на
+	# 3-4 стадиях разделяются ровно пополам, обнажая красные лепестки внутри»).
+	var bud_l: float = float(card.get("bud_long", 0.0))
+	var bud_w: float = float(card.get("bud_wide", 0.0))
+	var split_line := ""
+	for st_b in range(plants.STAGES):
+		var mb: float = (float(st_b) + 0.5) / float(plants.STAGES)
+		var sp_b: float = smoothstep(0.0, 1.0, clampf(
+			(mb - float(card.get("bud_split_from", 0.0)))
+			/ maxf(float(card.get("bud_split_to", 1.0))
+			- float(card.get("bud_split_from", 0.0)), 0.001), 0.0, 1.0))
+		split_line += ("%d:%s" % [st_b + 1, str(snappedf(sp_b, 0.01))])
+		if st_b < plants.STAGES - 1:
+			split_line += "  "
+	# РАЗМЕР БУТОНА ПО СТУПЕНЯМ — её жалоба 09.09.2026: «бутоны всегда одного
+	# размера». На первой ступени обязан быть НОЛЬ, а не крошечный бутон.
+	var grow_line := ""
+	for st_c in range(plants.STAGES):
+		var mc: float = (float(st_c) + 0.5) / float(plants.STAGES)
+		var lc: float = bud_l * plants.poppy_grow(card, mc) \
+			* plants.poppy_bud_out(card, mc)
+		grow_line += ("%d:%s" % [st_c + 1, str(snappedf(lc * 100.0, 0.1))])
+		if st_c < plants.STAGES - 1:
+			grow_line += "  "
+	print("Мак: бутон — взрослый ", snappedf(bud_l * 100.0, 0.1), "×",
+		snappedf(bud_w * 100.0, 0.1), " см; длина по ступеням, см — ", grow_line,
+		"; раскол по ступеням — ", split_line, "; цветком становится с ",
+		snappedf(float(card.get("open_at", 0.6)) * float(plants.STAGES), 0.1),
+		"-й ступени — раскол обязан к ней ЗАВЕРШИТЬСЯ, иначе вторая его половина",
+		" не видна никогда")
+	#   1. красное тело не больше девяти десятых бутона;
+	#   2. то, что встаёт на его место (створки, а потом цветок), не меньше
+	#      самого бутона.
+	#
+	# Первое проверяем на каждой доле раскола: зелёное тело отступает, и важно,
+	# чтобы красное не вылезло у него ИЗ БОКОВ — это и был её кадр с красным
+	# кубиком.
+	var red_out := -9.9
+	var red_at := 0.0
+	for st_d in range(21):
+		var sp_d: float = float(st_d) / 20.0
+		var green_w: float = bud_w * lerpf(1.0, 0.93, sp_d)
+		var gap_w: float = green_w - bud_w * 0.90
+		if sp_d > 0.02 and -gap_w > red_out:
+			red_out = -gap_w
+			red_at = sp_d
+	var shut_head: float = float(card.get("head_long", 0.0)) \
+		* float(card.get("head_shut", 0.55))
+	print("Мак: правила размеров — красное тело шире зелёного на ",
+		snappedf(red_out * 1000.0, 0.1), " мм в худшем месте (раскол ",
+		snappedf(red_at, 0.01), "), выше нуля значило бы, что оно вылезает",
+		" боками; цветок на месте бутона — ",
+		snappedf(shut_head * 100.0, 0.1), " см против бутона ",
+		snappedf(bud_l * 100.0, 0.1), " см, то есть ",
+		snappedf((shut_head - bud_l) * 100.0, 0.1),
+		" см запаса — ниже нуля значит, что цветок мельче бутона")
 	# ВЫХОДИТ ЛИ СТЕБЕЛЬ ИЗ ЗЕМЛИ, А НЕ ПОЯВЛЯЕТСЯ ГОТОВЫМ — её слово 08.09.2026.
 	# Печатаем длину по ступеням: на первых трёх она обязана НАБИРАТЬСЯ, а не
 	# стоять почти взрослой.
@@ -5781,6 +5901,124 @@ func _poppy_check() -> void:
 		" см, то есть голого ", snappedf(float(st_of["bare"]) / maxf(leaf_m,
 		0.0001) * 100.0, 0.1), "% длины листа — ноль значил бы, что лист сидит",
 		" прямо на стебле")
+	# УПИРАЕТСЯ ЛИ ЧЕРЕШОК В ПЛАСТИНУ, А НЕ В ПУСТОТУ. Её жалоба 08.09.2026:
+	# «лист НЕ сидит на конце черешка, он сидит ниже него».
+	#
+	# ГЕОМЕТРИЯ ТУТ БЫЛА ВЕРНА, А БЕДА НАСТОЯЩАЯ. Дощечка листа начинается ровно
+	# на черешке, но КАРТИНКА на ней у основания сходила на нить: полторы точки
+	# из тридцати двух. Видно её там не было, и конец трубочки приходился в
+	# пустоту — глазом это и читается «лист ниже черешка».
+	#
+	# Поэтому меряем не дощечку, а САМУ КАРТИНКУ: с какой доли длины лист
+	# набирает половину своей ширины, и попадает ли туда конец черешка.
+	var sheet_img: Image = plants._blade_texture().get_image()
+	if sheet_img.is_compressed():
+		sheet_img.decompress()
+	if sheet_img.get_format() != Image.FORMAT_RGBA8:
+		sheet_img.convert(Image.FORMAT_RGBA8)
+	var t_px: int = plants.TILE
+	var col_x: int = plants.POPPY_LEAF_COL * t_px
+	var row_y: int = (plants.STAGES - 1) * t_px
+	var wide_of := PackedInt32Array()
+	var most := 0
+	for yy in range(t_px):
+		var w_here := 0
+		for xx in range(t_px):
+			if sheet_img.get_pixel(col_x + xx, row_y + yy).a > 0.5:
+				w_here += 1
+		wide_of.append(w_here)
+		most = maxi(most, w_here)
+	# Снизу вверх: низ клетки — основание листа.
+	var half_at := 1.0
+	for yy in range(t_px - 1, -1, -1):
+		if wide_of[yy] * 2 >= most:
+			half_at = float(t_px - 1 - yy) / float(t_px - 1)
+			break
+	# РАЗНЫЕ ЛИ КАРТИНКИ У РАЗНЫХ СТУПЕНЕЙ — её просьба 09.09.2026: «проверь, что
+	# у листьев есть стадии роста и что у разных стадий роста разные текстуры».
+	#
+	# Проверять это НУЖНО, и вот почему: ступени рисуются одной формулой с
+	# долей возраста, и стоит этой доле никуда не входить — все девять клеток
+	# выйдут одинаковыми, а заметить это можно только глазом. Считаем прямо:
+	# сколько точек различается у соседних ступеней и сколько занято в каждой.
+	for col_pair in [[plants.POPPY_LEAF_COL, "лист"],
+			[plants.POPPY_PETAL_COL, "лепесток"]]:
+		var cx: int = int(col_pair[0]) * t_px
+		var same_worst := 999999
+		var fill_low := 999999
+		var fill_high := 0
+		for s_k in range(plants.STAGES):
+			var fill_k := 0
+			for yy in range(t_px):
+				for xx in range(t_px):
+					if sheet_img.get_pixel(cx + xx, s_k * t_px + yy).a > 0.5:
+						fill_k += 1
+			fill_low = mini(fill_low, fill_k)
+			fill_high = maxi(fill_high, fill_k)
+			if s_k == 0:
+				continue
+			var off_k := 0
+			for yy in range(t_px):
+				for xx in range(t_px):
+					if sheet_img.get_pixel(cx + xx, s_k * t_px + yy) \
+							!= sheet_img.get_pixel(cx + xx,
+								(s_k - 1) * t_px + yy):
+						off_k += 1
+			same_worst = mini(same_worst, off_k)
+		print("Мак: ступени картинки «", String(col_pair[1]),
+			"» — у соседних ступеней различается не меньше ", same_worst,
+			" точек из ", t_px * t_px, "; занято от ", fill_low, " до ",
+			fill_high, " точек. Ноль различий значил бы, что ступени",
+			" одинаковые, а равная занятость — что лист не растёт")
+	# Ширина картинки у самого основания — в долях самой широкой её части.
+	var foot_wide: float = float(wide_of[t_px - 1]) / maxf(1.0, float(most))
+	print("Мак: пластина у основания — ", snappedf(foot_wide * 100.0, 0.1),
+		"% своей полной ширины, половину набирает на ",
+		snappedf(leaf_m * half_at * 100.0, 0.1),
+		" см; чем шире основание, тем честнее лист садится на трубочку")
+	# ГДЕ ПЛАСТИНА НАЧИНАЕТСЯ ОТНОСИТЕЛЬНО КОНЦА ЧЕРЕШКА — её слово 09.09.2026:
+	# «обвела красным КОНЧИК черешка, к которому должен крепиться лист».
+	#
+	# ЗНАК ЗДЕСЬ БЫЛ ПЕРЕВЁРНУТ, и это стоило целого дня. Мерка печатала
+	# «запас 0.7 см» там, где на деле было −0.7, — то есть докладывала «сделано»
+	# ровно тогда, когда сделано не было. Её жалоба повторилась третий раз, а я
+	# верил числу. ЗНАК У НОВОЙ МЕРКИ ПРОВЕРЕН РУКАМИ: `lap` больше нуля значит
+	# перекрытие, и перекрытие — это хорошо.
+	# ОДИНАКОВО ЛИ ОКРАШЕНЫ ЛЕПЕСТОК И КРАСНОЕ ТЕЛО В БУТОНЕ — её кадр 09.09.2026,
+	# вечер: «тело внутри бутона слишком яркое и светлое по сравнению с
+	# лепестками».
+	#
+	# ЦВЕТ У НИХ ОДИН И ТОТ ЖЕ ЧИСЛОМ (обе головки зовут `poppy_paint` по одной
+	# соли), а на кадре они разные — и вот почему. Лепесток идёт КАРТИНКОЙ:
+	# краска умножается на её яркость, а у картинки есть и складки, и тёмное
+	# пятно у основания. Тело бутона картинки не имеет вовсе и берёт краску в
+	# полную силу. Значит равнять их надо не по краске, а по ТОМУ, ЧТО ВЫХОДИТ.
+	var sum_tone := 0.0
+	var seen_tone := 0
+	var pcol: int = plants.POPPY_PETAL_COL * t_px
+	var prow: int = (plants.STAGES - 1) * t_px
+	for yy in range(t_px):
+		for xx in range(t_px):
+			var px: Color = sheet_img.get_pixel(pcol + xx, prow + yy)
+			if px.a <= 0.5:
+				continue
+			sum_tone += (px.r + px.g + px.b) / 3.0
+			seen_tone += 1
+	var petal_tone: float = sum_tone / maxf(1.0, float(seen_tone))
+	var bud_dim: float = plants.petal_tone
+	print("Мак: лепесток против тела в бутоне — картинка лепестка гасит краску",
+		" до ", snappedf(petal_tone, 0.001), ", тело бутона взято с ",
+		snappedf(bud_dim, 0.001), "; разница ",
+		snappedf((bud_dim - petal_tone) * 255.0, 0.1),
+		" ступени из 255. Ноль значит, что в кадре они одного цвета")
+	# ЕЁ ДВА ПРАВИЛА ПРО РАЗМЕРЫ У БУТОНА — числом, а не на слово.
+	#
+	print("Мак: пластина против конца черешка — начинается за ",
+		snappedf(float(st_of["lap"]) * 100.0, 0.1), " см ДО его конца, то есть",
+		" на ", snappedf(float(st_of["bare"]) / maxf(float(st_of["stalk"]),
+		0.0001) * 100.0, 0.1), "% его длины. Ноль значил бы стык впритык (и",
+		" щель между телом и картинкой), а вся длина — что лист сидит на",
+		" основании, а не на конце")
 	# РАЗБРОС ЦВЕТА ПО КУРТИНЕ — её кадр 08.09.2026: «сейчас они все одного
 	# цвета». Мерки не было вовсе, оттого и не видно было, что жребий почти не
 	# расходится.
@@ -5952,12 +6190,22 @@ func _poppy_check() -> void:
 		" мм при длине ", snappedf(float(cup_plan["head"]) * 1000.0, 0.1),
 		" мм — оба числа положительны только у чаши: ноль внизу это доска,",
 		" ноль вверху это зонтик")
-	print("Мак: лепестки под головкой — самый малый просвет ",
-		snappedf(tight * 1000.0, 0.1), " мм, при раскрытии ",
-		snappedf(tight_at, 0.1),
-		"; меряется от низа тёмного тела до самой высокой точки лепестка внутри",
-		" кольца тычинок, и ниже нуля значило бы, что лепесток растёт СКВОЗЬ",
-		" головку, а не под ней")
+	# ПУСТО — ЭТО НЕ ОШИБКА, А ОТВЕТ. С 09.09.2026 кольцо тычинок сдвинуто к
+	# середине (0.9 ширины тела вместо 1.5), а донца лепестков сидят на краю
+	# чашечки — то есть ЗА кольцом. Ни одна точка лепестка внутрь кольца больше
+	# не попадает, и мерить нечего: расти сквозь головку лепестку неоткуда.
+	# Печатать при этом сторожевое число было бы враньём.
+	if tight > 90.0:
+		print("Мак: лепестки под головкой — внутрь кольца тычинок не заходит ни",
+			" один лепесток вовсе: донца сидят на краю чашечки, а кольцо ушло к",
+			" середине. Расти сквозь головку неоткуда")
+	else:
+		print("Мак: лепестки под головкой — самый малый просвет ",
+			snappedf(tight * 1000.0, 0.1), " мм, при раскрытии ",
+			snappedf(tight_at, 0.1),
+			"; меряется от низа тёмного тела до самой высокой точки лепестка",
+			" внутри кольца тычинок, и ниже нуля значило бы, что лепесток",
+			" растёт СКВОЗЬ головку, а не под ней")
 	print("Мак: до ближайшего соседа — в среднем ",
 		snappedf(near_sum / maxf(1.0, float(near_n)) * 100.0, 0.1),
 		" см, самое тесное ", snappedf(near_min * 100.0, 0.1),
@@ -5972,6 +6220,7 @@ func _poppy_check() -> void:
 		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
 		for si in range(mesh.get_surface_count()):
 			var indexed: int = mesh.surface_get_array_index_len(si)
+			@warning_ignore("integer_division")
 			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
 	print("Мак: треугольников — ", tris, ", то есть ",
 		snappedf(float(tris) / maxf(1.0, float(bushes)), 0.1), " на куст и ",
@@ -5997,6 +6246,7 @@ func _solo_grow(id: String, ticks: int) -> Vector2i:
 		var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
 		for si in range(mesh.get_surface_count()):
 			var indexed: int = mesh.surface_get_array_index_len(si)
+			@warning_ignore("integer_division")
 			tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
 	return Vector2i(_plant_count(id), tris)
 
@@ -6130,9 +6380,9 @@ func _show_bench(args: PackedStringArray) -> void:
 	# СТОРОЖ НАГРУЗКИ ПЕРВОЙ СТРОКОЙ — как и в самопроверке. Стенд весь про
 	# миллисекунды, а машина у неё бывает занята редактором: без этого числа два
 	# прогона сравнивать нельзя вовсе.
-	var load: float = _load_factor()
-	print("Нагрузка машины: ", snappedf(load, 0.01),
-		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if load > LOAD_ALARM
+	var busy: float = _load_factor()
+	print("Нагрузка машины: ", snappedf(busy, 0.01),
+		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if busy > LOAD_ALARM
 			else "замерам можно верить"))
 	var secs: float = _arg_num(args, "--secs", 45.0)
 	plants._rng.seed = 20260904
@@ -6207,9 +6457,9 @@ func _show_bench(args: PackedStringArray) -> void:
 # остров 32 м поперёк, то есть это неспешное движение секунд на пятнадцать
 # через весь мир. Число условное, и потому вынесено в ключ.
 func _dab_bench(args: PackedStringArray) -> void:
-	var load: float = _load_factor()
-	print("Нагрузка машины: ", snappedf(load, 0.01),
-		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if load > LOAD_ALARM
+	var busy: float = _load_factor()
+	print("Нагрузка машины: ", snappedf(busy, 0.01),
+		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if busy > LOAD_ALARM
 			else "замерам можно верить"))
 	var speed: float = _arg_num(args, "--speed", 2.0)
 	var secs: float = _arg_num(args, "--secs", 2.0)
