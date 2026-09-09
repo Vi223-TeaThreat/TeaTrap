@@ -15,6 +15,7 @@ const SpacePlantsScript = preload("res://SpacePlants.gd")
 const SpacePropsScript = preload("res://SpaceProps.gd")
 const SurfaceScript = preload("res://Surface.gd")
 const PlantsData = preload("res://Plants.gd")
+const VersionData = preload("res://Version.gd")
 
 # --- Параметры мира ---
 # Радиус острова ОБЫЧНЫЙ; настоящий живёт в `island_radius` и меняется ключом
@@ -2288,6 +2289,28 @@ func _setup_hint() -> void:
 	fill_label.add_theme_color_override("font_outline_color", Color.BLACK)
 	fill_label.add_theme_constant_override("outline_size", 4)
 	layer.add_child(fill_label)
+
+	# НОМЕР СБОРКИ — в свободном правом верхнем углу. Он растёт с каждым
+	# коммитом сам (`Version.gd` пишет хук `.githooks/pre-commit`), поэтому по
+	# любому кадру видно, какая именно правка на нём, — и в демке тоже.
+	# Приглушён нарочно: нужен он ровно тогда, когда его ищут глазами.
+	var build := Label.new()
+	build.text = "сборка %d · %s" % [VersionData.NUMBER, VersionData.DATE]
+	build.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
+	build.add_theme_color_override("font_color", Color(1, 1, 1, 0.55))
+	build.add_theme_color_override("font_outline_color", Color.BLACK)
+	build.add_theme_constant_override("outline_size", 4)
+	# Держится ПРАВОГО КРАЯ, а не своей ширины: ширина надписи известна только
+	# после первой отрисовки, и считать место от неё значило бы на один кадр
+	# показать её уехавшей за край.
+	build.anchor_left = 1.0
+	build.anchor_right = 1.0
+	build.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	build.offset_left = -600 * hint_px
+	build.offset_right = -16 * hint_px
+	build.offset_top = 16 * hint_px
+	build.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	layer.add_child(build)
 
 
 # --- Ввод --------------------------------------------------------------------
