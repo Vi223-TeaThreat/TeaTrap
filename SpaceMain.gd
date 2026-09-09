@@ -5684,6 +5684,8 @@ func _poppy_check() -> void:
 	# переходом мака на куст (06.09.2026) это стало важно вдвойне: у каждого
 	# стебля свой возраст и свой жребий, и посчитай проверка по кусту — она
 	# докладывала бы про сад, которого не видно на кадре.
+	var gens: Array = [0, 0, 0, 0]   # сколько побегов первого, второго, третьего и дальше
+	var gen_top := 1
 	var bushes := 0
 	for pid in plants.patches:
 		var p: Dictionary = plants.patches[pid]
@@ -5693,6 +5695,14 @@ func _poppy_check() -> void:
 		steep = minf(steep, float(Vector3(p["nrm"]).y))
 		var many: int = plants.poppy_stems(p, card)
 		n += many
+		# ПОКОЛЕНИЯ ПОБЕГОВ — её правило 09.09.2026: не больше трёх, и в основном
+		# второе. Дерево спрашиваем У САМОЙ СБОРКИ (`poppy_stem_tree`), а не
+		# пересчитываем здесь: разойдись они — проверка докладывала бы про куст,
+		# которого на кадре нет.
+		for node in plants.poppy_stem_tree(p, card, many):
+			var g: int = clampi(int(node["gen"]), 1, 9)
+			gens[mini(g, 4) - 1] += 1
+			gen_top = maxi(gen_top, g)
 		for s in range(many):
 			var mine: float = plants.poppy_stem_m(p, card, s, many)
 			# РАЗМЕР БЕРЁМ У САМОЙ СБОРКИ (`poppy_grow`), а не переписываем
@@ -5727,6 +5737,11 @@ func _poppy_check() -> void:
 		snappedf(float(card["stem_high"]) * 100.0, 0.1),
 		" см, и она для среднего размера: у самых крупных он до полутора раз",
 		" больше, у мелких меньше")
+	print("Мак: поколения побегов — из земли ", gens[0], ", вторых ", gens[1],
+		", третьих ", gens[2], ", дальше третьего ", gens[3],
+		"; самое дальнее поколение ", gen_top,
+		" — её правило: не больше трёх, и в основном второе. Четвёртого не",
+		" бывает по построению, а не по проверке: третьему садиться уже не на что")
 	# ЧЕСТНА ЛИ САМА ЖЕРЕБЬЁВКА, А НЕ ТОЛЬКО ЭТА КУРТИНА. На полусотне стеблей
 	# доля гуляет и без всякой поломки, и по одной куртине невезение от кривого
 	# хеша не отличить. Поэтому гоняем ту же мерку по десяти тысячам солей,
@@ -5780,7 +5795,8 @@ func _poppy_check() -> void:
 				Vector3.UP, Vector3.RIGHT, long,
 				float(card.get("petal_bend", 0.22)), lean,
 				deg_to_rad(float(card.get("petal_dip", -1.0))),
-				float(card.get("petal_curl", 0.5)))
+				float(card.get("petal_curl", 0.5)),
+				deg_to_rad(float(card.get("petal_flare", 0.0))))
 			var pts: Array = line["pts"]
 			for i in range(pts.size() - 1):
 				for t in range(9):
@@ -6202,7 +6218,8 @@ func _poppy_check() -> void:
 		float(card.get("petal_bend", 0.22)),
 		deg_to_rad(float(card.get("petal_open", 74.0))),
 		deg_to_rad(float(card.get("petal_dip", -1.0))),
-		float(card.get("petal_curl", 0.5)))
+		float(card.get("petal_curl", 0.5)),
+		deg_to_rad(float(card.get("petal_flare", 0.0))))
 	var cup_low := 0.0
 	for at in cup_line["pts"]:
 		cup_low = minf(cup_low, Vector3(at).y)

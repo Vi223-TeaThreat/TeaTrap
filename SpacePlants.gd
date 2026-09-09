@@ -2144,7 +2144,21 @@ const POPPY_DODGE_FROM: int = 2
 func poppy_bush_paths(p: Dictionary, def: Dictionary, many: int, base: Vector3,
 		up: Vector3, side: Vector3, fore: Vector3, bulk: float) -> Array:
 	var out: Array = []
+	# КТО ИЗ КОГО РАСТЁТ — считается один раз на куст. Родитель всегда стоит
+	# раньше своего побега, поэтому его путь к этому мигу уже в `out`.
+	var tree: Array = poppy_stem_tree(p, def, many)
 	for s in range(many):
+		var node: Dictionary = tree[s]
+		var from: Dictionary = {"gen": int(node["gen"])}
+		var parent: int = int(node["parent"])
+		if parent >= 0 and parent < out.size():
+			var his: PackedVector3Array = out[parent]["path"]
+			# МЕСТО ПОСАДКИ — узел родителя, а не точка между узлами: побег
+			# обязан начинаться ровно на трубке, иначе между ним и родителем
+			# зияет щель — те же грабли, что были со звеньями стебля.
+			var at_k: int = clampi(int(round(float(node["at"])
+				* float(his.size() - 1))), 1, his.size() - 2)
+			from["at"] = his[at_k]
 		var best: Dictionary = {}
 		var best_gap: float = -1.0e9
 		for try_i in range(POPPY_DODGE_TRIES):
@@ -2153,7 +2167,7 @@ func poppy_bush_paths(p: Dictionary, def: Dictionary, many: int, base: Vector3,
 				nudge = POPPY_DODGE_STEP * float((try_i + 1) / 2) \
 					* (1.0 if try_i % 2 == 1 else -1.0)
 			var got: Dictionary = poppy_stem_path(p, def, s, many, base, up,
-				side, fore, bulk, nudge)
+				side, fore, bulk, nudge, from)
 			var gap: float = _poppy_stem_gap(got, out, def)
 			if gap > best_gap:
 				best_gap = gap
@@ -2230,9 +2244,11 @@ func _poppy_blocks(p: Dictionary, def: Dictionary, paths: Array,
 		out.append({"a": top, "b": top, "r": hr, "stem": s})
 		# ЛИСТ — палка от черешка вдоль пластины. Ширину берём половинную: лист
 		# плоский, и лепесток чаще проходит вдоль него, а не поперёк.
-		var leaves: int = maxi(1, int(round(float(def.get("leaf_many", 3))
-			* clampf(float(plan_of["mine"]) * 1.35, 0.3, 1.0))))
-		var leaf_long: float = float(def.get("leaf_long", 0.1)) * bulk * mgrow
+		var leaf_of: Dictionary = poppy_leaves_of(def, float(plan_of["mine"]),
+			int(plan_of.get("gen", 1)))
+		var leaves: int = int(leaf_of["many"])
+		var leaf_long: float = float(def.get("leaf_long", 0.1)) * bulk * mgrow \
+			* float(leaf_of["size"])
 		var salt: int = int(plan_of["salt"])
 		var links: int = int(plan_of["links"])
 		for i in range(leaves):
@@ -2263,12 +2279,20 @@ func _poppy_blocks(p: Dictionary, def: Dictionary, paths: Array,
 # кончается верхушка (бутон, коробочка или цветок).
 func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 		base: Vector3, up: Vector3, side: Vector3, fore: Vector3,
-		bulk: float, nudge: float = 0.0) -> Dictionary:
+		bulk: float, nudge: float = 0.0, from: Dictionary = {}) -> Dictionary:
 	var salt: int = poppy_stem_salt(int(p["salt"]), s)
 	var mine: float = poppy_stem_m(p, def, s, many)
 	var mgrow: float = poppy_grow(def, mine)
+	# ПОКОЛЕНИЕ ПОБЕГА и место, откуда он растёт, приходят готовыми: считает их
+	# `poppy_stem_tree`, одна на весь куст. Пусто — значит стебель из земли.
+	var gen: int = int(from.get("gen", 1))
 	var high: float = float(def.get("stem_high", 0.4)) * bulk * mgrow \
 		* (0.82 + 0.36 * _mix01(salt + 23)) * poppy_stem_out(def, mine)
+	# ПОБЕГ КОРОЧЕ ТОГО, ИЗ ЧЕГО ВЫШЕЛ, и каждое следующее поколение — ещё
+	# короче. Иначе побег с середины родителя перерастает его головку, и куст
+	# читается не ветвящимся, а сросшимся из двух.
+	if gen >= 2:
+		high *= pow(float(def.get("branch_short", 0.66)), float(gen - 1))
 
 	# КУДА КЛОНИТСЯ ЭТОТ СТЕБЕЛЬ. Стебли расходятся веером из одной точки —
 	# иначе куст читается пучком проводов.
@@ -2276,7 +2300,19 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 		+ (_mix01(salt + 31) - 0.5) * 1.1 + nudge
 	var away: Vector3 = (side * cos(turn) + fore * sin(turn)).normalized()
 	# Основания стеблей чуть разведены — из одной точки они бы срослись в столб.
+	var bend_k: float = 1.0
 	var foot: Vector3 = base + away * (high * float(def.get("stem_spread", 0.06)))
+	# ПОБЕГ НАЧИНАЕТСЯ НА РОДИТЕЛЕ, А НЕ В ЗЕМЛЕ, И ОТХОДИТ ОТ НЕГО ВБОК.
+	#
+	# Вбок — не для красоты: побег, растущий из середины стебля строго вверх,
+	# ведёт свою головку сквозь листья и цветок родителя. Замер это и показал —
+	# лепестки стали заходить в чужие стебли на 45 мм против прежних 36. Отводим
+	# основание на пару толщин стебля и клоним сильнее (`branch_lean`): у живого
+	# мака боковой побег и правда уходит в сторону, освобождая себе место.
+	if from.has("at"):
+		foot = Vector3(from["at"]) + away * (float(def.get("stem_foot", 0.005))
+			* mgrow * 2.5)
+		bend_k = float(def.get("branch_lean", 1.7))
 	# Поперёк наклона — по этой оси стебель и виляет (см. волну ниже).
 	var cross: Vector3 = up.cross(away)
 	if cross.length_squared() < 0.000001:
@@ -2296,7 +2332,7 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 	# Дуга собирается из звеньев: прямая палка мака не даёт вовсе, а у бутона
 	# верх и вовсе загнут крючком — он висит головой вниз, пока не раскроется.
 	var bend: float = float(def.get("stem_bend", 0.30)) \
-		* (0.5 + 1.0 * _mix01(salt + 37))
+		* (0.5 + 1.0 * _mix01(salt + 37)) * bend_k
 	# КРЮЧОК БУТОНА — самая узнаваемая повадка мака. Распрямляется перед самым
 	# раскрытием: к `open_at` от него не остаётся ничего.
 	# ЦВЕТОК СЛЕГКА КИВАЕТ — её решение 09.09.2026 по референсам: на фото стебель
@@ -2317,22 +2353,31 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 		hook = deg_to_rad(float(def.get("bud_hook", 95.0))) * (1.0 - ripe * ripe)
 	var links: int = maxi(int(def.get("stem_links", 6)), 2)
 	var path: PackedVector3Array = PackedVector3Array()
+	# ДВЕ ВОЛНЫ, А НЕ ОДНА, И ПО РАЗНЫМ ОСЯМ — её слово 09.09.2026: «мак гибкий и
+	# изгибающийся, у него не должно быть настолько длинных и прямых участков
+	# стеблей, как этот» (с обводкой на кадре).
+	#
+	# ЧТО БЫЛО НЕВЕРНО. Волна стояла ОДНА, с одним-двумя горбами и по ОДНОЙ оси:
+	# такой стебель гнётся в плоскости, и с любой другой стороны он ровно прямой.
+	# Плюс звеньев было пять на без малого метр — каждое по девятнадцать
+	# сантиметров прямой трубы, и обведён на кадре был именно такой отрезок.
+	#
+	# Теперь горбов два-три, и к ним прибавлена вторая волна — вчетверо мельче и
+	# по ПОПЕРЕЧНОЙ оси. Две волны по разным осям дают винт: прямого участка не
+	# остаётся ни с какой стороны. У земли обе погашены (`t`), чтобы стебель
+	# выходил отвесно.
+	var waves: float = 2.0 + floor(_mix01(salt + 613) * 2.0)   # два или три
+	var phase: float = _mix01(salt + 811) * TAU
+	var sway: float = float(def.get("stem_wave", 0.10)) \
+		* (0.45 + _mix01(salt + 727))
 	for k in range(links + 1):
 		var t: float = float(k) / float(links)
 		# Отклонение растёт квадратом — у земли стебель почти отвесен, кверху
 		# уходит вбок. Это и есть дуга, а не наклонная прямая.
 		var lean: Vector3 = away * (high * bend * t * t)
-		# У КАЖДОГО СТЕБЛЯ СВОЙ ИЗГИБ, И НЕ ОДИН (её слово 07.09.2026: «пусть у
-		# каждого стебля будет свой собственный изгиб или несколько изгибов»).
-		#
-		# Одной дуги мало: все стебли гнулись одинаково, только в разные стороны,
-		# и куст читался пучком одинаковых прутьев. Прибавляем ВОЛНУ — синус по
-		# длине стебля, у которого своя сторона, своя сила и своё число горбов.
-		# У земли она погашена (`t`), чтобы стебель выходил из земли отвесно.
-		var waves: float = 1.0 + floor(_mix01(salt + 613) * 2.0)   # один или два
-		var sway: float = float(def.get("stem_wave", 0.10)) \
-			* (0.45 + _mix01(salt + 727))
-		lean += cross * (high * sway * sin(t * PI * waves) * t)
+		lean += cross * (high * sway * sin(t * PI * waves + phase) * t)
+		lean += away * (high * sway * 0.38
+			* sin(t * PI * (waves + 1.7) + phase * 1.7) * t)
 		# Крючок гнёт ТОЛЬКО верхнюю треть: ниже стебель прям, как на снимках.
 		var curl: float = clampf((t - 0.62) / 0.38, 0.0, 1.0)
 		var drop: Vector3 = (away * sin(hook) - up * (1.0 - cos(hook))) \
@@ -2340,7 +2385,7 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 		path.append(foot + up * (high * t) + lean + drop)
 	return {"path": path, "salt": salt, "mine": mine, "mgrow": mgrow,
 		"high": high, "away": away, "cross": cross, "foot": foot,
-		"is_bud": is_bud, "is_pod": is_pod, "links": links}
+		"is_bud": is_bud, "is_pod": is_pod, "links": links, "gen": gen}
 
 func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		s: int, many: int, base: Vector3, up: Vector3, side: Vector3,
@@ -2354,6 +2399,7 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var links: int = int(plan_of["links"])
 	var is_bud: bool = bool(plan_of["is_bud"])
 	var is_pod: bool = bool(plan_of["is_pod"])
+	var gen: int = int(plan_of.get("gen", 1))
 	var open_at: float = float(def.get("open_at", 0.6))
 	var r_foot: float = float(def.get("stem_foot", 0.005)) * mgrow
 	var r_head: float = float(def.get("stem_thin", 0.0035)) * mgrow
@@ -2373,16 +2419,19 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 			ripe_s * ripe_s)
 	# ОДНИМ ТЕЛОМ, а не звено за звеном: разбор — у `_emit_tube`.
 	_emit_tube(st, path, r_foot, r_head, side, stem_at, stage)
+	# КРАПИНКИ — ГУЩЕ НА МОЛОДЫХ ПОБЕГАХ (её порядок 09.09.2026). Разбор — у
+	# `_emit_stem_specks`.
+	_emit_stem_specks(st, def, path, r_foot, r_head, gen, stem_at, stage)
 
 	# =========================================================================
 	#  ЛИСТЬЯ — НА НИЖНЕЙ ТРЕТИ
 	# =========================================================================
-	# ЛИСТЬЕВ СТАНОВИТСЯ БОЛЬШЕ С ВОЗРАСТОМ (её расписание 06.09.2026: на
-	# ступенях 4–6 «больше листьев»). Число в карточке — это сколько их у
-	# взрослого стебля; у молодого один-два.
-	var leaves: int = maxi(1, int(round(float(def.get("leaf_many", 3))
-		* clampf(mine * 1.35, 0.3, 1.0))))
-	var leaf_long: float = float(def.get("leaf_long", 0.1)) * bulk * mgrow
+	# ЛИСТЬЕВ И РАЗМЕРА ИХ — ПО ПОКОЛЕНИЮ ПОБЕГА (её правило 09.09.2026). Мерка
+	# одна на сборку и на проверку помех, разбор — у `poppy_leaves_of`.
+	var leaf_of: Dictionary = poppy_leaves_of(def, mine, gen)
+	var leaves: int = int(leaf_of["many"])
+	var leaf_long: float = float(def.get("leaf_long", 0.1)) * bulk * mgrow \
+		* float(leaf_of["size"])
 	var plan: Array = []
 	for i in range(leaves):
 		# Место по стеблю: от самого низа до трети высоты, вразнобой.
@@ -2450,10 +2499,11 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		_emit_poppy_bud(st, p, def, top, tip_dir, side, bulk, mgrow, mine,
 			salt, shade, stage, stem_c)
 	elif is_pod:
-		# КОРОБОЧКА — приземистая урна с венчиком-лучиками сверху (её третий
-		# кадр: сизые головки с сухой звёздочкой на макушке).
+		# КОРОБОЧКА — СЛЕГКА ПРИПЛЮСНУТЫЙ ШАР с подставкой и звёздочкой сверху
+		# (её слово 09.09.2026). Прежде это была пилюля из двух четырёхгранных
+		# трубок, и на кадре она читалась синим коробом.
 		var pw: float = float(def.get("pod_wide", 0.017)) * bulk
-		var pl: float = float(def.get("pod_long", 0.021)) * bulk
+		var squash: float = float(def.get("pod_squash", 0.82))
 		# САМЫЕ ЗРЕЛЫЕ КОРОБОЧКИ СИНЕЕ — её слово 08.09.2026.
 		#
 		# Так оно у мака и есть: молодая коробочка ещё травяная, а вызревшая
@@ -2468,10 +2518,13 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		var pod_c: Color = Color(def.get("pod_color", def["color"])).lerp(
 			Color(def.get("pod_color_ripe", def.get("pod_color", def["color"]))),
 			ripe * ripe) * shade
-		_emit_pill(st, top + tip_dir * (pl * 0.45), tip_dir, pl, pw,
-			pod_c, side, stage)
-		_emit_poppy_pod_crown(st, def, top, tip_dir, side, pl, pw, pod_c,
-			ripe, stage)
+		# Шар садится нижним полюсом на конец стебля, а не серединой: иначе
+		# половина коробочки уходит в стебель и она читается мельче.
+		var pod_mid: Vector3 = top + tip_dir * (pw * squash)
+		_emit_globe(st, pod_mid, tip_dir, pw, squash, pod_c, side, stage,
+			int(def.get("pod_sides", 8)), int(def.get("pod_rings", 5)))
+		_emit_poppy_pod_crown(st, def, pod_mid, tip_dir, side, pw, squash,
+			pod_c, ripe, stage)
 	else:
 		# РАМКА ЦВЕТКА — ОТ КОНЦА СТЕБЛЯ, А НЕ ОТ НОРМАЛИ ЗЕМЛИ. Её кадр
 		# 07.09.2026 с голубой пометкой: «лепестки должны сидеть на основании
@@ -2630,8 +2683,13 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var hw: float = float(plan["hw"])
 	if hw > 0.0002:
 		var heart: Color = Color(def.get("heart_color", Color(0.1, 0.1, 0.1)))
+		# ГРАНЕЙ У СЕРДЦЕВИНЫ СТОЛЬКО ЖЕ, СКОЛЬКО ЛУЧЕЙ У ЗВЁЗДОЧКИ, и это одно
+		# число на всё (её слово 09.09.2026: «не квадратная, а шестиугольная
+		# сердцевина»). У живого мака рубчик рыльца приходит ровно на грань
+		# завязи — разъедься эти два числа, лучи легли бы вразнобой по углам.
+		var rays: int = maxi(int(def.get("heart_rays", 6)), 3)
 		_emit_pill(st, seat + along * float(plan["heart_mid"]), along,
-			float(plan["heart_long"]), hw, heart * shade, side, stage)
+			float(plan["heart_long"]), hw, heart * shade, side, stage, rays)
 		# ЛУЧИСТЫЙ ДИСК НА МАКУШКЕ ЗАВЯЗИ — её решение 09.09.2026 по референсам.
 		#
 		# ЧТО БЫЛО НЕВЕРНО, И ЭТО НЕ ОТТЕНОК, А ПУТАНИЦА ТЕЛ. У живого мака
@@ -2639,22 +2697,24 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		# чёрное кольцо — это ТЫЧИНКИ ВОКРУГ НЕЁ. Мы же красили в почти чёрный
 		# саму завязь, то есть не то тело: на кадре выходил чёрный кубик в
 		# середине вместо зелёной подушечки с лучами.
-		#
-		# Диск — та же шайба, что у коробочки, только меньше; лучи считаем по
-		# `heart_rays`. Их немного нарочно: на кадре звёздочка размером с ноготь,
-		# и каждый лишний луч это восемь треугольников на КАЖДЫЙ цветок.
 		var top_at: Vector3 = seat + along * (float(plan["heart_mid"])
 			+ float(plan["heart_long"]) * 0.42)
 		var disc_c: Color = heart.darkened(0.22) * shade
-		_emit_twig(st, top_at, top_at + along * (hw * 0.16),
-			hw * 0.92, hw * 0.66, side, disc_c, stage)
-		var rays: int = int(def.get("heart_rays", 0))
+		var disc_h: float = hw * 0.16
+		_emit_twig(st, top_at, top_at + along * disc_h,
+			hw * 0.92, hw * 0.66, side, disc_c, stage, rays)
+		# ЛУЧИ УТОПЛЕНЫ В СЕРДЦЕВИНУ НА СВОЙ РАДИУС — её слово 09.09.2026:
+		# «углуби в неё эти звёздочки из трубок на глубину радиуса этих же
+		# трубок». Прежде трубочки лежали ПОВЕРХ макушки и читались наклеенными
+		# палочками; опущенные на радиус, они вровень с площадкой — видна
+		# бороздка, а не палка.
+		var ray_r: float = hw * 0.10
 		for i in range(rays):
 			var a: float = TAU * float(i) / float(rays) + spin
 			var out: Vector3 = (turn_a * cos(a) + turn_b * sin(a)).normalized()
-			var ray_at: Vector3 = top_at + along * (hw * 0.16)
+			var ray_at: Vector3 = top_at + along * (disc_h - ray_r)
 			_emit_twig(st, ray_at, ray_at + out * (hw * 0.86)
-				- along * (hw * 0.05), hw * 0.10, hw * 0.05, along,
+				- along * (hw * 0.05), ray_r, ray_r * 0.5, along,
 				disc_c, stage)
 
 	# БУБЛИК ТЫЧИНОК ВОКРУГ НЕГО. Каждая — короткая тонкая трубочка, наклонённая
@@ -2760,6 +2820,79 @@ func poppy_stems(p: Dictionary, def: Dictionary) -> int:
 
 func poppy_stem_salt(salt: int, s: int) -> int:
 	return salt + s * 7919
+
+
+# КТО ИЗ КАКОГО ПОБЕГА РАСТЁТ — ОДНО ДЕРЕВО НА СБОРКУ И НА ПРОВЕРКУ.
+#
+# ЕЁ ПРАВИЛО 09.09.2026: «его стебли могут ветвиться, но не более 3 раз
+# (поколений побегов не должно быть больше 3, а в основном 2)».
+#
+# ЧТО БЫЛО. Все стебли куста росли ИЗ ОДНОЙ ТОЧКИ — семь-двенадцать прутьев
+# веером из земли. На кадре это и читалось пучком: у живого мака цветонос
+# ветвится, и вторая головка сидит НА стебле первой, а не рядом с ней.
+#
+# УСТРОЙСТВО. Стебли пронумерованы так, что родитель всегда стоит РАНЬШЕ своего
+# побега, — иначе побегу не на что сесть: путь родителя к тому мигу ещё не
+# посчитан. Первые `roots` номеров растут из земли (поколение 1), следующие
+# садятся на них (поколение 2), и лишь малой доле выпадает третье.
+#
+# «В ОСНОВНОМ 2» — ЭТО ЧИСЛО, А НЕ ПОЖЕЛАНИЕ: третьему поколению отходит
+# `branch_third` жребиев (0.22), то есть примерно каждый пятый побег. Больше —
+# и куст начнёт читаться кустарником, а не маком.
+#
+# ЧЕТВЁРТОГО ПОКОЛЕНИЯ НЕ БЫВАЕТ ПО ПОСТРОЕНИЮ, а не по проверке: третье
+# поколение садится только на второе, и дальше садиться уже некому.
+func poppy_stem_tree(p: Dictionary, def: Dictionary, many: int) -> Array:
+	var salt: int = int(p["salt"])
+	var out: Array = []
+	# Из земли — примерно треть всех стеблей, но не меньше двух: с одним
+	# корневым куст превращается в одинокий прут с ветками.
+	var roots: int = clampi(int(round(float(many)
+		* float(def.get("branch_roots", 0.38)))), 1, many)
+	if many >= 3:
+		roots = maxi(roots, 2)
+	var third: float = float(def.get("branch_third", 0.22))
+	var seconds: Array = []
+	for s in range(many):
+		if s < roots:
+			out.append({"gen": 1, "parent": -1, "at": 0.0})
+			continue
+		# Побег садится НЕ У САМОЙ ЗЕМЛИ И НЕ НА ВЕРХУШКЕ: у земли он бы слился
+		# с основанием куста, а у верхушки подпирал бы головку родителя.
+		var pick: float = _mix01(poppy_stem_salt(salt, s) + 211)
+		var at: float = lerpf(0.22, 0.52, _mix01(poppy_stem_salt(salt, s) + 307))
+		if pick < third and not seconds.is_empty():
+			var who: int = int(seconds[int(_mix01(poppy_stem_salt(salt, s) + 401)
+				* float(seconds.size())) % seconds.size()])
+			out.append({"gen": 3, "parent": who, "at": at})
+		else:
+			out.append({"gen": 2, "parent": (s - roots) % roots, "at": at})
+			seconds.append(s)
+	return out
+
+
+# СКОЛЬКО ЛИСТЬЕВ НА ЭТОМ СТЕБЛЕ И КАКОВЫ ОНИ — ОДНА МЕРКА НА СБОРКУ И НА
+# ПРОВЕРКУ ПОМЕХ.
+#
+# ЕЁ ПРАВИЛО 09.09.2026: «на 1-2 поколениях побегов обычно сидят листья, они там
+# самые крупные, первыми начинают расти. На 3 поколении листья появляются реже,
+# они появляются позже и не вырастают такими же большими».
+#
+# Отсюда ровно три отличия у третьего поколения, и все три — числами: их МЕНЬШЕ
+# (доля `leaf_third_many`), они ПОЗЖЕ (порог зрелости `leaf_third_from`, до
+# которого листа нет вовсе) и они МЕЛЬЧЕ (`leaf_third_size`).
+func poppy_leaves_of(def: Dictionary, mine: float, gen: int) -> Dictionary:
+	# ЛИСТЬЕВ БОЛЬШЕ С ВОЗРАСТОМ (её расписание 06.09.2026: на ступенях 4–6
+	# «больше листьев»). Число в карточке — сколько их у взрослого стебля.
+	var many: float = float(def.get("leaf_many", 3)) * clampf(mine * 1.35, 0.3, 1.0)
+	var size: float = 1.0
+	if gen >= 3:
+		var from: float = float(def.get("leaf_third_from", 0.45))
+		if mine < from:
+			return {"many": 0, "size": 0.0}
+		many *= float(def.get("leaf_third_many", 0.5))
+		size = float(def.get("leaf_third_size", 0.62))
+	return {"many": maxi(1 if gen < 3 else 0, int(round(many))), "size": size}
 
 
 # ВОЗРАСТ СТЕБЛЯ — возраст куста со своим сдвигом. Первый идёт вровень, прочие
@@ -2916,31 +3049,24 @@ func _emit_poppy_bud(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	flat = flat.normalized()
 	var cross: Vector3 = tip.cross(flat).normalized()
 	var away: Vector3 = (flat * cos(turn) + cross * sin(turn)).normalized()
-	# ЩЕТИНА НА БУТОНЕ — её решение 09.09.2026. На фото бутон мака мохнатый, и
-	# это его примета не хуже поникшей шейки.
+
+	# КРАПИНКИ НА БУТОНЕ — ГУЩЕ, ЧЕМ ГДЕ БЫ ТО НИ БЫЛО (её порядок 09.09.2026:
+	# больше, чем на стеблях третьего поколения). Тут они СЧИТАЮТСЯ ШТУКАМИ, а
+	# не густотой на метр: бутон один и тот же у всех стеблей, длине мерить
+	# нечего.
 	#
-	# ТОЛЬКО НА БУТОНАХ, И ЭТО ЕЁ ЖЕ ВЫБОР ТОГО ЖЕ ДНЯ: щетина на стеблях
-	# отложена как дорогая. Разница в счёте, а не во вкусе — стеблей на куртине
-	# шесть сотен, а бутонов два десятка, и та же щетина стоит там в тридцать раз
-	# дешевле.
-	#
-	# ЩЕТИНКИ ИДУТ ПО ВИТКУ, а не кольцами: кольцами они читаются обручами на
-	# бочке. Виток даёт ту же густоту, но без рисунка.
-	var fuzz: int = int(def.get("bud_fuzz", 0))
-	if fuzz > 0:
-		var f_r: float = bw * float(def.get("bud_fuzz_thin", 0.055))
-		var f_long: float = bw * float(def.get("bud_fuzz_long", 0.42))
-		var f_c: Color = stem_c.lightened(0.16)
-		for i in range(fuzz):
-			var t_f: float = (float(i) + 0.5) / float(fuzz)
-			var a_f: float = float(i) * 2.399963      # золотой угол — виток
-			var out_f: Vector3 = (flat * cos(a_f) + cross * sin(a_f)).normalized()
-			# Наружу и НАЗАД, к основанию: у мака щетина отогнута к стеблю.
-			var way_f: Vector3 = (out_f - tip * 0.45).normalized()
-			var at_f: Vector3 = top + tip * (bl * t_f) \
-				+ out_f * (bw * 0.48 * sin(t_f * PI))
-			_emit_twig(st, at_f, at_f + way_f * f_long, f_r, f_r * 0.35,
-				tip, f_c, stage)
+	# Ложатся по витку на поверхность зелёного тела и вытянуты вдоль него — так
+	# они и лежат у живого бутона, сбегаясь к макушке.
+	var specks: int = int(def.get("speck_bud", 0))
+	if specks > 0:
+		var s_c: Color = stem_c.darkened(float(def.get("speck_dark", 0.22)))
+		for i in range(specks):
+			var t_s: float = (float(i) + 0.5) / float(specks)
+			var a_s: float = float(i) * 2.399963      # золотой угол — виток
+			var out_s: Vector3 = (flat * cos(a_s) + cross * sin(a_s)).normalized()
+			var at_s: Vector3 = top + tip * (bl * t_s) \
+				+ out_s * (bw * 1.01 * sin(t_s * PI))
+			_emit_speck(st, at_s, tip, out_s, bw * 0.26, bw * 0.07, s_c, stage)
 
 	# КРАСНОЕ ТЕЛО — РОВНО ДЕВЯТЬ ДЕСЯТЫХ БУТОНА, И ЯВЛЯЕТСЯ ОНО ТОЛЬКО С
 	# РАСКОЛОМ (её правило, повторено 09.09.2026). Цвет тот же, что у цветка,
@@ -3005,18 +3131,176 @@ func _emit_poppy_bud(st: SurfaceTool, p: Dictionary, def: Dictionary,
 			lerpf(6.0, 72.0, sp))
 
 
-# ПРОДОЛГОВАТОЕ ТЕЛЬЦЕ — бутон и коробочка мака. Обе выходят из одной формы:
+# ПРОДОЛГОВАТОЕ ТЕЛЬЦЕ — бутон и сердцевина мака. Обе выходят из одной формы:
 # две трубочки встык, нижняя расширяется, верхняя сходится. Отдельного шара
 # заводить не за чем — на таком размере разницы не видно, а трубочка уже есть.
+#
+# ЧИСЛО ГРАНЕЙ — ПАРАМЕТРОМ. По умолчанию их четыре, как у всякой трубочки; у
+# сердцевины цветка шесть (её слово 09.09.2026: «не квадратная, а шестиугольная
+# сердцевина»). Квадратное сечение на ней и правда читалось кубиком: тельце
+# крупное и стоит в самой середине кадра, где четыре грани видно наперечёт.
 func _emit_pill(st: SurfaceTool, at: Vector3, along: Vector3, long: float,
-		wide: float, tint: Color, axis: Vector3, stage: int) -> void:
+		wide: float, tint: Color, axis: Vector3, stage: int,
+		sides: int = TWIG_SIDES) -> void:
 	if long <= 0.0 or wide <= 0.0:
 		return
 	var foot: Vector3 = at - along * (long * 0.5)
 	var waist: Vector3 = at + along * (long * 0.05)
-	_emit_twig(st, foot, waist, wide * 0.42, wide, axis, tint, stage)
+	_emit_twig(st, foot, waist, wide * 0.42, wide, axis, tint, stage, sides)
 	_emit_twig(st, waist, at + along * (long * 0.5), wide, wide * 0.30,
-		axis, tint, stage)
+		axis, tint, stage, sides)
+
+
+# КРАПИНКА — ВЫТЯНУТОЕ ПЯТНЫШКО НА СТЕБЛЕ И БУТОНЕ.
+#
+# Её слово 09.09.2026: «убери опушенность у бутонов мака... добавь вместо
+# опушения на стебель и бутоны частые вытянутые маленькие пятнышки-крапинки».
+#
+# ПОЧЕМУ ПЛОСКАЯ ЧЕШУЙКА, А НЕ ТРУБОЧКА, КАК БЫЛА ЩЕТИНА. Щетина стояла только
+# на бутонах, и стояла она там по одной причине — цене: трубочка это восемь
+# треугольников, а бутонов на куртину два десятка против шести сотен стеблей.
+# Крапинки же просят НА СТЕБЛИ, и трубочками это стоило бы тридцать тысяч
+# треугольников на куртину — треть всего мака. Чешуйка из двух треугольников
+# даёт ту же примету вчетверо дешевле, а объёма пятнышку и не нужно: оно и в
+# жизни лежит на коже стебля, а не торчит из неё.
+#
+# ПРИПОДНЯТА НАД ТЕЛОМ на сотую долю радиуса — иначе она спорит с трубкой за
+# одни и те же точки и мерцает при движении камеры.
+func _emit_speck(st: SurfaceTool, at: Vector3, along: Vector3, out: Vector3,
+		long: float, wide: float, tint: Color, stage: int) -> void:
+	if long <= 0.0 or wide <= 0.0:
+		return
+	var side_v: Vector3 = out.cross(along)
+	if side_v.length_squared() < 0.000000001:
+		return
+	side_v = side_v.normalized()
+	var up_v: Vector3 = (along - out * along.dot(out))
+	if up_v.length_squared() < 0.000000001:
+		return
+	up_v = up_v.normalized()
+	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
+	st.set_color(tint.srgb_to_linear())
+	var corner: Array = [
+		at - up_v * (long * 0.5) - side_v * (wide * 0.5),
+		at - up_v * (long * 0.5) + side_v * (wide * 0.5),
+		at + up_v * (long * 0.5) + side_v * (wide * 0.5),
+		at + up_v * (long * 0.5) - side_v * (wide * 0.5),
+	]
+	for i in [0, 1, 2, 0, 2, 3]:
+		st.set_normal(out)
+		st.set_uv(Vector2(0.5, 0.5))
+		st.add_vertex(corner[int(i)])
+
+
+# КРАПИНКИ ПО СТЕБЛЮ — ГУЩЕ У МОЛОДЫХ ПОБЕГОВ.
+#
+# ЕЁ ПОРЯДОК 09.09.2026, дословно: «на бутонах их должно быть больше, чем на
+# стеблях 3 поколения, на стеблях 3 поколения должно быть больше, чем на
+# стеблях 2 поколения и т.д.». То есть густота растёт от старого к молодому, и
+# бутон гуще всех — так оно у мака и есть: молодая часть шершавая, старая
+# оголяется.
+#
+# ГУСТОТА, А НЕ ЧИСЛО. Побег третьего поколения втрое короче корневого, и одним
+# числом на стебель он вышел бы гуще любого другого просто оттого, что короткий.
+# Считаем крапинки НА МЕТР и умножаем на длину — тогда порядок держится тот, что
+# она назвала.
+#
+# ИДУТ ПО ВИТКУ, а не кольцами: кольцами они читаются обручами на бочке.
+func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
+		path: PackedVector3Array, r_foot: float, r_head: float,
+		gen: int, tint: Color, stage: int) -> void:
+	var dens: float = float(def.get("speck_dens", 0.0))
+	if dens <= 0.0 or path.size() < 2:
+		return
+	dens *= pow(float(def.get("speck_gen_k", 1.35)), float(mini(gen, 3) - 1))
+	var long_m: float = 0.0
+	for k in range(path.size() - 1):
+		long_m += (path[k + 1] - path[k]).length()
+	var many: int = int(round(long_m * dens))
+	if many <= 0:
+		return
+	var c: Color = tint.darkened(float(def.get("speck_dark", 0.22)))
+	var links: int = path.size() - 1
+	for i in range(many):
+		var t: float = (float(i) + 0.5) / float(many)
+		var k: int = clampi(int(t * float(links)), 0, links - 1)
+		var into: float = t * float(links) - float(k)
+		var at: Vector3 = path[k].lerp(path[k + 1], into)
+		var way: Vector3 = (path[k + 1] - path[k]).normalized()
+		var a: float = float(i) * 2.399963      # золотой угол — виток
+		var side_v: Vector3 = way.cross(Vector3.UP)
+		if side_v.length_squared() < 0.000001:
+			side_v = way.cross(Vector3.RIGHT)
+		side_v = side_v.normalized()
+		var turn: Vector3 = way.cross(side_v).normalized()
+		var out: Vector3 = (side_v * cos(a) + turn * sin(a)).normalized()
+		var r: float = lerpf(r_foot, r_head, t)
+		_emit_speck(st, at + out * (r * 1.01), way, out,
+			r * float(def.get("speck_long", 2.0)),
+			r * float(def.get("speck_wide", 0.55)), c, stage)
+
+
+# ПРИПЛЮСНУТЫЙ ШАР — коробочка мака.
+#
+# Её слово 09.09.2026: «такая коробочка никуда не годится... пусть у неё будет
+# больше граней, а сама она будет ближе к форме слегка приплюснутого шара».
+#
+# ЧЕМ ПИЛЮЛЯ НЕ ГОДИЛАСЬ. Коробочка собиралась из двух трубочек встык — четыре
+# грани и один излом в поясе, — и на её кадре читалась синим коробом с рёбрами
+# по углам. У живого мака коробочка круглая и слегка сплющенная сверху; на
+# кадре она крупная, стоит на виду, и четырёх граней ей мало так же, как их
+# было мало сердцевине.
+#
+# УСТРОЙСТВО. Кольца по высоте, грани по кругу: радиус кольца идёт синусом, а
+# высота — косинусом, то есть тело и есть сплюснутый шар (`squash` — во сколько
+# раз он ниже, чем шире). Полюса вырождаются в точку сами собой, отдельных
+# крышек не надо.
+#
+# ЦЕНА СЧИТАНА ЗАРАНЕЕ: восемь граней на пять колец это 80 треугольников против
+# 16 у пилюли. Коробочек в куртине около трети головок, и на замер это вышло
+# заметно дешевле, чем щетина, которую мы этим же заходом сняли.
+func _emit_globe(st: SurfaceTool, at: Vector3, along: Vector3, wide: float,
+		squash: float, tint: Color, axis: Vector3, stage: int,
+		sides: int = 8, rings: int = 5) -> void:
+	if wide <= 0.0 or sides < 3 or rings < 2:
+		return
+	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
+	st.set_color(tint.srgb_to_linear())
+	var side_v: Vector3 = along.cross(axis)
+	if side_v.length_squared() < 0.000001:
+		side_v = along.cross(Vector3.RIGHT)
+	if side_v.length_squared() < 0.000001:
+		side_v = along.cross(Vector3.UP)
+	side_v = side_v.normalized()
+	var turn: Vector3 = along.cross(side_v).normalized()
+	var rows: Array = []
+	var norms: Array = []
+	for k in range(rings + 1):
+		var phi: float = PI * float(k) / float(rings)
+		var r: float = wide * sin(phi)
+		var h: float = -wide * squash * cos(phi)
+		var ring: Array = []
+		var out: Array = []
+		for i in range(sides + 1):
+			var ang: float = TAU * float(i) / float(sides)
+			var dir: Vector3 = side_v * cos(ang) + turn * sin(ang)
+			ring.append(at + dir * r + along * h)
+			# Нормаль сплюснутого шара — не то же, что направление от середины:
+			# по высоте её надо растянуть ровно во столько раз, во сколько тело
+			# сплющено, иначе свет ложится как на шар и бок читается плоским.
+			out.append((dir * sin(phi) + along * (cos(phi) / maxf(squash, 0.05)))
+				.normalized())
+		rows.append(ring)
+		norms.append(out)
+	for k in range(rings):
+		for i in range(sides):
+			for t in BAND_TRI:
+				var far: bool = int(t[0]) == 1
+				var nxt: bool = int(t[1]) == 1
+				var atk: int = k + 1 if far else k
+				st.set_normal(norms[atk][i + 1 if nxt else i])
+				st.set_uv(Vector2(0.5, 0.5))
+				st.add_vertex(rows[atk][i + 1 if nxt else i])
 
 
 # =============================================================================
@@ -7713,7 +7997,7 @@ func _emit_tube(st: SurfaceTool, path: PackedVector3Array, r_a: float,
 
 
 func _emit_twig(st: SurfaceTool, a: Vector3, b: Vector3, r_a: float, r_b: float,
-		axis: Vector3, tint: Color, stage: int) -> void:
+		axis: Vector3, tint: Color, stage: int, sides: int = TWIG_SIDES) -> void:
 	var way: Vector3 = b - a
 	if way.length_squared() < 0.0000001 or r_a <= 0.0:
 		return
@@ -7732,13 +8016,13 @@ func _emit_twig(st: SurfaceTool, a: Vector3, b: Vector3, r_a: float, r_b: float,
 	var ring_a: Array = []
 	var ring_b: Array = []
 	var outs: Array = []
-	for i in range(TWIG_SIDES + 1):
-		var ang: float = TAU * float(i) / float(TWIG_SIDES)
+	for i in range(sides + 1):
+		var ang: float = TAU * float(i) / float(sides)
 		var out: Vector3 = side * cos(ang) + turn * sin(ang)
 		outs.append(out)
 		ring_a.append(a + out * r_a)
 		ring_b.append(b + out * r_b)
-	for i in range(TWIG_SIDES):
+	for i in range(sides):
 		for k in BAND_TRI:
 			var far: bool = int(k[0]) == 1
 			var nxt: bool = int(k[1]) == 1
@@ -8169,7 +8453,11 @@ func _emit_blooms(st: SurfaceTool, p: Dictionary, def: Dictionary,
 # НЕ СЛИВАТЬСЯ им помогает ширина: лепесток занимает заметно меньше своей доли
 # круга (`petal_wide`), и между соседями остаётся просвет.
 const PETAL_ACROSS: int = 2                 # клеток поперёк лепестка
-const PETAL_ALONG: int = 3                  # отрезков вдоль ЧАШЕОБРАЗНОГО лепестка
+# ОТРЕЗКОВ ВДОЛЬ ЛЕПЕСТКА ПЯТЬ, А НЕ ТРИ (её слово 09.09.2026: «сделай изгиб
+# лепестков более сложным»). Тремя хордами сложного изгиба не изобразить вовсе:
+# на них помещается один поворот, а у мака их три — вниз у донца, круто вверх
+# чашей и наружу у самого края. Цена — восемь треугольников на лепесток.
+const PETAL_ALONG: int = 5                  # отрезков вдоль ЧАШЕОБРАЗНОГО лепестка
 
 
 # РАЗМЕР ПО ЗРЕЛОСТИ — ОДИН НА СБОРКУ И НА ПРОВЕРКУ.
@@ -8203,71 +8491,70 @@ func poppy_stalk_of(def: Dictionary, leaf_long: float) -> Dictionary:
 	return {"stalk": stalk, "lap": lap, "bare": maxf(stalk - lap, 0.0)}
 
 
-# ВЕНЧИК КОРОБОЧКИ — сухая звёздочка на макушке и рёбра по бокам.
+# ВЕНЧИК КОРОБОЧКИ — подставка, сухая звёздочка на ней и рёбра по бокам.
 #
-# Её слово 09.09.2026: «сделай коробочку мака более сложной». Прежде вся
-# коробочка была пилюлей плюс одна коротенькая шайба сверху, и на кадре читалась
-# грибом.
+# Её слова 09.09.2026, два захода. Сперва «сделай коробочку мака более сложной»
+# — тогда появились диск, лучики и рёбра. Потом, по кадру: «пусть у неё будет
+# больше граней, а сама она ближе к слегка приплюснутому шару, на котором сидит
+# основание под звёздочку и сама звёздочка».
 #
-# ТРИ ВЕЩИ, И КАЖДАЯ ЕСТЬ У ЖИВОЙ КОРОБОЧКИ:
+# ОТСЮДА ТРИ ЯРУСА, И ПОРЯДОК ИХ ВАЖЕН: шар (`_emit_globe`, рисуется отдельно) →
+# ПОДСТАВКА, короткий сходящийся кверху конус на макушке шара → ЗВЁЗДОЧКА на
+# подставке. Прежде звёздочка сидела прямо на теле, и на кадре читалась
+# наклеенной.
 #
-#   • ДИСК под звёздочкой — плоская площадка, на которой звёздочка и сидит;
-#   • ЛУЧИКИ (`pod_crown`) — сухие рубчики рыльца, расходящиеся от середины к
-#     краю диска. Число уже стояло в карточке и НЕ ИСПОЛЬЗОВАЛОСЬ НИГДЕ: поле
-#     завели, а рисовать по нему забыли, и проверка достижимости этого не
-#     ловит — она не смотрит в карточки;
-#   • РЁБРА по бокам — у мака коробочка ребристая, и на просвет это её примета.
+# ЛУЧЕЙ СТОЛЬКО ЖЕ, СКОЛЬКО У ЗВЁЗДОЧКИ В ЦВЕТКЕ (`heart_rays`) — её правило
+# того же дня: «количество лучей звёздочки должно повторять количество лучей у
+# основания цветка мака». Так оно у мака и есть: сколько рубчиков на рыльце
+# цветка, столько же долек и у созревшей из него коробочки. Числа эти обязаны
+# быть ОДНИМ числом, а не двумя похожими: разъедься они — и коробочка перестанет
+# быть той же головкой, что цвела.
 #
-# ЛУЧИКИ И РЁБРА ИДУТ ОДНИМ И ТЕМ ЖЕ ЧИСЛОМ: у живой коробочки ребро подходит
-# ровно к своему лучику, и врозь они читались бы решёткой поверх решётки.
-func _emit_poppy_pod_crown(st: SurfaceTool, def: Dictionary, top: Vector3,
-		tip: Vector3, side: Vector3, pl: float, pw: float, pod_c: Color,
+# РЁБЕР ВДВОЕ МЕНЬШЕ, ЧЕМ ЛУЧЕЙ, И ЭТО ЗАМЕР, А НЕ ВКУС. Венчик с рёбрами
+# поровну поднял самый дорогой кусок сада с 12.4 до 15.9 мс — больше целого
+# кадра. Звёздочку на макушке видно, а ребро это тонкая черта на боку.
+func _emit_poppy_pod_crown(st: SurfaceTool, def: Dictionary, mid: Vector3,
+		tip: Vector3, side: Vector3, pw: float, squash: float, pod_c: Color,
 		ripe: float, stage: int) -> void:
-	var rays: int = int(def.get("pod_crown", 0))
-	if rays <= 0:
-		return
+	var rays: int = maxi(int(def.get("heart_rays", 6)), 3)
 	var flat: Vector3 = side - tip * side.dot(tip)
 	if flat.length_squared() < 0.000001:
 		flat = tip.cross(Vector3.UP)
 	flat = flat.normalized()
 	var cross: Vector3 = tip.cross(flat).normalized()
-	# ДИСК — короткая шайба, шире тела: на неё садится звёздочка.
-	var disc: Vector3 = top + tip * (pl * 0.90)
+	var half: float = pw * squash          # полувысота шара
 	# КОРОНКА СУХАЯ И БУРАЯ, А НЕ ТОГО ЖЕ ЦВЕТА, ЧТО ТЕЛО — её кадр 8.
 	#
 	# На нём это видно яснее всего: тело сизо-голубое, а звёздочка сверху
-	# отмершая, бурая, совсем другого цвета. Прежде коронка была тем же цветом,
-	# только темнее, и читалась просто тенью на макушке.
-	#
-	# Молодая коробочка ещё зелёная и коронка на ней светлее; буреет она вместе
-	# со всем прочим, поэтому идём по той же спелости.
+	# отмершая, бурая, совсем другого цвета. Молодая коробочка ещё зелёная и
+	# коронка на ней светлее; буреет она вместе со всем прочим.
 	var dark: Color = pod_c.darkened(0.18).lerp(
 		Color(def.get("pod_crown_color", pod_c)), ripe)
 	# ШЕЙКА — переход к стеблю. На референсе коробочка сидит не прямо на стебле,
 	# а на короткой узкой шейке, и без неё она читается насаженной на палку.
-	_emit_twig(st, top - tip * (pl * 0.06), top + tip * (pl * 0.16),
-		pw * 0.30, pw * 0.72, side, pod_c.darkened(0.10), stage)
-	_emit_twig(st, disc, disc + tip * (pl * 0.09), pw * 1.10, pw * 0.86,
-		side, dark, stage)
-	var star: Vector3 = disc + tip * (pl * 0.10)
+	_emit_twig(st, mid - tip * (half * 1.10), mid - tip * (half * 0.55),
+		pw * 0.30, pw * 0.66, side, pod_c.darkened(0.10), stage)
+	# ПОДСТАВКА — на макушке шара, сходится кверху. На ней и сидит звёздочка.
+	var cap: Vector3 = mid + tip * (half * 0.94)
+	var star: Vector3 = cap + tip * (pw * 0.16)
+	_emit_twig(st, cap, star, pw * 0.52, pw * 0.38, side, dark, stage,
+		maxi(rays, 3))
 	var rib_r: float = pw * float(def.get("pod_rib_thin", 0.10))
 	for i in range(rays):
 		var a: float = TAU * float(i) / float(rays)
 		var out: Vector3 = (flat * cos(a) + cross * sin(a)).normalized()
 		# ЛУЧИК ЗАГНУТ КВЕРХУ, а не провисает: на её кадре 8 звёздочка сухая и
 		# лучи её задраны зубчиками вверх, отчего коронка и читается короной.
-		_emit_twig(st, star - tip * (pl * 0.02), star + out * (pw * 0.94)
-			+ tip * (pl * 0.05), rib_r * 1.2, rib_r * 0.5, tip, dark, stage)
-		# РЕБРО — по боку тела, от пояса до диска. Своего рисовальщика не надо:
-		# это та же трубочка, только положенная вдоль.
-		#
-		# РЁБЕР МЕНЬШЕ, ЧЕМ ЛУЧИКОВ, И ЭТО ЗАМЕР, А НЕ ВКУС. Венчик с рёбрами
-		# поровну (девять и девять) поднял самый дорогой кусок сада с 12.4 до
-		# 15.9 мс — больше целого кадра. Звёздочку на макушке видно, а ребро это
-		# тонкая черта на боку: их можно вдвое меньше без потери приметы.
+		# Начало утоплено в подставку на радиус лучика — тем же правилом, что и
+		# звёздочка в цветке.
+		_emit_twig(st, star - tip * rib_r, star + out * (pw * 0.62)
+			+ tip * (pw * 0.10 - rib_r), rib_r * 1.2, rib_r * 0.5, tip,
+			dark, stage)
+		# РЕБРО — по боку шара, от нижней трети до подставки. Своего рисовальщика
+		# не надо: это та же трубочка, только положенная вдоль бока.
 		if i % 2 == 0:
-			_emit_twig(st, top + out * (pw * 0.82) + tip * (pl * 0.22),
-				top + out * (pw * 0.94) + tip * (pl * 0.86),
+			_emit_twig(st, mid + out * (pw * 0.86) - tip * (half * 0.45),
+				mid + out * (pw * 0.42) + tip * (half * 0.86),
 				rib_r * 0.8, rib_r * 1.1, tip,
 				pod_c.lightened(0.10 * (1.0 - ripe)), stage)
 
@@ -8379,7 +8666,8 @@ func poppy_inner_gap(salt: int, def: Dictionary) -> float:
 # лепесток с первого же шага уходит от оси вниз и наружу, и внутрь головки не
 # заходит вовсе.
 func petal_path(seat: Vector3, up: Vector3, out_dir: Vector3, long: float,
-		bend: float, lean: float, dip: float, curl: float = 0.5) -> Dictionary:
+		bend: float, lean: float, dip: float, curl: float = 0.5,
+		flare: float = 0.0) -> Dictionary:
 	if dip < 0.0:
 		var knee: Vector3 = seat + up * (long * bend)
 		var tilt: Vector3 = (up * cos(lean) + out_dir * sin(lean)).normalized()
@@ -8395,6 +8683,23 @@ func petal_path(seat: Vector3, up: Vector3, out_dir: Vector3, long: float,
 		# на дугу, а не режет её хордами с одной стороны.
 		var t: float = (float(i) + 0.5) / float(PETAL_ALONG)
 		var a: float = lerpf(from_a, lean, pow(t, maxf(curl, 0.05)))
+		# КРАЙ ОТОГНУТ НАРУЖУ — её слово 09.09.2026: «сделай изгиб лепестков
+		# более сложным... должно формироваться ощущение цветка, раскрытого на
+		# 50-60 процентов».
+		#
+		# Полураскрытый цветок это НЕ просто «лепестки стоят круче». Одной дугой
+		# от донца к кончику выходит воронка — ровный конус, и чем круче он
+		# поставлен, тем больше похож на нераспустившийся бутон. У живого мака
+		# лепесток гнётся ТРИЖДЫ: у донца уходит вниз-наружу, потом круто
+		# поднимается чашей, а у самого края опять отваливается наружу. Вот этот
+		# третий перегиб и делает чашу чашей, а не кульком.
+		#
+		# Работает он ТОЛЬКО НА КРАЮ (последняя четверть) и растёт квадратом:
+		# начнись отгиб раньше — он сложился бы с подъёмом чаши и попросту
+		# разогнул её обратно.
+		if flare > 0.0:
+			var edge: float = clampf((t - 0.72) / 0.28, 0.0, 1.0)
+			a += flare * edge * edge
 		at += (up * cos(a) + out_dir * sin(a)).normalized() * step
 		pts.append(at)
 		vs.append(float(i + 1) / float(PETAL_ALONG))
@@ -8440,6 +8745,9 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 	if float(def.get("petal_dip", -1.0)) < 0.0:
 		dip = -1.0
 	var curl: float = float(def.get("petal_curl", 0.5))
+	# ОТГИБ КРАЯ — только у того, кто его назвал: у лианы поля нет, и её цветок
+	# не меняется ни на волос.
+	var flare: float = deg_to_rad(float(def.get("petal_flare", 0.0)))
 	var jitter: float = deg_to_rad(float(def.get("petal_jitter", 0.0)))
 	var bow: float = float(def.get("petal_bow", 0.25))
 	var rank: float = float(def.get("petal_rank", 0.14))
@@ -8506,7 +8814,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 						d_try = d_try.normalized()
 						var g_try: float = _petal_gap(petal_path(
 							seat + d_try * ring_m, up, d_try, long,
-							bend, lean, dip, curl)["pts"], blocks, mine_stem,
+							bend, lean, dip, curl, flare)["pts"], blocks, mine_stem,
 							half)
 						# ЗАДУМАННОЕ НАПРАВЛЕНИЕ — оно же и мерка «как было бы
 						# без всей этой возни»: ни отворота, ни складывания.
@@ -8548,7 +8856,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 				# нужен перелом у донца); у чаши их четыре и они идут по дуге.
 				# Считает их `petal_path` — одна на сборку и на проверку.
 				var line_of: Dictionary = petal_path(seat_at, up, out_dir, long,
-					bend, lean, dip, curl)
+					bend, lean, dip, curl, flare)
 				# ЛЕПЕСТОК СКЛАДЫВАЕТСЯ ПЕРЕД ПРЕПЯТСТВИЕМ (её слово 07.09.2026).
 				#
 				# Сложенный — это три вещи разом, и порознь ни одна не годится:
@@ -8583,7 +8891,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 						bow_at = bow * lerpf(1.0, 2.2, fold)
 						var lean_at: float = lean * lerpf(1.0, 0.65, fold)
 						line_of = petal_path(seat_at, up, out_dir, long_at,
-							bend, lean_at, dip, curl)
+							bend, lean_at, dip, curl, flare)
 						var tilt_at: Vector3 = (up * cos(lean_at)
 							+ out_dir * sin(lean_at))
 						if tilt_at.length_squared() > 0.000001:
