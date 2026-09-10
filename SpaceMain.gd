@@ -3201,6 +3201,16 @@ func _stone_surface_check(at: Vector3, reach: float) -> void:
 		int(e["spike_seam"]), "; резких за 45° всего ", int(e["sharp"]),
 		", на швах ", int(e["sharp_seam"]),
 		" — шов и край мазка лечатся разным")
+	# ЛЕЖИТ ЛИ ШОВ ВДОЛЬ ПОВЕРХНОСТИ — тем и отличается шов, режущий ложбину, от
+	# шва, снимающего пласт по касательной. Если у шипов это число заметно выше,
+	# чем у швов вообще, — причина шипов найдена и лечится тем, чтобы такой шов
+	# не резал вовсе.
+	var seam_n: float = maxf(1.0, float(e["seam_n"]))
+	var spike_n: float = maxf(1.0, float(e["spike_n"]))
+	print("Шов вдоль поверхности: у всех швов ",
+		snappedf(float(e["seam_lie"]) / seam_n, 0.001), ", у шипов на швах ",
+		snappedf(float(e["spike_lie"]) / spike_n, 0.001), " (", int(e["spike_n"]),
+		" шт.) — единица значит, что шов совпал с поверхностью и снимает пласт")
 	# ГДЕ СИДЯТ РЕЗКИЕ РЁБРА: на нависании или на том, что смотрит вверх. Общая
 	# доля их прячет: одна и та же сотая доля на кровле незаметна, а на кромке
 	# нависания читается пилой.
@@ -3319,10 +3329,19 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 						# шипы, которые делает шов, от шипов, которые делает
 						# край мазка, — а лечатся они разным.
 						var on_seam: float = 0.0
+						var seam_way := Vector3.ZERO
 						for v in range(3):
 							on_seam = maxf(on_seam,
 								maxf(grid.seam[ca[tri[v]]],
 									grid.seam[cb[tri[v]]]))
+							seam_way += grid.seam_dir[ca[tri[v]]]
+							seam_way += grid.seam_dir[cb[tri[v]]]
+						# ЛЕЖИТ ЛИ ШОВ ВДОЛЬ ПОВЕРХНОСТИ. Единица — плоскость шва
+						# совпала с поверхностью и снимает пласт по касательной,
+						# ноль — режет её поперёк, честной ложбиной.
+						var lie: float = 0.0
+						if seam_way.length_squared() > 0.000001:
+							lie = absf(seam_way.normalized().dot(n))
 						for pair in [[0, 1], [1, 2], [2, 0]]:
 							var a: int = mini(ca[tri[pair[0]]], cb[tri[pair[0]]])
 							var b: int = maxi(ca[tri[pair[0]]], cb[tri[pair[0]]])
@@ -3331,12 +3350,13 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
 								maxi(a, c2), maxi(b, d)]
 							if faces.has(key):
-								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid})
+								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie})
 							else:
-								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid}]
+								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie}]
 	var out := {"edges": 0, "flat": 0, "cave_worst": 0.0, "ridge_worst": 0.0,
 		"cave_sharp": 0, "ridge_sharp": 0, "cave_bend": 0, "ridge_bend": 0,
 		"sharp": 0, "sharp_seam": 0, "spike": 0, "spike_seam": 0,
+		"seam_lie": 0.0, "seam_n": 0, "spike_lie": 0.0, "spike_n": 0,
 		"over_edges": 0, "over_sharp": 0, "over_worst": 0.0,
 		"up_edges": 0, "up_sharp": 0}
 	# СЛИПАНИЕ ПЛОСКИХ ТРЕУГОЛЬНИКОВ В ПЛИТЫ. Каждый сам себе плита, гладкое
@@ -3378,8 +3398,14 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 		# Резкие рёбра порознь: сколько их сидит НА ШВЕ между глыбами, а сколько
 		# в другом месте. Шов и край мазка лечатся разным, и валить их в одну
 		# кучу — значит крутить не тот винт.
+		var on_seam_edge: bool = maxf(float(list[0]["s"]), float(list[1]["s"])) > 0.4
+		if on_seam_edge:
+			# СРЕДНЕЕ ПО ВСЕМ ШВАМ — с чем сравнивать шипы.
+			out["seam_lie"] = float(out["seam_lie"]) + maxf(float(list[0]["l"]),
+				float(list[1]["l"]))
+			out["seam_n"] = int(out["seam_n"]) + 1
 		if bend > 45.0:
-			var seamy: bool = maxf(float(list[0]["s"]), float(list[1]["s"])) > 0.4
+			var seamy: bool = on_seam_edge
 			out["sharp"] = int(out["sharp"]) + 1
 			if seamy:
 				out["sharp_seam"] = int(out["sharp_seam"]) + 1
@@ -3387,6 +3413,9 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 				out["spike"] = int(out["spike"]) + 1
 				if seamy:
 					out["spike_seam"] = int(out["spike_seam"]) + 1
+					out["spike_lie"] = float(out["spike_lie"]) + maxf(
+						float(list[0]["l"]), float(list[1]["l"]))
+					out["spike_n"] = int(out["spike_n"]) + 1
 		if (Vector3(list[1]["c"]) - Vector3(list[0]["c"])).dot(n0) > 0.0:
 			out["cave_worst"] = maxf(float(out["cave_worst"]), bend)
 			if bend > 20.0:

@@ -181,6 +181,11 @@ var joint_span: float = 7.6
 # делится. См. `_claim_lump` и `_refresh_seam`.
 var lumps: Array = []             # {pos: Vector3, r: float, mass: float}
 var seam: PackedFloat32Array = PackedFloat32Array()   # 0 внутри глыбы, 1 на стыке
+# КУДА СМОТРИТ ПЛОСКОСТЬ ШВА — направление от одной ближайшей глыбы к другой.
+# Нужно, чтобы отличить шов, режущий поверхность ПОПЕРЁК (ложбина, чего и
+# хотим), от шва, легшего ВДОЛЬ неё. Мерку печатает `--scenebench` строкой
+# «Шов вдоль поверхности».
+var seam_dir: PackedVector3Array = PackedVector3Array()
 var _lump_hash: Dictionary = {}   # грубая клетка -> номера глыб
 var _play: PackedByteArray = PackedByteArray()    # семя внутри играбельного объёма
 var _built: PackedByteArray = PackedByteArray()   # ячейку уже вырезали
@@ -1416,6 +1421,7 @@ func _fill_terrain(radius: float, bottom: float,
 	stone_soft.resize(seeds.size())
 	crack_cut.resize(seeds.size())
 	seam.resize(seeds.size())
+	seam_dir.resize(seeds.size())
 	for i in range(seeds.size()):
 		_refresh_cavity(i)
 	_smooth_cavity()
@@ -2784,7 +2790,8 @@ func _facet(index: int) -> float:
 	# Гладкий шум крупной доли даёт то, что просили: округлые доли, сросшиеся
 	# боками, — глыба читается сложенной из камней. А ложбины между долями
 	# ловит впадина, и по ним же садится зелень.
-	var steep: float = _steepness(index)
+	var g_field: Vector3 = _field_slope(index)
+	var steep: float = _slope_steep(g_field)
 	var out: float = n * s * s * (0.55 + 0.75 * high) * (0.6 + 0.6 * steep) * facet_amp
 	out += _joints(p, s)
 	if index < crack_cut.size():
@@ -3103,7 +3110,7 @@ const LUMP_CELL: float = 3.0      # сторона клетки поиска г�
 const LUMP_CORE: float = 0.8
 # Полуширина шва между глыбами. Шире ячейки решётки — иначе вместо ложбины
 # выйдет дрожь; см. тот же расчёт у швов по трещинам.
-const SEAM_WIDE: float = 0.9
+const SEAM_WIDE: float = 1.4
 
 func _lump_key(p: Vector3) -> Vector3i:
 	return Vector3i(int(floor(p.x / LUMP_CELL)), int(floor(p.y / LUMP_CELL)),
@@ -3299,10 +3306,13 @@ func _refresh_seam(index: int) -> void:
 		return
 	if stone_soft[index] < 0.02 or lumps.size() < 2:
 		seam[index] = 0.0
+		seam_dir[index] = Vector3.ZERO
 		return
 	var p: Vector3 = seeds[index]
 	var d1: float = 1000000.0
 	var d2: float = 1000000.0
+	var at1: Vector3 = Vector3.ZERO
+	var at2: Vector3 = Vector3.ZERO
 	for k in _lumps_near(p):
 		if float(lumps[k]["mass"]) <= 0.0:
 			continue
@@ -3316,13 +3326,23 @@ func _refresh_seam(index: int) -> void:
 			continue
 		if d < d1:
 			d2 = d1
+			at2 = at1
 			d1 = d
+			at1 = lumps[k]["pos"]
 		elif d < d2:
 			d2 = d
+			at2 = lumps[k]["pos"]
 	if d2 > 999999.0:
 		seam[index] = 0.0
+		seam_dir[index] = Vector3.ZERO
 		return
 	seam[index] = 1.0 - smoothstep(0.0, SEAM_WIDE, (d2 - d1) * 0.5)
+	# Плоскость шва стоит поперёк отрезка между глыбами — вот его направление.
+	var span: Vector3 = at2 - at1
+	if span.length_squared() > 0.000001:
+		seam_dir[index] = span.normalized()
+	else:
+		seam_dir[index] = Vector3.ZERO
 
 
 func _joints(p: Vector3, s: float) -> float:
@@ -3482,7 +3502,10 @@ func _crack_rank(fam: int, plane: int) -> float:
 # Считаем по полю БЕЗ огранки. По готовому полю нельзя: огранка тогда кормит
 # сама себя — где она задрала склон, наклон становится круче, огранка ещё
 # сильнее, и камень идёт шипами.
-func _steepness(index: int) -> float:
+# ВЕКТОР НАКЛОНА ПОЛЯ в точке семени. Прежде отсюда сразу возвращалась крутизна
+# одним числом, а направление выбрасывалось — и это оказалось нужным: по нему
+# видно, ложится ли шов вдоль поверхности — это мерит стенд сцены.
+func _field_slope(index: int) -> Vector3:
 	var here: Vector3 = seeds[index]
 	var f0: float = base_fill[index] + _edit_of(index)
 	var g := Vector3.ZERO
@@ -3495,11 +3518,19 @@ func _steepness(index: int) -> float:
 		var len2: float = d.length_squared()
 		if len2 > 0.000001:
 			g += d * ((base_fill[s] + _edit_of(s) - f0) / len2)
-	g = straighten(index, g)
+	return straighten(index, g)
+
+
+# Крутизна из готового наклона: доля, на которую он отклонён от отвеса.
+func _slope_steep(g: Vector3) -> float:
 	var mag: float = g.length()
 	if mag < 0.000001:
 		return 0.0
 	return clampf(1.0 - absf(g.y) / mag, 0.0, 1.0)
+
+
+func _steepness(index: int) -> float:
+	return _slope_steep(_field_slope(index))
 
 
 # Семя по узлу решётки — по этому строится разбиение на тетраэдры.
