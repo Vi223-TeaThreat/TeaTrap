@@ -3211,6 +3211,15 @@ func _stone_surface_check(at: Vector3, reach: float) -> void:
 		snappedf(float(e["seam_lie"]) / seam_n, 0.001), ", у шипов на швах ",
 		snappedf(float(e["spike_lie"]) / spike_n, 0.001), " (", int(e["spike_n"]),
 		" шт.) — единица значит, что шов совпал с поверхностью и снимает пласт")
+	# НА КРОМКЕ ЛИ МАЗКА СИДЯТ ШИПЫ, КОТОРЫЕ НЕ НА ШВЕ. Единица — ровно кромка,
+	# ноль — самая середина мазка. Заметно выше среднего по камню значит, что
+	# виновата кромка, и лечить надо её, а не шов.
+	var rock_n: float = maxf(1.0, float(e["rock_n"]))
+	var off_n: float = maxf(1.0, float(e["off_n"]))
+	print("Кромка мазка: по всему камню ",
+		snappedf(float(e["rock_reach"]) / rock_n, 0.001), ", у шипов ВНЕ швов ",
+		snappedf(float(e["off_reach"]) / off_n, 0.001), " (", int(e["off_n"]),
+		" шт.) — единица значит, что шип сидит ровно на кромке положенного кистью")
 	# ГДЕ СИДЯТ РЕЗКИЕ РЁБРА: на нависании или на том, что смотрит вверх. Общая
 	# доля их прячет: одна и та же сотая доля на кровле незаметна, а на кромке
 	# нависания читается пилой.
@@ -3342,6 +3351,8 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 						var lie: float = 0.0
 						if seam_way.length_squared() > 0.000001:
 							lie = absf(seam_way.normalized().dot(n))
+						# И НА КРОМКЕ ЛИ МАЗКА он сидит: 1 — ровно на кромке.
+						var reach: float = grid.lump_reach(mid)
 						for pair in [[0, 1], [1, 2], [2, 0]]:
 							var a: int = mini(ca[tri[pair[0]]], cb[tri[pair[0]]])
 							var b: int = maxi(ca[tri[pair[0]]], cb[tri[pair[0]]])
@@ -3350,13 +3361,14 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
 								maxi(a, c2), maxi(b, d)]
 							if faces.has(key):
-								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie})
+								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie, "e": reach})
 							else:
-								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie}]
+								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie, "e": reach}]
 	var out := {"edges": 0, "flat": 0, "cave_worst": 0.0, "ridge_worst": 0.0,
 		"cave_sharp": 0, "ridge_sharp": 0, "cave_bend": 0, "ridge_bend": 0,
 		"sharp": 0, "sharp_seam": 0, "spike": 0, "spike_seam": 0,
 		"seam_lie": 0.0, "seam_n": 0, "spike_lie": 0.0, "spike_n": 0,
+		"rock_reach": 0.0, "rock_n": 0, "off_reach": 0.0, "off_n": 0,
 		"over_edges": 0, "over_sharp": 0, "over_worst": 0.0,
 		"up_edges": 0, "up_sharp": 0}
 	# СЛИПАНИЕ ПЛОСКИХ ТРЕУГОЛЬНИКОВ В ПЛИТЫ. Каждый сам себе плита, гладкое
@@ -3399,6 +3411,11 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 		# в другом месте. Шов и край мазка лечатся разным, и валить их в одну
 		# кучу — значит крутить не тот винт.
 		var on_seam_edge: bool = maxf(float(list[0]["s"]), float(list[1]["s"])) > 0.4
+		# КРОМКА МАЗКА — среднее по всему камню, с чем сравнивать шипы вне швов.
+		var reach_here: float = minf(float(list[0]["e"]), float(list[1]["e"]))
+		if reach_here < 8.0:
+			out["rock_reach"] = float(out["rock_reach"]) + reach_here
+			out["rock_n"] = int(out["rock_n"]) + 1
 		if on_seam_edge:
 			# СРЕДНЕЕ ПО ВСЕМ ШВАМ — с чем сравнивать шипы.
 			out["seam_lie"] = float(out["seam_lie"]) + maxf(float(list[0]["l"]),
@@ -3416,6 +3433,10 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 					out["spike_lie"] = float(out["spike_lie"]) + maxf(
 						float(list[0]["l"]), float(list[1]["l"]))
 					out["spike_n"] = int(out["spike_n"]) + 1
+				elif reach_here < 8.0:
+					# ШИП НЕ НА ШВЕ: далеко ли он от середины мазка.
+					out["off_reach"] = float(out["off_reach"]) + reach_here
+					out["off_n"] = int(out["off_n"]) + 1
 		if (Vector3(list[1]["c"]) - Vector3(list[0]["c"])).dot(n0) > 0.0:
 			out["cave_worst"] = maxf(float(out["cave_worst"]), bend)
 			if bend > 20.0:

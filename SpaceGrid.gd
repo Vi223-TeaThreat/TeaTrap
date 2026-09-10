@@ -3345,6 +3345,23 @@ func _refresh_seam(index: int) -> void:
 		seam_dir[index] = Vector3.ZERO
 
 
+# ДАЛЕКО ЛИ ТОЧКА ОТ СЕРЕДИНЫ БЛИЖАЙШЕГО МАЗКА, долей его радиуса: 0 — самая
+# середина, 1 — кромка, больше единицы — за краем всех мазков (там порода не
+# положена рукой, а пришла из генерации).
+#
+# Мерка стендовая: по ней видно, СИДЯТ ЛИ ШИПЫ НА КРОМКЕ МАЗКА. Шипы на швах
+# лечатся одним, шипы на кромке — другим, и валить их в кучу значит крутить не
+# тот винт (10.09.2026, после того как шов сделали шире и шипы переехали).
+func lump_reach(p: Vector3) -> float:
+	var best: float = 9.0
+	for k in _lumps_near(p):
+		if float(lumps[k]["mass"]) <= 0.0:
+			continue
+		var r: float = maxf(float(lumps[k]["r"]), 0.001)
+		best = minf(best, p.distance_to(lumps[k]["pos"]) / r)
+	return best
+
+
 func _joints(p: Vector3, s: float) -> float:
 
 
