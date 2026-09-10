@@ -2581,6 +2581,11 @@ func poppy_head_plan(def: Dictionary, bulk: float, open_k: float) -> Dictionary:
 	var cup_r: float = float(def.get("seat_wide", 0.0)) * bulk \
 		* lerpf(0.55, 1.0, open_k)
 	var heart_k: float = float(def.get("heart_long_k", 1.6))
+	# КАК ВЫСОКО СИДИТ ТЁМНОЕ ТЕЛО НАД ДОНЦЕМ, в долях своей ширины. Её кадр
+	# 10.09.2026: «сердцевина мака слишком сильно выпирает» — было 0.75 своей
+	# ширины плюс половина длины сверху, и шестигранная шайба торчала над
+	# венчиком башенкой. Число одно, и низ тела считается от него же.
+	var sit: float = float(def.get("heart_sit", 0.75))
 	return {
 		"head": head,                 # длина лепестка внешнего ряда
 		"hw": hw,                     # ширина тёмного тела
@@ -2595,9 +2600,9 @@ func poppy_head_plan(def: Dictionary, bulk: float, open_k: float) -> Dictionary:
 		# читалось кубиком, торчащим из цветка. Половина длины (`heart_low`)
 		# считается ОТ ТОЙ ЖЕ доли, а не своим числом: разъедься они, и низ тела
 		# уехал бы от самого тела.
-		"heart_mid": hw * 0.75,
+		"heart_mid": hw * sit,
 		"heart_long": hw * heart_k,
-		"heart_low": hw * 0.75 - hw * heart_k * 0.5,
+		"heart_low": hw * sit - hw * heart_k * 0.5,
 		# ТЫЧИНКА начинается на самом донце, кольцом такого радиуса.
 		"pin_low": 0.0,
 		# ЦВЕТОЛОЖЕ СЧИТАЕТСЯ ЗДЕСЬ, А НЕ В СБОРКЕ, и это починка её кадра
@@ -3050,24 +3055,6 @@ func _emit_poppy_bud(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var cross: Vector3 = tip.cross(flat).normalized()
 	var away: Vector3 = (flat * cos(turn) + cross * sin(turn)).normalized()
 
-	# КРАПИНКИ НА БУТОНЕ — ГУЩЕ, ЧЕМ ГДЕ БЫ ТО НИ БЫЛО (её порядок 09.09.2026:
-	# больше, чем на стеблях третьего поколения). Тут они СЧИТАЮТСЯ ШТУКАМИ, а
-	# не густотой на метр: бутон один и тот же у всех стеблей, длине мерить
-	# нечего.
-	#
-	# Ложатся по витку на поверхность зелёного тела и вытянуты вдоль него — так
-	# они и лежат у живого бутона, сбегаясь к макушке.
-	var specks: int = int(def.get("speck_bud", 0))
-	if specks > 0:
-		var s_c: Color = stem_c.darkened(float(def.get("speck_dark", 0.22)))
-		for i in range(specks):
-			var t_s: float = (float(i) + 0.5) / float(specks)
-			var a_s: float = float(i) * 2.399963      # золотой угол — виток
-			var out_s: Vector3 = (flat * cos(a_s) + cross * sin(a_s)).normalized()
-			var at_s: Vector3 = top + tip * (bl * t_s) \
-				+ out_s * (bw * 1.01 * sin(t_s * PI))
-			_emit_speck(st, at_s, tip, out_s, bw * 0.26, bw * 0.07, s_c, stage)
-
 	# КРАСНОЕ ТЕЛО — РОВНО ДЕВЯТЬ ДЕСЯТЫХ БУТОНА, И ЯВЛЯЕТСЯ ОНО ТОЛЬКО С
 	# РАСКОЛОМ (её правило, повторено 09.09.2026). Цвет тот же, что у цветка,
 	# который встанет на этом месте: `poppy_paint` по СТЕБЛЕВОЙ соли, а её
@@ -3077,25 +3064,23 @@ func _emit_poppy_bud(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var red_w: float = bw * 0.90
 	if sp > 0.02:
 		# ТЕЛО ГАСИМ ДО ТОЙ ЖЕ ЯРКОСТИ, ЧТО ДАЁТ КАРТИНКА ЛЕПЕСТКА. Краска у них
-			# одна, а выходило разное: лепесток идёт картинкой и она его притеняет,
-			# тело картинки не имеет вовсе. Равнять надо ВЫХОД, а не краску.
-		_emit_pill(st, top + tip * (red_l * 0.5), tip, red_l, red_w,
-			poppy_paint(salt, def) * petal_tone * shade,
-			side, stage)
-	# ЗАКРЫТЫЙ БУТОН — ТЕЛО, РАСКРЫТЫЕ СТВОРКИ — ЛЕПЕСТКИ.
+		# одна, а выходило разное: лепесток идёт картинкой и она его притеняет,
+		# тело картинки не имеет вовсе. Равнять надо ВЫХОД, а не краску.
+		_emit_globe(st, top + tip * (red_l * 0.5), tip, red_w,
+			red_l / maxf(red_w * 2.0, 0.00001),
+			poppy_paint(salt, def) * petal_tone * shade, side, stage,
+			int(def.get("bud_sides", 8)), int(def.get("bud_rings", 5)))
+	# ЗАКРЫТЫЙ БУТОН — ТЕЛО, РАСКРЫТЫЕ СТВОРКИ — ВОГНУТЫЕ ЧАШИ.
 	#
 	# Её слово 09.09.2026: «створки бутона не должны быть объёмными телами. Когда
 	# бутон ещё не открыт, он представляет собой зелёное тело, но когда створки
-	# раскрываются — они становятся похожими на лепестки, только зелёными».
+	# раскрываются — они становятся похожими на лепестки, только зелёными». И её
+	# уточнение 10.09.2026 по кадру: «сделай половинки бутона... не просто
+	# спрайтами, а самостоятельными фигурами — вогнутыми чашами».
 	#
-	# ЧТО БЫЛО НЕВЕРНО. Створки делались двумя пилюлями — то есть объёмными
-	# половинками, — и раскрывшийся бутон читался двумя зелёными сосисками по
-	# бокам. У живого мака чашелистик тонкий: пока он прижат, вместе со вторым он
-	# и есть тело бутона, а отойдя — становится плоской зелёной пластинкой.
-	#
-	# ОТСЮДА И УСТРОЙСТВО: тело и створки живут ОДНОВРЕМЕННО, но перетекают друг
-	# в друга. Тело сходит на нет по мере раскола, пластинки набирают длину — на
-	# любой доле раскола сумма читается целым бутоном, а не подменой одного
+	# ОТСЮДА УСТРОЙСТВО: тело и створки живут ОДНОВРЕМЕННО, но перетекают друг в
+	# друга. Тело сходит на нет по мере раскола, чаши набирают длину и отходят —
+	# на любой доле раскола сумма читается целым бутоном, а не подменой одного
 	# другим. Резкой смены нет нигде.
 	var shell: Color = stem_c.lightened(0.05)
 	if sp < 0.98:
@@ -3105,30 +3090,60 @@ func _emit_poppy_bud(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		# зелёного бутона). Прежде тело худело вдвое быстрее, чем укорачивалось:
 		# ширина шла к 0.20, а красное тело внутри стоит на 0.90 — и уже на
 		# шестнадцатой доле раскола красное оказывалось ШИРЕ зелёного и вылезало
-		# наружу боками. Её правило «красное не больше девяти десятых бутона»
-		# держится только тогда, когда зелёное этих девяти десятых не теряет.
+		# наружу боками.
 		#
-		# Теперь бутон лопается СВЕРХУ, как настоящий: тело укорачивается от
-		# верхушки, а в поясе почти не меняется. Красное показывается там, где
-		# зелёное отступило, — то есть у макушки, и только там.
+		# ТЕЛО — ШАР, А НЕ ДВЕ ТРУБКИ ВСТЫК (её кадр 10.09.2026: «у бутона дыра в
+		# текстурах»). Дыра была настоящей: трубка не закрыта с торцов, и в
+		# макушку бутона было видно насквозь. У шара полюса сходятся в точку —
+		# закрывать нечего.
 		var g_long: float = bl * lerpf(1.0, 0.34, sp)
-		_emit_pill(st, top + tip * (g_long * 0.5), tip, g_long,
-			bw * lerpf(1.0, 0.93, sp), shell, side, stage)
+		var g_wide: float = bw * lerpf(1.0, 0.93, sp)
+		_emit_globe(st, top + tip * (g_long * 0.5), tip, g_wide,
+			g_long / maxf(g_wide * 2.0, 0.00001), shell, side, stage,
+			int(def.get("bud_sides", 8)), int(def.get("bud_rings", 5)))
 	if sp > 0.02:
-		# СТВОРКИ — ТОТ ЖЕ ПРИБОР, ЧТО И ЛЕПЕСТКИ, только их двое и они зелёные.
-		# Своего рисовальщика заводить не за чем: чашелистик это и есть лепесток
-		# по устройству, разница только в цвете и в том, что их два.
-		var edge: Vector3 = tip.cross(away).normalized()
-		_emit_petals(st, [{
-			"at": top + tip * (bl * 0.06), "along": tip,
-			"face": away, "wide": edge,
-			# СТВОРКА НЕ КОРОЧЕ САМОГО БУТОНА — её правило 09.09.2026 про то, что
-			# встающее на место бутона не может быть меньше его.
-			"long": bl * lerpf(1.0, 1.12, sp),
-			"shade": shade, "salt": salt + 7717, "tint": shell,
-			"ring": bw * 0.35,
-		}], p, def, POPPY_PETAL_COL, POPPY_PETAL_KINDS, 1, 2,
-			lerpf(6.0, 72.0, sp))
+		# СТВОРКИ — ДВЕ ВОГНУТЫЕ ЧАШИ, отходящие в стороны по мере раскола.
+		# Разбор устройства — у `_emit_shell`.
+		# УГОЛ РАЗВЕДЕНИЯ СТВОРКИ — из карточки (`bud_split_lean`), а не гвоздём в
+		# коде: поле там стояло с самого начала и не читалось никем — старые
+		# створки-спрайты разводились своим числом внутри сборки.
+		var lean: float = deg_to_rad(lerpf(4.0,
+			float(def.get("bud_split_lean", 66.0)), sp))
+		var s_long: float = bl * lerpf(1.0, 1.12, sp)
+		var s_wide: float = bw * float(def.get("bud_shell_wide", 0.98))
+		var s_span: float = deg_to_rad(float(def.get("bud_shell_span", 72.0)))
+		var seat_s: Vector3 = top + tip * (bl * 0.06)
+		for turn_i in [1.0, -1.0]:
+			var out_s: Vector3 = away * float(turn_i)
+			# Ось створки отклоняется от оси бутона, а её выпуклость смотрит
+			# ровно поперёк этой оси — иначе чаша уезжает боком и перестаёт
+			# обнимать тело.
+			var along_s: Vector3 = (tip * cos(lean) + out_s * sin(lean)).normalized()
+			var face_s: Vector3 = (out_s * cos(lean) - tip * sin(lean)).normalized()
+			_emit_shell(st, seat_s, along_s, face_s, s_long, s_wide, s_span,
+				shell, stage, int(def.get("bud_shell_rings", 4)),
+				int(def.get("bud_shell_steps", 5)))
+			# КРАПИНКИ ИДУТ ПО СТВОРКАМ, А НЕ ПО ТЕЛУ (её слово 10.09.2026).
+			# Кладём их по ТОЙ ЖЕ мерке, по которой построена сама чаша, — иначе
+			# они снова повисли бы в воздухе рядом с поверхностью.
+			var specks: int = int(def.get("speck_bud", 0))
+			if specks > 0:
+				var edge_s: Vector3 = along_s.cross(face_s).normalized()
+				var s_c: Color = shell.lightened(
+					float(def.get("speck_light", 0.24)))
+				for i in range(specks):
+					var u_s: float = (float(i) + 0.5) / float(specks)
+					# Виток золотым углом — по нему крапинки и расходятся
+					# поперёк створки, не сбиваясь в полосы.
+					var a_s: float = s_span * (2.0 * fmod(float(i) * 0.618034,
+						1.0) - 1.0) * 0.86
+					var got: Array = _shell_point(seat_s, along_s, face_s,
+						edge_s, u_s, a_s, s_long, s_wide)
+					var n_s: Vector3 = got[1]
+					_emit_speck(st, Vector3(got[0]) + n_s * (s_wide * 0.01),
+						along_s, n_s, s_wide * float(def.get("speck_long", 1.2))
+						* 0.5, s_wide * float(def.get("speck_wide", 0.5)) * 0.5,
+						s_c, stage)
 
 
 # ПРОДОЛГОВАТОЕ ТЕЛЬЦЕ — бутон и сердцевина мака. Обе выходят из одной формы:
@@ -3219,7 +3234,10 @@ func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
 	var many: int = int(round(long_m * dens))
 	if many <= 0:
 		return
-	var c: Color = tint.darkened(float(def.get("speck_dark", 0.22)))
+	# СВЕТЛЕЕ САМОГО СТЕБЛЯ (её слово 10.09.2026: «сделай их светлее, а сами
+	# стебли темнее»). Тёмные крапинки на тёмном стебле читались щетиной — на
+	# кадре они выглядели торчащими волосками, а не пятнышками на коже.
+	var c: Color = tint.lightened(float(def.get("speck_light", 0.24)))
 	var links: int = path.size() - 1
 	for i in range(many):
 		var t: float = (float(i) + 0.5) / float(many)
@@ -3235,7 +3253,7 @@ func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
 		var turn: Vector3 = way.cross(side_v).normalized()
 		var out: Vector3 = (side_v * cos(a) + turn * sin(a)).normalized()
 		var r: float = lerpf(r_foot, r_head, t)
-		_emit_speck(st, at + out * (r * 1.01), way, out,
+		_emit_speck(st, at + out * (r * 1.004), way, out,
 			r * float(def.get("speck_long", 2.0)),
 			r * float(def.get("speck_wide", 0.55)), c, stage)
 
@@ -3301,6 +3319,75 @@ func _emit_globe(st: SurfaceTool, at: Vector3, along: Vector3, wide: float,
 				st.set_normal(norms[atk][i + 1 if nxt else i])
 				st.set_uv(Vector2(0.5, 0.5))
 				st.add_vertex(rows[atk][i + 1 if nxt else i])
+
+
+# ТОЧКА НА СТВОРКЕ БУТОНА и нормаль в ней — одна мерка на саму створку и на
+# крапинки по ней. Считать их порознь значило бы, что крапинки лежат на другой
+# поверхности, а не на той, что видно, — ровно та беда, ради которой всё это и
+# переделывается.
+#
+# `u` — вдоль створки от донца (0) к кончику (1), `a` — угол поперёк, вокруг оси.
+# Чаша ВОГНУТАЯ: точки лежат на дуге радиуса `r` вокруг собственной оси створки,
+# и открыта она внутрь, к телу бутона.
+func _shell_point(seat: Vector3, along: Vector3, away: Vector3, edge: Vector3,
+		u: float, a: float, long: float, wide: float) -> Array:
+	# Ширина створки по длине: у донца уже, к середине шире, к кончику сходит на
+	# нет — это и есть очертание чашелистика.
+	var r: float = wide * sin(PI * clampf(0.22 + 0.78 * u, 0.0, 1.0))
+	var dir: Vector3 = (away * cos(a) + edge * sin(a)).normalized()
+	return [seat + along * (long * u) + dir * r, dir]
+
+
+# СТВОРКА БУТОНА — ВОГНУТАЯ ЧАША, А НЕ ПЛОСКИЙ СПРАЙТ.
+#
+# Её слово 10.09.2026: «сделай половинки бутона, которые отделяются при его
+# раскрытии, не просто спрайтами, а самостоятельными фигурами — вогнутыми
+# чашами. Опушение должно идти по ним, а не по телу лепестков».
+#
+# ЧТО БЫЛО. Створки рисовались тем же прибором, что и лепестки: плоская дощечка
+# с картинкой. Для лепестка это честно — он и в жизни плоский, — а чашелистик
+# мака полукруглый, он ОБНИМАЕТ бутон. С ребра плоская створка вырождалась в
+# черту, и на кадре бутон стоял с двумя зелёными лоскутами по бокам.
+#
+# Теперь это тело: дуга поперёк, сужение к кончику, вогнутая сторона смотрит на
+# ось бутона. Двусторонняя отрисовка (`cull_disabled` в `Blades.gdshader`)
+# позволяет обойтись одной оболочкой без толщины — изнутри чаша видна так же,
+# как снаружи.
+func _emit_shell(st: SurfaceTool, seat: Vector3, along: Vector3, away: Vector3,
+		long: float, wide: float, span: float, tint: Color, stage: int,
+		rings: int = 4, steps: int = 5) -> void:
+	if long <= 0.0 or wide <= 0.0 or rings < 2 or steps < 2:
+		return
+	var edge: Vector3 = along.cross(away)
+	if edge.length_squared() < 0.000000001:
+		return
+	edge = edge.normalized()
+	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
+	st.set_color(tint.srgb_to_linear())
+	var rows: Array = []
+	var norms: Array = []
+	for i in range(rings + 1):
+		var u: float = float(i) / float(rings)
+		var line: Array = []
+		var nline: Array = []
+		for j in range(steps + 1):
+			var a: float = -span + 2.0 * span * float(j) / float(steps)
+			var got: Array = _shell_point(seat, along, away, edge, u, a,
+				long, wide)
+			line.append(got[0])
+			nline.append(got[1])
+		rows.append(line)
+		norms.append(nline)
+	for i in range(rings):
+		for j in range(steps):
+			for t in BAND_TRI:
+				var far: bool = int(t[0]) == 1
+				var nxt: bool = int(t[1]) == 1
+				var gi: int = i + (1 if far else 0)
+				var gj: int = j + (1 if nxt else 0)
+				st.set_normal(norms[gi][gj])
+				st.set_uv(Vector2(0.5, 0.5))
+				st.add_vertex(rows[gi][gj])
 
 
 # =============================================================================
