@@ -3743,7 +3743,7 @@ func _touch_kids(pid: int, orphan: bool = false, snap: float = 0.0) -> void:
 					# на том конце, где колено оборвалось.
 					elif snap > 0.0 and here.distance_to(patches[kid]["pos"]) > snap:
 						torn.append(kid)
-					_dirty[int(patches[kid]["cell"])] = true
+					_dirty[int(patches[kid]["cell"])] = 0
 	for kid in torn:
 		_unlink(kid)         # и родителю вернуть счёт детей: он снова кончик
 
@@ -3800,7 +3800,7 @@ func _stem_born(pid: int, from: int) -> void:
 		patches[at]["load"] = int(patches[at].get("load", 0)) + 1
 		if int(patches[at].get("kidorder", 0)) < deep:
 			patches[at]["kidorder"] = deep
-		_dirty[int(patches[at]["cell"])] = true
+		_dirty[int(patches[at]["cell"])] = 0
 		at = int(patches[at].get("from", -1))
 		if not patches.has(at):
 			return
@@ -3820,14 +3820,14 @@ func _unlink(pid: int) -> void:
 	if not patches.has(up):
 		return
 	patches[up]["kids"] = maxi(0, int(patches[up].get("kids", 0)) - 1)
-	_dirty[int(patches[up]["cell"])] = true
+	_dirty[int(patches[up]["cell"])] = 0
 	# И НОШУ У ПРЕДКОВ УБАВЛЯЕМ — на всё, что ушло вместе с этим звеном. Иначе
 	# основание навсегда останется толстым по давно оторванной ветви.
 	var gone: int = 1 + int(patches[pid].get("load", 0))
 	var at: int = up
 	for _step in range(400):
 		patches[at]["load"] = maxi(0, int(patches[at].get("load", 0)) - gone)
-		_dirty[int(patches[at]["cell"])] = true
+		_dirty[int(patches[at]["cell"])] = 0
 		at = int(patches[at].get("from", -1))
 		if not patches.has(at):
 			return
@@ -3844,7 +3844,7 @@ func remove_at(pid: int) -> void:
 	patches.erase(pid)
 	if by_cell.has(cell):
 		by_cell[cell].erase(pid)
-	_dirty[cell] = true
+	_dirty[cell] = 0
 	flush_now()
 
 
@@ -4105,7 +4105,7 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		if int(spot.get("bloom", 0)) <= 0:
 			patches[from]["bore"] = true
 		# Родитель перерисовывается вместе с ребёнком: у стебля они делят стык.
-		_dirty[int(patches[from]["cell"])] = true
+		_dirty[int(patches[from]["cell"])] = 0
 		if _is_stem(def):
 			_stem_born(pid, from)
 	if not by_cell.has(cell):
@@ -4114,7 +4114,7 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 	_live[pid] = true
 	_coarse_add(pid, patches[pid])
 	_link_near(pid)
-	_dirty[cell] = true
+	_dirty[cell] = 0
 	# НЕ СОШЁЛСЯ ЛИ ЗДЕСЬ СТЫК ДВУХ ВИДОВ. Спрашиваем последним, когда
 	# новорождённый уже стоит в списках: встреча ищет пару по ним же.
 	_meet_check(pid)
@@ -6491,7 +6491,7 @@ func import_garden(d: Dictionary) -> void:
 					PlantsData.ITEMS[String(patches[pid]["id"])]):
 			_live[pid] = true
 		_coarse_add(pid, patches[pid])
-		_dirty[cell] = true
+		_dirty[cell] = 0
 
 
 func surface_changed(cells: Array = []) -> void:
@@ -6577,8 +6577,8 @@ func surface_changed(cells: Array = []) -> void:
 				by_cell[now] = {}
 			by_cell[now][pid] = true
 			p["cell"] = now
-			_dirty[was] = true
-		_dirty[now] = true
+			_dirty[was] = 0
+		_dirty[now] = 0
 	for pid in doomed:
 		remove_at(pid)
 	# И РВЁМ ЦЕПЬ, ЕСЛИ ЕЁ РАСТЯНУЛО. Правка рельефа пересаживает каждое звено
@@ -6649,6 +6649,7 @@ const REBUILD_MS: float = 4.0               # запас на пересборк
 var _build_owed: float = 0.0                # мс перерасхода, взятые у будущих кадров
 
 var _worst_cell: float = 0.0                # самый дорогой кусок, мс
+var _worst_plants: int = 0                  # и сколько в нём растений
 var _drawn_cells: int = 0                   # и сколько их собрано за раз
 # СКОЛЬКО ПЕРЕСБОРКА СТОИЛА ЗА ВЕСЬ ПРОГОН — счёт от начала и до обнуления.
 # Разовые числа выше говорят про один заход, а цена показа роста копится: одна и
@@ -6712,7 +6713,7 @@ func _mark_steps() -> void:
 			p["step"] = step
 			@warning_ignore("integer_division")
 			if was < 0 or step / SHOW_EVERY != was / SHOW_EVERY:
-				_dirty[int(p["cell"])] = true
+				_dirty[int(p["cell"])] = 0
 				marks_step += 1
 			if not bool(p.get("met", false)) and _meet_wake(p):
 				p["met"] = true
@@ -6737,6 +6738,7 @@ func _drain(budget: float) -> void:
 		_build_owed = 0.0
 	var t0: int = Time.get_ticks_usec()
 	_worst_cell = 0.0
+	_worst_plants = 0
 	_drawn_cells = 0
 	# ПОД КИСТЬЮ СОБИРАЕМ ПЕРВЫМ. Обычный порядок — в каком помечали, и он верен:
 	# кусок, помеченный раньше, и отстал раньше. Но пока идёт всплеск от руки,
@@ -6749,22 +6751,38 @@ func _drain(budget: float) -> void:
 			return main.grid.seeds[a].distance_squared_to(spot) \
 				< main.grid.seeds[b].distance_squared_to(spot))
 	for cell in order:
-		var c0: int = Time.get_ticks_usec()
-		_rebuild_cell(cell)
+		# ЧАСТЕЙ СТОЛЬКО, СКОЛЬКО РАСТЕНИЙ (см. `_parts_for`). Число может
+		# упасть — тогда лишние мешы снимаем сразу, иначе они остались бы
+		# висеть со старой зеленью.
+		var parts: int = _parts_for(cell)
+		_drop_parts_from(cell, parts)
+		# С КАКОЙ ЧАСТИ ПРОДОЛЖАТЬ. Пометка кладёт ноль — с начала; прерванная
+		# по запасу ячейка кладёт номер следующей части.
+		var from_part: int = int(_dirty.get(cell, 0))
+		for part in range(from_part, parts):
+			var c0: int = Time.get_ticks_usec()
+			var mine: int = _rebuild_part(cell, part, parts)
+			_drawn_cells += 1
+			var spent: float = float(Time.get_ticks_usec() - c0) / 1000.0
+			if spent > _worst_cell:
+				_worst_cell = spent
+				_worst_plants = mine
+			built_all += 1
+			built_ms += spent
+			if budget > 0.0:
+				var went: float = float(Time.get_ticks_usec() - t0) / 1000.0
+				if went >= budget:
+					# Что взяли сверх запаса — записываем в долг. Пока идёт
+					# всплеск, долга не заводим вовсе: там пересборка идёт
+					# полным ходом.
+					if part + 1 < parts:
+						_dirty[cell] = part + 1
+					else:
+						_dirty.erase(cell)
+					if _burst_left <= 0.0:
+						_build_owed = went - budget
+					return
 		_dirty.erase(cell)
-		_drawn_cells += 1
-		var spent: float = float(Time.get_ticks_usec() - c0) / 1000.0
-		_worst_cell = maxf(_worst_cell, spent)
-		built_all += 1
-		built_ms += spent
-		if budget > 0.0:
-			var went: float = float(Time.get_ticks_usec() - t0) / 1000.0
-			if went >= budget:
-				# Что взяли сверх запаса — записываем в долг. Пока идёт всплеск,
-				# долга не заводим вовсе: там пересборка идёт полным ходом.
-				if _burst_left <= 0.0:
-					_build_owed = went - budget
-				return
 
 
 # ПЕРЕСОБРАТЬ ВСЁ НЕМЕДЛЕННО. Зовут это там, где игрок ждёт ответа СЕЙЧАС:
@@ -6782,21 +6800,63 @@ func live_count() -> int:
 	return _live.size()
 
 
-func rebuild_stats() -> Vector2:
-	return Vector2(float(_drawn_cells), _worst_cell)
+func rebuild_stats() -> Vector3:
+	return Vector3(float(_drawn_cells), _worst_cell, float(_worst_plants))
 
 
 # Всё живое рисуется одинаково — дощечками с картинкой. Гладкая подушка для
 # лианы, стоявшая тут прежде, оказалась хуже заглушки: бледные пузыри облепляли
 # глыбу и забивали собой весь кадр. Лиана теперь тот же пучок, только вытянутый
 # по подъёму; своя форма со стеблем и листьями за ней всё ещё числится.
-func _rebuild_cell(cell: int) -> void:
+# ЯЧЕЙКА СОБИРАЕТСЯ ПО ЧАСТЯМ, А НЕ ЦЕЛИКОМ.
+#
+# Кусок сада — это ячейка решётки со всеми её растениями, и до 10.09.2026 он
+# собирался за один заход: помечена ячейка — кадр платит за неё целиком, сколько
+# бы в ней ни росло. Замер держал 10.6 мс на самой густой (38 растений) при
+# запасе на кадр 4.0 — то есть запас не значил ничего, ровно как когда-то не
+# значил его собственный расчёт (см. `_build_owed`). Разделить кусок было нечем,
+# и в README это стояло открытым: «лечится размером кусков, а не временем».
+#
+# Вот размер. Ячейка делится на части по числу растений, часть — свой меш; какое
+# растение в какой части, решает остаток от деления его номера. Номер у растения
+# постоянный, значит и часть постоянна: сосед по части не меняется от того, что
+# рядом кто-то вырос или снят.
+#
+# ПОЧЕМУ НЕ «СОБИРАТЬ ЯЧЕЙКУ ПОРЦИЯМИ ВО ВРЕМЕНИ»: незаконченная сборка живёт
+# между кадрами, а сад в это время растёт — меш вышел бы склеенным из разных
+# мгновений. Части же собираются каждая целиком и мгновенно.
+#
+# ЧЕМ ПЛАТИМ: мешей в саду становится больше, а каждый меш — это ещё один вызов
+# отрисовки, и второй раз на тень. Поэтому частей не больше `PART_MAX`, и
+# заводятся они только там, где растений и правда много.
+const PART_PLANTS: int = 12       # к скольким растениям на часть стремимся
+const PART_MAX: int = 4           # и сколько частей у ячейки самое большее
+
+
+func _parts_for(cell: int) -> int:
 	var here: Dictionary = by_cell.get(cell, {})
 	if here.is_empty():
-		if cell_nodes.has(cell):
-			cell_nodes[cell].queue_free()
-			cell_nodes.erase(cell)
-		return
+		return 1
+	return clampi(int(ceil(float(here.size()) / float(PART_PLANTS))), 1, PART_MAX)
+
+
+# Убрать мешы частей, которых у ячейки больше нет: растений стало меньше, частей
+# тоже, и лишние узлы иначе остались бы висеть со старой зеленью.
+func _drop_parts_from(cell: int, from_part: int) -> void:
+	for p in range(from_part, PART_MAX):
+		var key := Vector2i(cell, p)
+		if cell_nodes.has(key):
+			cell_nodes[key].queue_free()
+			cell_nodes.erase(key)
+
+func _rebuild_part(cell: int, part: int, parts: int) -> int:
+	var here: Dictionary = by_cell.get(cell, {})
+	var key := Vector2i(cell, part)
+	if here.is_empty():
+		if cell_nodes.has(key):
+			cell_nodes[key].queue_free()
+			cell_nodes.erase(key)
+		return 0
 
 	var tufts := SurfaceTool.new()
 	tufts.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -6808,14 +6868,20 @@ func _rebuild_cell(cell: int) -> void:
 	tufts.set_custom_format(1, SurfaceTool.CUSTOM_R_FLOAT)
 	_morph_none(tufts)
 	var any_tuft := false
+	var mine: int = 0
 	for pid in here:
+		# ЧАСТЬ РЕШАЕТ ОСТАТОК ОТ ДЕЛЕНИЯ НОМЕРА растения: номер постоянен, значит
+		# и часть постоянна, и сборка одной части не трогает соседние.
+		if parts > 1 and int(pid) % parts != part:
+			continue
+		mine += 1
 		if patches.has(pid) and _emit_tuft(tufts, patches[pid]):
 			any_tuft = true
 	if not any_tuft:
-		if cell_nodes.has(cell):
-			cell_nodes[cell].queue_free()
-			cell_nodes.erase(cell)
-		return
+		if cell_nodes.has(key):
+			cell_nodes[key].queue_free()
+			cell_nodes.erase(key)
+		return mine
 
 	# И УЗЕЛ, И МЕШ ПЕРЕИСПОЛЬЗУЕМ, а не создаём заново. Кочка пересобирается на
 	# каждой ступени роста, ступеней девять, кочек сотни — за один прогон это
@@ -6823,7 +6889,7 @@ func _rebuild_cell(cell: int) -> void:
 	# рядом с новыми: видеокарта упиралась в предел числа буферов и переставала
 	# выдавать новые («Can't create buffer of size…»). Со снятием граней у того
 	# же меша буферы освобождаются на месте, и запас не копится.
-	var mi: MeshInstance3D = cell_nodes.get(cell)
+	var mi: MeshInstance3D = cell_nodes.get(key)
 	if mi == null:
 		mi = MeshInstance3D.new()
 		mi.mesh = ArrayMesh.new()
@@ -6843,11 +6909,12 @@ func _rebuild_cell(cell: int) -> void:
 		# тени теперь одна вместо четырёх (см. `_setup_light`), то есть рисовать
 		# её вчетверо дешевле, чем было бы прежними настройками.
 		add_child(mi)
-		cell_nodes[cell] = mi
+		cell_nodes[key] = mi
 	var mesh: ArrayMesh = mi.mesh
 	mesh.clear_surfaces()
 	tufts.set_material(_blade_mat)
 	tufts.commit(mesh)
+	return mine
 
 
 # КОЧКА — ТЕЛО ПЛЮС ВОРС (решение пользователя, по двум её рисункам).

@@ -2908,12 +2908,13 @@ func _selftest() -> void:
 	var t2 := Time.get_ticks_usec()
 	plants.flush_now()
 	var draw := (Time.get_ticks_usec() - t2) / 1000.0
-	var built: Vector2 = plants.rebuild_stats()
+	var built: Vector3 = plants.rebuild_stats()
 	print("Растения: кочек — ", _moss_count(),
 		", 22 секунды роста за ", snappedf(grow, 0.1), " мс")
 	print("Пересборка сада: ", snappedf(draw, 0.1), " мс на ", int(built.x),
 		" кусков, самый дорогой — ", snappedf(built.y, 0.1),
-		" мс; запас на кадр ", snappedf(plants.REBUILD_MS, 0.1),
+		" мс (растений в нём ", int(built.z), "); запас на кадр ",
+		snappedf(plants.REBUILD_MS, 0.1),
 		" мс — дорогой кусок его не делится и перебирает в одиночку")
 	# ЧЕГО СТОИТ ТЕНЬ ОТ РАСТЕНИЙ. Сам расход на видеокарте отсюда не померить —
 	# в безоконном прогоне никто ничего не рисует, — а вот ЧИСЛО МЕШЕЙ померить
@@ -5861,8 +5862,9 @@ func _poppy_check() -> void:
 	# сборка, по той самой линии, что ложится в меш (стенду её взять неоткуда);
 	# здесь только сносим счёт и пересобираем сад заново, чтобы он набрался.
 	plants.petal_watch_clear()
-	for cell in plants.cell_nodes:
-		plants._dirty[cell] = true
+	# Ключ у мешей сада — ЧАСТЬ ячейки (`Vector2i`), а помечают по самой ячейке.
+	for key in plants.cell_nodes:
+		plants._dirty[int(Vector2i(key).x)] = 0
 	plants.flush_now()
 	print("Мак: лепестки против помех — отвернулось или сложилось ",
 		plants.petals_folded, " из ", plants.petals_seen,
