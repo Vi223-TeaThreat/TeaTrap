@@ -5864,7 +5864,7 @@ func _poppy_check() -> void:
 	plants.petal_watch_clear()
 	# Ключ у мешей сада — ЧАСТЬ ячейки (`Vector2i`), а помечают по самой ячейке.
 	for key in plants.cell_nodes:
-		plants._dirty[int(Vector2i(key).x)] = 0
+		plants._mark_cell(int(Vector2i(key).x))
 	plants.flush_now()
 	print("Мак: лепестки против помех — отвернулось или сложилось ",
 		plants.petals_folded, " из ", plants.petals_seen,
@@ -6477,8 +6477,14 @@ func _show_bench(args: PackedStringArray) -> void:
 		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if busy > LOAD_ALARM
 			else "замерам можно верить"))
 	var secs: float = _arg_num(args, "--secs", 45.0)
+	# ЧЕЙ ПОКАЗ МЕРЯЕМ. Мох и мак стоят разного: у кочки под сотню треугольников,
+	# у маковой куртины под четыре тысячи на куст. `--kind=poppy` сеет мак.
+	var kind: String = "moss"
+	for a in args:
+		if a.begins_with("--kind="):
+			kind = a.substr(7)
 	plants._rng.seed = 20260904
-	_seed_moss(6)
+	_seed_moss(6, kind)
 	_flush_chunks()
 	plants.flush_now()
 	plants.built_reset()
@@ -6498,8 +6504,8 @@ func _show_bench(args: PackedStringArray) -> void:
 		queue_sum += float(q)
 	plants.flush_now()
 	var whole: float = float(Time.get_ticks_usec() - t0) / 1000.0
-	var live: int = _moss_count()
-	print("Показ роста: ", secs, " с роста, кочек выросло ", live,
+	var live: int = plants.patches.size()
+	print("Показ роста (", kind, "): ", secs, " с роста, растений ", live,
 		"; пересборок ", plants.built_all, " на ",
 		snappedf(plants.built_ms, 0.1), " мс — это ",
 		snappedf(plants.built_ms / maxf(secs, 0.001), 0.1),
@@ -6859,7 +6865,9 @@ func _seed_vine_on_rock() -> void:
 	print("Посев лианы на боку глыбы: подходящего бока не нашлось")
 
 
-func _seed_moss(count: int) -> void:
+# ПОСЕВ НА ЗЕМЛЕ — мхом по умолчанию, но стенду показа нужен и мак: цена показа
+# у них разная на порядок, и мерить мак посевом мха значит не мерить его вовсе.
+func _seed_moss(count: int, id: String = "moss") -> void:
 	var tops: Array = []
 	for cell in solid:
 		var s: Vector3 = grid.seeds[cell]
@@ -6874,7 +6882,7 @@ func _seed_moss(count: int) -> void:
 	for item in tops:
 		if planted >= count:
 			break
-		var pid: int = plants.plant_at(grid.seeds[int(item[1])], "moss")
+		var pid: int = plants.plant_at(grid.seeds[int(item[1])], id)
 		if pid >= 0:
 			if planted == 0:
 				_macro_focus = plants.patches[pid]["pos"]
