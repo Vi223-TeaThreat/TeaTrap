@@ -1793,6 +1793,8 @@ func straighten(index: int, raw: Vector3) -> Vector3:
 # — там она посчитана своей копией нарочно: это самое горячее место отрисовки,
 # и вызов через ссылку стоил бы кадра. ПРАВИТЬ ОБЕ.
 func field_slope(index: int, calm: bool = false) -> Vector3:
+	if not calm:
+		return _slope_fill(index)
 	var here: Vector3 = seeds[index]
 	var f0: float = _fv(index, calm)
 	var g := Vector3.ZERO
@@ -1806,6 +1808,39 @@ func field_slope(index: int, calm: bool = false) -> Vector3:
 		if len2 > 0.000001:
 			g += d * ((_fv(s, calm) - f0) / len2)
 	return straighten(index, g)
+
+
+# ТОТ ЖЕ НАКЛОН ПО НАСТОЯЩЕМУ ПОЛЮ — без вызовов внутри. Через поиск земли идёт
+# весь рост (замер 11.09.2026: двадцать семь тысяч поисков за сорок пять секунд
+# мохового сада, шесть секунд из десяти на удары сердца), и по семь вызовов на
+# каждый наклон — `_fv` на семя и `straighten` в конце — стоили дороже самой
+# арифметики.
+#
+# АРИФМЕТИКА ТА ЖЕ ДО ПОСЛЕДНЕГО ЗНАКА: те же действия в том же порядке, только
+# без вызовов. Проверено отпечатком роста (`--printbench`) — сад и меши прежние.
+func _slope_fill(index: int) -> Vector3:
+	var here: Vector3 = seeds[index]
+	var f0: float = fill[index]
+	var raw := Vector3.ZERO
+	var at := index * 6
+	for k in range(6):
+		var s: int = nb_table[at + k]
+		if s < 0:
+			continue
+		var d: Vector3 = seeds[s] - here
+		var len2: float = d.length_squared()
+		if len2 > 0.000001:
+			raw += d * ((fill[s] - f0) / len2)
+	var xx: float = slope_basis[at]
+	var yy: float = slope_basis[at + 1]
+	var zz: float = slope_basis[at + 2]
+	var xy: float = slope_basis[at + 3]
+	var xz: float = slope_basis[at + 4]
+	var yz: float = slope_basis[at + 5]
+	return Vector3(
+		xx * raw.x + xy * raw.y + xz * raw.z,
+		xy * raw.x + yy * raw.y + yz * raw.z,
+		xz * raw.x + yz * raw.y + zz * raw.z)
 
 
 # =============================================================================
@@ -1914,21 +1949,53 @@ const NEAR_NAMES := ["село", "вне игры", "поле ровное", "п
 	"ушло далеко", "мимо среза"]
 var near_why: int = 0
 
+# РАЗМЕТКА ПОСАДКИ НА СРЕЗ — из таблиц `Surface.gd`, один раз на запуск. Первая:
+# восемь кубиков вокруг узла по восемь углов, номер угла среди двадцати семи
+# узлов вокруг. Вторая: шесть тетраэдров подряд, по четыре угла. Переписывать
+# таблицы сюда руками нельзя — разойдутся, и посадка поедет мимо рисунка.
+var _snap_corner := PackedInt32Array()
+var _snap_tets := PackedInt32Array()
+
+func _build_snap_tables() -> void:
+	_snap_corner.clear()
+	for bx in range(-1, 1):
+		for by in range(-1, 1):
+			for bz in range(-1, 1):
+				for c in range(8):
+					var k: Vector3i = Vector3i(bx, by, bz) + SurfaceGeo.CORNER[c]
+					_snap_corner.append((k.x + 1) + (k.y + 1) * 3 + (k.z + 1) * 9)
+	_snap_tets.clear()
+	for t in SurfaceGeo.TETS:
+		for q in range(4):
+			_snap_tets.append(int(t[q]))
+
 func surface_near(p: Vector3, calm: bool = false) -> Dictionary:
 	var at := p
 	var j: int = -1
 	near_why = NEAR_OK
+	# НАКЛОН ПОМНИМ В ПРЕДЕЛАХ ОДНОГО ПОИСКА. Он спрашивается до пяти раз, а
+	# точка за шаг редко уходит из своей ячейки — у ячейки же наклон один. Помним
+	# только наклон настоящего поля: у спокойного своя величина.
+	var slope_j: int = -1
+	var slope_g := Vector3.ZERO
 	for _step in range(3):
 		j = cell_at(at)
-		if j < 0 or not in_play(j):
+		if j < 0 or j >= _play.size() or _play[j] != 1:
 			near_why = NEAR_OUT
 			return {}
-		var g: Vector3 = field_slope(j, calm)
+		var g: Vector3
+		if calm:
+			g = field_slope(j, true)
+		else:
+			if j != slope_j:
+				slope_g = _slope_fill(j)
+				slope_j = j
+			g = slope_g
 		var mag2: float = g.length_squared()
 		if mag2 < 0.0000001:
 			near_why = NEAR_FLAT
 			return {}
-		var here: float = _fv(j, calm) + g.dot(at - seeds[j])
+		var here: float = (_fv(j, true) if calm else fill[j]) + g.dot(at - seeds[j])
 		# Шаг ОГРАНИЧЕН одной ячейкой. Наклон — это прямая, продолженная от
 		# семени, и вдали от поверхности она врёт тем сильнее, чем дальше:
 		# у обрыва она выбрасывала точку на другую сторону кромки или вовсе в
@@ -1939,10 +2006,16 @@ func surface_near(p: Vector3, calm: bool = false) -> Dictionary:
 			move *= _spacing / span
 		at += move
 	j = cell_at(at)
-	if j < 0 or not in_play(j):
+	if j < 0 or j >= _play.size() or _play[j] != 1:
 		near_why = NEAR_OUT
 		return {}
-	var n: Vector3 = field_slope(j)
+	var n: Vector3
+	if j == slope_j:
+		n = slope_g
+	else:
+		n = _slope_fill(j)
+		slope_j = j
+		slope_g = n
 	if n.length_squared() < 0.0000001:
 		near_why = NEAR_FLAT
 		return {}
@@ -1978,7 +2051,10 @@ func surface_near(p: Vector3, calm: bool = false) -> Dictionary:
 	if at.distance_to(p) > _spacing * 1.5:
 		near_why = NEAR_FAR
 		return {}
-	n = field_slope(j)
+	if j != slope_j:
+		n = _slope_fill(j)
+	else:
+		n = slope_g
 	if n.length_squared() < 0.0000001:
 		near_why = NEAR_FLAT
 		return {}
@@ -2002,7 +2078,20 @@ func surface_near(p: Vector3, calm: bool = false) -> Dictionary:
 # сесть там не на что. Если ни один не подошёл, земли рядом ПРОСТО НЕТ: пусть
 # растения там не будет, чем оно повиснет в воздухе.
 func _snap_to_facet(at: Vector3, home: int, calm: bool = false) -> Dictionary:
+	if _snap_tets.is_empty():
+		_build_snap_tables()
 	var node: Vector3i = node_of(home)
+	# ДВАДЦАТЬ СЕМЬ УЗЛОВ ВОКРУГ — ОДНИМ ЗАХОДОМ. Восемь кубиков делят углы между
+	# собой, и прежде указатель узлов спрашивался шестьдесят четыре раза, по
+	# вызову на каждый угол, — то есть одно и то же втрое. Порядок кубиков и
+	# углов тот же, что был: таблицы собраны из `Surface.gd`, а не переписаны.
+	var near27 := PackedInt32Array()
+	near27.resize(27)
+	for oz in range(3):
+		for oy in range(3):
+			for ox in range(3):
+				near27[ox + oy * 3 + oz * 9] = int(_node_index.get(
+					node + Vector3i(ox - 1, oy - 1, oz - 1), -1))
 	var idx := PackedInt32Array()
 	idx.resize(8)
 	var val := PackedFloat32Array()
@@ -2010,54 +2099,56 @@ func _snap_to_facet(at: Vector3, home: int, calm: bool = false) -> Dictionary:
 	var best_room: float = -INF
 	var best: Vector3 = at
 	var found := false
-	for bx in range(-1, 1):
-		for by in range(-1, 1):
-			for bz in range(-1, 1):
-				var base := node + Vector3i(bx, by, bz)
-				var ok := true
-				var below := 0
-				for c in range(8):
-					var s: int = node_seed(base + SurfaceGeo.CORNER[c])
-					if s < 0:
-						ok = false
-						break
-					idx[c] = s
-					val[c] = _fv(s, calm)
-					if val[c] <= SOLID_AT:
-						below += 1
-				if not ok or below == 0 or below == 8:
-					continue
-				for t in SurfaceGeo.TETS:
-					var p0: Vector3 = seeds[idx[t[0]]]
-					var e1: Vector3 = seeds[idx[t[1]]] - p0
-					var e2: Vector3 = seeds[idx[t[2]]] - p0
-					var e3: Vector3 = seeds[idx[t[3]]] - p0
-					# Обратная тройка: одним набором считаем и «внутри ли точка»,
-					# и наклон линейного поля. Определитель — шестикратный объём.
-					var c1: Vector3 = e2.cross(e3)
-					var det: float = e1.dot(c1)
-					if absf(det) < 0.000001:
-						continue
-					var c2: Vector3 = e3.cross(e1)
-					var c3: Vector3 = e1.cross(e2)
-					var v: Vector3 = at - p0
-					var l1: float = v.dot(c1) / det
-					var l2: float = v.dot(c2) / det
-					var l3: float = v.dot(c3) / det
-					# Насколько точка ВНУТРИ: у своего тетраэдра все четыре доли
-					# неотрицательны. Берём лучший — на границе годятся оба.
-					var room: float = minf(minf(l1, l2), minf(l3, 1.0 - l1 - l2 - l3))
-					if room <= best_room:
-						continue
-					var f0: float = val[t[0]]
-					var g: Vector3 = (c1 * (val[t[1]] - f0) + c2 * (val[t[2]] - f0)
-						+ c3 * (val[t[3]] - f0)) / det
-					var mag2: float = g.length_squared()
-					if mag2 < 0.0000001:
-						continue
-					best_room = room
-					best = at - g * ((f0 + g.dot(v) - SOLID_AT) / mag2)
-					found = true
+	for cube in range(8):
+		var from_c: int = cube * 8
+		var ok := true
+		var below := 0
+		for c in range(8):
+			var s: int = near27[_snap_corner[from_c + c]]
+			if s < 0:
+				ok = false
+				break
+			idx[c] = s
+			val[c] = _fv(s, true) if calm else fill[s]
+			if val[c] <= SOLID_AT:
+				below += 1
+		if not ok or below == 0 or below == 8:
+			continue
+		for q in range(0, _snap_tets.size(), 4):
+			var i0: int = _snap_tets[q]
+			var i1: int = _snap_tets[q + 1]
+			var i2: int = _snap_tets[q + 2]
+			var i3: int = _snap_tets[q + 3]
+			var p0: Vector3 = seeds[idx[i0]]
+			var e1: Vector3 = seeds[idx[i1]] - p0
+			var e2: Vector3 = seeds[idx[i2]] - p0
+			var e3: Vector3 = seeds[idx[i3]] - p0
+			# Обратная тройка: одним набором считаем и «внутри ли точка»,
+			# и наклон линейного поля. Определитель — шестикратный объём.
+			var c1: Vector3 = e2.cross(e3)
+			var det: float = e1.dot(c1)
+			if absf(det) < 0.000001:
+				continue
+			var c2: Vector3 = e3.cross(e1)
+			var c3: Vector3 = e1.cross(e2)
+			var v: Vector3 = at - p0
+			var l1: float = v.dot(c1) / det
+			var l2: float = v.dot(c2) / det
+			var l3: float = v.dot(c3) / det
+			# Насколько точка ВНУТРИ: у своего тетраэдра все четыре доли
+			# неотрицательны. Берём лучший — на границе годятся оба.
+			var room: float = minf(minf(l1, l2), minf(l3, 1.0 - l1 - l2 - l3))
+			if room <= best_room:
+				continue
+			var f0: float = val[i0]
+			var g: Vector3 = (c1 * (val[i1] - f0) + c2 * (val[i2] - f0)
+				+ c3 * (val[i3] - f0)) / det
+			var mag2: float = g.length_squared()
+			if mag2 < 0.0000001:
+				continue
+			best_room = room
+			best = at - g * ((f0 + g.dot(v) - SOLID_AT) / mag2)
+			found = true
 	# Далеко за своим тетраэдром или далеко от точки — значит, попали не в тот
 	# срез, а в чужой по соседству. Такому месту верить нельзя.
 	if not found or best_room < -0.35 or best.distance_to(at) > _spacing * 0.6:
@@ -3601,8 +3692,11 @@ func node_of(index: int) -> Vector3i:
 #
 # Отсечение ТОЧНОЕ: то же самое семя, а не «примерно то же». Проверено стендом
 # лианы — сад выходит звено в звено тот же.
+const NEAR_CUT_EPS: float = 0.00001        # запас грубого отсечения, м²
+
 func cell_at(p: Vector3) -> int:
-	var base := _key_of(p)
+	var base := Vector3i(int(floor(p.x / _cell_size)), int(floor(p.y / _cell_size)),
+		int(floor(p.z / _cell_size)))
 	var best := -1
 	var best_d := INF
 	var mine = _seed_hash.get(base)
@@ -3612,10 +3706,37 @@ func cell_at(p: Vector3) -> int:
 			if d < best_d:
 				best_d = d
 				best = i
+	# ГРУБОЕ ОТСЕЧЕНИЕ ДО ПОИСКА В СЛОВАРЕ, по слоям (11.09.2026). До соседней
+	# клетки сбоку — ровно расстояние до своей грани, до угловой — сумма по осям;
+	# считается один раз на вызов, и целый слой из девяти клеток отбрасывается
+	# одним сравнением, не спрашивая словарь ни разу. Замер: сам поиск семени
+	# стоил 15 мкс, а через поиск земли он зовётся пять раз — две трети его цены.
+	#
+	# ОТБРАСЫВАЕТ ТОЛЬКО ЗАВЕДОМО ДАЛЁКОЕ: с запасом `NEAR_CUT_EPS` на округление.
+	# Что прошло грубое сито, дальше проверяется прежней точной меркой, поэтому
+	# решения выходят те же, что и без него, — то же семя в каждом случае.
+	var lo_x: float = float(base.x) * _cell_size
+	var lo_y: float = float(base.y) * _cell_size
+	var lo_z: float = float(base.z) * _cell_size
+	var x0: float = maxf(p.x - lo_x, 0.0)
+	var x1: float = maxf(lo_x + _cell_size - p.x, 0.0)
+	var y0: float = maxf(p.y - lo_y, 0.0)
+	var y1: float = maxf(lo_y + _cell_size - p.y, 0.0)
+	var z0: float = maxf(p.z - lo_z, 0.0)
+	var z1: float = maxf(lo_z + _cell_size - p.z, 0.0)
 	for dx in range(-1, 2):
+		var ex: float = x0 * x0 if dx < 0 else (x1 * x1 if dx > 0 else 0.0)
+		if best >= 0 and ex >= best_d + NEAR_CUT_EPS:
+			continue
 		for dy in range(-1, 2):
+			var ey: float = ex + (y0 * y0 if dy < 0 else (y1 * y1 if dy > 0 else 0.0))
+			if best >= 0 and ey >= best_d + NEAR_CUT_EPS:
+				continue
 			for dz in range(-1, 2):
 				if dx == 0 and dy == 0 and dz == 0:
+					continue
+				if best >= 0 and ey + (z0 * z0 if dz < 0 else (z1 * z1 if dz > 0
+						else 0.0)) >= best_d + NEAR_CUT_EPS:
 					continue
 				var key := base + Vector3i(dx, dy, dz)
 				var here = _seed_hash.get(key)
@@ -3624,23 +3745,24 @@ func cell_at(p: Vector3) -> int:
 				# Отсечение спрашиваем только когда есть с чем сравнивать: в
 				# пустоте (своя клетка без семян) оно всё равно ничего не
 				# отсекает, а вызов на каждую из двадцати шести клеток стоит.
-				if best >= 0 and _box_away(p, key) >= best_d:
-					continue
+				#
+				# МЕРКА — КВАДРАТ РАССТОЯНИЯ ОТ ТОЧКИ ДО КОРОБКИ КЛЕТКИ, и вписана
+				# она сюда, а не зовётся отдельной функцией, как было: через этот
+				# поиск идёт весь рост, и вызов на каждую непустую соседнюю клетку
+				# стоил дороже самой мерки.
+				if best >= 0:
+					var lo := Vector3(key) * _cell_size
+					var ax: float = maxf(maxf(lo.x - p.x, 0.0), p.x - lo.x - _cell_size)
+					var ay: float = maxf(maxf(lo.y - p.y, 0.0), p.y - lo.y - _cell_size)
+					var az: float = maxf(maxf(lo.z - p.z, 0.0), p.z - lo.z - _cell_size)
+					if ax * ax + ay * ay + az * az >= best_d:
+						continue
 				for i in here:
 					var d: float = seeds[i].distance_squared_to(p)
 					if d < best_d:
 						best_d = d
 						best = i
 	return best
-
-
-# Квадрат расстояния от точки до коробки клетки хеша — мерка отсечения выше.
-func _box_away(p: Vector3, key: Vector3i) -> float:
-	var lo := Vector3(key) * _cell_size
-	var ax: float = maxf(maxf(lo.x - p.x, 0.0), p.x - lo.x - _cell_size)
-	var ay: float = maxf(maxf(lo.y - p.y, 0.0), p.y - lo.y - _cell_size)
-	var az: float = maxf(maxf(lo.z - p.z, 0.0), p.z - lo.z - _cell_size)
-	return ax * ax + ay * ay + az * az
 
 
 func neighbors_of(index: int) -> Array:

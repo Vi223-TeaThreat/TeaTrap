@@ -258,6 +258,9 @@ var _stub_sectors: int = 0
 var _met_touch: int = 0                 # касаний, прошедших мерку зазора
 var _met_born: int = 0                  # и сколько из них дали третий вид
 var _met_deny: int = 0                  # ... а сколько сорвалось после броска
+# Отпечаток собранных мешей — см. `_print_bench` в `SpaceMain.gd`.
+var print_meshes: bool = false
+var mesh_print: int = 0
 
 # =============================================================================
 #  ДОГОН: РАСТЕНИЕ РАСТЁТ И МЕЖДУ ПЕРЕСБОРКАМИ
@@ -2269,13 +2272,16 @@ func poppy_bush_paths(p: Dictionary, def: Dictionary, many: int, base: Vector3,
 			from["at"] = his[at_k]
 		var best: Dictionary = {}
 		var best_gap: float = -1.0e9
+		# ОБЛИК СТЕБЛЯ — ОДИН НА ВСЕ ПОПЫТКИ: от поворота зависит только
+		# направление (см. `poppy_stem_shape`).
+		var shape: Dictionary = poppy_stem_shape(p, def, s, many, bulk, from)
 		for try_i in range(POPPY_DODGE_TRIES):
 			var nudge: float = 0.0
 			if try_i > 0:
 				nudge = POPPY_DODGE_STEP * float((try_i + 1) / 2) \
 					* (1.0 if try_i % 2 == 1 else -1.0)
-			var got: Dictionary = poppy_stem_path(p, def, s, many, base, up,
-				side, fore, bulk, nudge, from)
+			var got: Dictionary = poppy_stem_lay(shape, def, s, many, base, up,
+				side, fore, nudge, from)
 			var gap: float = _poppy_stem_gap(got, out, def)
 			if gap > best_gap:
 				best_gap = gap
@@ -2301,11 +2307,49 @@ func _poppy_stem_gap(mine: Dictionary, done: Array, def: Dictionary) -> float:
 		var r_him: float = float(def.get("stem_foot", 0.005)) \
 			* float(other["mgrow"])
 		var room: float = (r_me + r_him) * POPPY_SNUG
+		# ОТСЕЧЕНИЕ КОРОБКАМИ — ТОЧНОЕ, ответ тот же до знака. Чужой стебель
+		# режется на куски по `GAP_CHUNK` звеньев, у каждого своя коробка; если
+		# до коробки дальше уже найденного, ни один отрезок в ней ближе не будет,
+		# и считать их незачем. Запас `GAP_EPS` перекрывает округление: коробка
+		# меряется точнее, чем расстояние до отрезка, и без запаса на самой
+		# границе отсечение могло бы выбросить отрезок, который сдвинул бы число
+		# в последнем знаке.
+		#
+		# ЗАЧЕМ. Проверка шла точка о отрезок по всем парам — сто восемьдесят на
+		# пару стеблей, до сорока пар на куст и по нескольку попыток на стебель.
+		# Замер 11.09.2026: 87% всей укладки стеблей и четверть сборки куста.
+		var boxes := PackedVector3Array()
+		var chunks: int = 0
+		var last: int = his.size() - 1
+		for b0 in range(POPPY_DODGE_FROM, last, GAP_CHUNK):
+			var lo: Vector3 = his[b0]
+			var hi: Vector3 = lo
+			for b in range(b0 + 1, mini(b0 + GAP_CHUNK, last) + 1):
+				lo = lo.min(his[b])
+				hi = hi.max(his[b])
+			boxes.append(lo)
+			boxes.append(hi)
+			chunks += 1
 		for a in range(POPPY_DODGE_FROM, my_path.size()):
-			for b in range(POPPY_DODGE_FROM, his.size() - 1):
-				least = minf(least,
-					_off_seg(my_path[a], his[b], his[b + 1]) - room)
+			var at: Vector3 = my_path[a]
+			for chunk in range(chunks):
+				var lo: Vector3 = boxes[chunk * 2]
+				var hi: Vector3 = boxes[chunk * 2 + 1]
+				var ex: float = maxf(maxf(lo.x - at.x, 0.0), at.x - hi.x)
+				var ey: float = maxf(maxf(lo.y - at.y, 0.0), at.y - hi.y)
+				var ez: float = maxf(maxf(lo.z - at.z, 0.0), at.z - hi.z)
+				if sqrt(ex * ex + ey * ey + ez * ez) - room >= least + GAP_EPS:
+					continue
+				var b0: int = POPPY_DODGE_FROM + chunk * GAP_CHUNK
+				for b in range(b0, mini(b0 + GAP_CHUNK, last)):
+					least = minf(least, _off_seg(at, his[b], his[b + 1]) - room)
 	return least
+
+
+# На сколько звеньев режется чужой стебель под отсечение и какой запас на
+# округление — см. `_poppy_stem_gap`.
+const GAP_CHUNK: int = 4
+const GAP_EPS: float = 0.00001
 
 
 # ЧТО МОЖЕТ ПОМЕШАТЬ ЛЕПЕСТКУ — весь куст отрезками, собранный ДО укладки.
@@ -2383,11 +2427,15 @@ func _poppy_blocks(p: Dictionary, def: Dictionary, paths: Array,
 # свои стебли ДО того, как положен первый из них, — а прежде путь считался
 # прямо в укладке и наружу не выходил.
 #
-# Отдаёт всё, что нужно обоим: сам путь, соль стебля, его зрелость и то, чем
-# кончается верхушка (бутон, коробочка или цветок).
-func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
-		base: Vector3, up: Vector3, side: Vector3, fore: Vector3,
-		bulk: float, nudge: float = 0.0, from: Dictionary = {}) -> Dictionary:
+# СЧИТАЕТСЯ В ДВА ХОДА (11.09.2026). Стебель, задевший соседа, пробует
+# отвернуть (`poppy_bush_paths`), и каждая попытка прежде считала путь целиком
+# заново. А от поворота зависит только направление — куда клониться и где
+# основание; высота, изгибы, волны и крючок у всех попыток одни и те же. Первый
+# ход (`poppy_stem_shape`) считает их один раз на стебель, второй
+# (`poppy_stem_lay`) раскладывает по направлению. Числа выходят те же до знака —
+# те же действия над теми же величинами; проверено отпечатком роста.
+func poppy_stem_shape(p: Dictionary, def: Dictionary, s: int, many: int,
+		bulk: float, from: Dictionary = {}) -> Dictionary:
 	var salt: int = poppy_stem_salt(int(p["salt"]), s)
 	var mine: float = poppy_stem_m(p, def, s, many)
 	var mgrow: float = poppy_grow(def, mine) * poppy_stem_rise(p, def, s, many)
@@ -2402,14 +2450,6 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 	if gen >= 2:
 		high *= pow(float(def.get("branch_short", 0.66)), float(gen - 1))
 
-	# КУДА КЛОНИТСЯ ЭТОТ СТЕБЕЛЬ. Стебли расходятся веером из одной точки —
-	# иначе куст читается пучком проводов.
-	var turn: float = TAU * (float(s) / float(many)) \
-		+ (_mix01(salt + 31) - 0.5) * 1.1 + nudge
-	var away: Vector3 = (side * cos(turn) + fore * sin(turn)).normalized()
-	# Основания стеблей чуть разведены — из одной точки они бы срослись в столб.
-	var bend_k: float = 1.0
-	var foot: Vector3 = base + away * (high * float(def.get("stem_spread", 0.06)))
 	# ПОБЕГ НАЧИНАЕТСЯ НА РОДИТЕЛЕ, А НЕ В ЗЕМЛЕ, И ОТХОДИТ ОТ НЕГО ВБОК.
 	#
 	# Вбок — не для красоты: побег, растущий из середины стебля строго вверх,
@@ -2417,15 +2457,9 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 	# лепестки стали заходить в чужие стебли на 45 мм против прежних 36. Отводим
 	# основание на пару толщин стебля и клоним сильнее (`branch_lean`): у живого
 	# мака боковой побег и правда уходит в сторону, освобождая себе место.
+	var bend_k: float = 1.0
 	if from.has("at"):
-		foot = Vector3(from["at"]) + away * (float(def.get("stem_foot", 0.005))
-			* mgrow * 2.5)
 		bend_k = float(def.get("branch_lean", 1.7))
-	# Поперёк наклона — по этой оси стебель и виляет (см. волну ниже).
-	var cross: Vector3 = up.cross(away)
-	if cross.length_squared() < 0.000001:
-		cross = side
-	cross = cross.normalized()
 
 	var open_at: float = float(def.get("open_at", 0.6))
 
@@ -2460,7 +2494,6 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 		var ripe: float = clampf(mine / maxf(open_at, 0.001), 0.0, 1.0)
 		hook = deg_to_rad(float(def.get("bud_hook", 95.0))) * (1.0 - ripe * ripe)
 	var links: int = maxi(int(def.get("stem_links", 6)), 2)
-	var path: PackedVector3Array = PackedVector3Array()
 	# ДВЕ ВОЛНЫ, А НЕ ОДНА, И ПО РАЗНЫМ ОСЯМ — её слово 09.09.2026: «мак гибкий и
 	# изгибающийся, у него не должно быть настолько длинных и прямых участков
 	# стеблей, как этот» (с обводкой на кадре).
@@ -2498,30 +2531,90 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 	for j in range(1, tail * split + 1):
 		ts.append((float(links - tail) + float(j) / float(split))
 			/ float(links))
+	# ВЕЛИЧИНЫ ИЗГИБА ПО УЗЛАМ — те, что не зависят от направления: сколько
+	# отклониться вдоль наклона, сколько поперёк, насколько опустить крючком и
+	# на какой высоте узел. Направления приложит `poppy_stem_lay`.
+	var bend_a := PackedFloat64Array()     # по наклону: дуга
+	var wave_c := PackedFloat64Array()     # поперёк: первая волна
+	var wave_a := PackedFloat64Array()     # по наклону: вторая волна
+	var tip_c := PackedFloat64Array()      # поперёк: третья, только в хвосте
+	var tip_a := PackedFloat64Array()      # по наклону: четвёртая, только в хвосте
+	var drops := PackedFloat64Array()      # насколько опускает крючок
+	var rises := PackedFloat64Array()      # высота узла
 	for t in ts:
 		# Отклонение растёт квадратом — у земли стебель почти отвесен, кверху
 		# уходит вбок. Это и есть дуга, а не наклонная прямая.
-		var lean: Vector3 = away * (high * bend * t * t)
-		lean += cross * (high * sway * sin(t * PI * waves + phase) * t)
-		lean += away * (high * sway * 0.38
+		bend_a.append(high * bend * t * t)
+		wave_c.append(high * sway * sin(t * PI * waves + phase) * t)
+		wave_a.append(high * sway * 0.38
 			* sin(t * PI * (waves + 1.7) + phase * 1.7) * t)
 		# ТРЕТЬЯ И ЧЕТВЁРТАЯ ВОЛНЫ ЖИВУТ ТОЛЬКО В ХВОСТЕ — вдвое чаще прочих и со
 		# своими фазами. Мелкому звену они и дают тот излом, ради которого его
 		# дробили; ниже середины стебля они спят и дугу не портят.
 		var tipw: float = clampf((t - 0.55) / 0.45, 0.0, 1.0)
 		tipw *= tipw
-		lean += cross * (high * sway * 0.55
+		tip_c.append(high * sway * 0.55
 			* sin(t * PI * (waves * 2.0 + 3.1) + phase * 2.3) * tipw)
-		lean += away * (high * sway * 0.45
+		tip_a.append(high * sway * 0.45
 			* sin(t * PI * (waves * 2.0 + 1.7) + phase * 3.7) * tipw)
 		# Крючок гнёт ТОЛЬКО верхнюю треть: ниже стебель прям, как на снимках.
 		var curl: float = clampf((t - 0.62) / 0.38, 0.0, 1.0)
-		var drop: Vector3 = (away * sin(hook) - up * (1.0 - cos(hook))) \
-			* (high * 0.30 * curl * curl)
-		path.append(foot + up * (high * t) + lean + drop)
-	return {"path": path, "ts": ts, "salt": salt, "mine": mine, "mgrow": mgrow,
-		"high": high, "away": away, "cross": cross, "foot": foot,
-		"is_bud": is_bud, "is_pod": is_pod, "links": path.size() - 1, "gen": gen}
+		drops.append(high * 0.30 * curl * curl)
+		rises.append(high * t)
+	return {"salt": salt, "mine": mine, "mgrow": mgrow, "gen": gen, "high": high,
+		"is_bud": is_bud, "is_pod": is_pod, "ts": ts,
+		"hook_sin": sin(hook), "hook_cos": 1.0 - cos(hook),
+		"bend_a": bend_a, "wave_c": wave_c, "wave_a": wave_a, "tip_c": tip_c,
+		"tip_a": tip_a, "drops": drops, "rises": rises}
+
+
+# ВТОРОЙ ХОД: КУДА КЛОНИТСЯ ЭТОТ СТЕБЕЛЬ — и путь по этому направлению.
+# Отдаёт всё, что нужно укладке и проверке препятствий: сам путь, соль стебля,
+# его зрелость и то, чем кончается верхушка (бутон, коробочка или цветок).
+func poppy_stem_lay(shape: Dictionary, def: Dictionary, s: int, many: int,
+		base: Vector3, up: Vector3, side: Vector3, fore: Vector3,
+		nudge: float = 0.0, from: Dictionary = {}) -> Dictionary:
+	var salt: int = int(shape["salt"])
+	var high: float = float(shape["high"])
+	var mgrow: float = float(shape["mgrow"])
+	# КУДА КЛОНИТСЯ ЭТОТ СТЕБЕЛЬ. Стебли расходятся веером из одной точки —
+	# иначе куст читается пучком проводов.
+	var turn: float = TAU * (float(s) / float(many)) \
+		+ (_mix01(salt + 31) - 0.5) * 1.1 + nudge
+	var away: Vector3 = (side * cos(turn) + fore * sin(turn)).normalized()
+	# Основания стеблей чуть разведены — из одной точки они бы срослись в столб.
+	var foot: Vector3 = base + away * (high * float(def.get("stem_spread", 0.06)))
+	if from.has("at"):
+		foot = Vector3(from["at"]) + away * (float(def.get("stem_foot", 0.005))
+			* mgrow * 2.5)
+	# Поперёк наклона — по этой оси стебель и виляет (см. волну в
+	# `poppy_stem_shape`).
+	var cross: Vector3 = up.cross(away)
+	if cross.length_squared() < 0.000001:
+		cross = side
+	cross = cross.normalized()
+	var bend_a: PackedFloat64Array = shape["bend_a"]
+	var wave_c: PackedFloat64Array = shape["wave_c"]
+	var wave_a: PackedFloat64Array = shape["wave_a"]
+	var tip_c: PackedFloat64Array = shape["tip_c"]
+	var tip_a: PackedFloat64Array = shape["tip_a"]
+	var drops: PackedFloat64Array = shape["drops"]
+	var rises: PackedFloat64Array = shape["rises"]
+	var hook_sin: float = float(shape["hook_sin"])
+	var hook_cos: float = float(shape["hook_cos"])
+	var path: PackedVector3Array = PackedVector3Array()
+	for k in range(rises.size()):
+		var lean: Vector3 = away * bend_a[k]
+		lean += cross * wave_c[k]
+		lean += away * wave_a[k]
+		lean += cross * tip_c[k]
+		lean += away * tip_a[k]
+		var drop: Vector3 = (away * hook_sin - up * hook_cos) * drops[k]
+		path.append(foot + up * rises[k] + lean + drop)
+	return {"path": path, "ts": shape["ts"], "salt": salt,
+		"mine": shape["mine"], "mgrow": mgrow, "high": high, "away": away,
+		"cross": cross, "foot": foot, "is_bud": shape["is_bud"],
+		"is_pod": shape["is_pod"], "links": path.size() - 1, "gen": shape["gen"]}
 
 
 # КАКОЕ ЗВЕНО ПУТИ ОТВЕЧАЕТ ЭТОЙ ДОЛЕ. Узлы стебля идут неравномерно (у головки
@@ -3479,6 +3572,14 @@ func _emit_speck(st: SurfaceTool, at: Vector3, along: Vector3, out: Vector3,
 	# были заметной долей всей сборки куста.
 	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
 	st.set_color(tint.srgb_to_linear())
+	_speck_quad(st, at, out, side_v, up_v, long, wide)
+
+
+# САМА ПЛАСТИНКА, без цвета и столбца: у крапинок одного стебля они общие, и
+# ставит их тот, кто кладёт весь ряд (`_emit_stem_specks`), — один раз на стебель,
+# а не на каждую из сотен крапинок.
+func _speck_quad(st: SurfaceTool, at: Vector3, out: Vector3, side_v: Vector3,
+		up_v: Vector3, long: float, wide: float) -> void:
 	st.set_normal(out)
 	st.set_uv(Vector2(0.5, 0.5))
 	var u: Vector3 = up_v * (long * 0.5)
@@ -3534,9 +3635,17 @@ func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
 	for k in range(path.size() - 1):
 		run += (path[k + 1] - path[k]).length()
 		runs.append(run)
+	# ОБЩЕЕ НА ВЕСЬ РЯД — ОДИН РАЗ (11.09.2026): столбец, цвет и мерки крапинки у
+	# всех крапинок стебля одни, а крапинок на кусте под тысячу. И звено, на
+	# котором сидит крапинка, ищется ДАЛЬШЕ от прежнего, а не с начала стебля:
+	# крапинки идут по длине подряд. Кладётся всё то же и в том же порядке.
+	var sp_long: float = float(def.get("speck_long", 2.0))
+	var sp_wide: float = float(def.get("speck_wide", 0.55))
+	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
+	st.set_color(c.srgb_to_linear())
+	var k: int = 0
 	for i in range(many):
 		var want: float = (float(i) + 0.5) / float(many) * long_m
-		var k: int = 0
 		while k < runs.size() - 2 and runs[k + 1] < want:
 			k += 1
 		var span: float = maxf(runs[k + 1] - runs[k], 0.000001)
@@ -3552,9 +3661,20 @@ func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
 		var turn: Vector3 = way.cross(side_v).normalized()
 		var out: Vector3 = (side_v * cos(a) + turn * sin(a)).normalized()
 		var r: float = lerpf(r_foot, r_head, t)
-		_emit_speck(st, at + out * (r * 1.004), way, out,
-			r * float(def.get("speck_long", 2.0)),
-			r * float(def.get("speck_wide", 0.55)), c, stage)
+		var long: float = r * sp_long
+		var wide: float = r * sp_wide
+		if long <= 0.0 or wide <= 0.0:
+			continue
+		var plate_side: Vector3 = out.cross(way)
+		if plate_side.length_squared() < 0.000000001:
+			continue
+		plate_side = plate_side.normalized()
+		var plate_up: Vector3 = (way - out * way.dot(out))
+		if plate_up.length_squared() < 0.000000001:
+			continue
+		plate_up = plate_up.normalized()
+		_speck_quad(st, at + out * (r * 1.004), out, plate_side, plate_up,
+			long, wide)
 
 
 # ПРИПЛЮСНУТЫЙ ШАР — коробочка мака.
@@ -3590,34 +3710,22 @@ func _emit_globe(st: SurfaceTool, at: Vector3, along: Vector3, wide: float,
 		side_v = along.cross(Vector3.UP)
 	side_v = side_v.normalized()
 	var turn: Vector3 = along.cross(side_v).normalized()
-	var rows: Array = []
-	var norms: Array = []
+	var rows := PackedVector3Array()
+	var norms := PackedVector3Array()
 	for k in range(rings + 1):
 		var phi: float = PI * float(k) / float(rings)
 		var r: float = wide * sin(phi)
 		var h: float = -wide * squash * cos(phi)
-		var ring: Array = []
-		var out: Array = []
 		for i in range(sides + 1):
 			var ang: float = TAU * float(i) / float(sides)
 			var dir: Vector3 = side_v * cos(ang) + turn * sin(ang)
-			ring.append(at + dir * r + along * h)
+			rows.append(at + dir * r + along * h)
 			# Нормаль сплюснутого шара — не то же, что направление от середины:
 			# по высоте её надо растянуть ровно во столько раз, во сколько тело
 			# сплющено, иначе свет ложится как на шар и бок читается плоским.
-			out.append((dir * sin(phi) + along * (cos(phi) / maxf(squash, 0.05)))
+			norms.append((dir * sin(phi) + along * (cos(phi) / maxf(squash, 0.05)))
 				.normalized())
-		rows.append(ring)
-		norms.append(out)
-	for k in range(rings):
-		for i in range(sides):
-			for t in BAND_TRI:
-				var far: bool = int(t[0]) == 1
-				var nxt: bool = int(t[1]) == 1
-				var atk: int = k + 1 if far else k
-				st.set_normal(norms[atk][i + 1 if nxt else i])
-				st.set_uv(Vector2(0.5, 0.5))
-				st.add_vertex(rows[atk][i + 1 if nxt else i])
+	_emit_band_grid(st, rows, norms, rings + 1, sides + 1)
 
 
 # ТОЧКА НА СТВОРКЕ БУТОНА и нормаль в ней — одна мерка на саму створку и на
@@ -3663,30 +3771,17 @@ func _emit_shell(st: SurfaceTool, seat: Vector3, along: Vector3, away: Vector3,
 	edge = edge.normalized()
 	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
 	st.set_color(tint.srgb_to_linear())
-	var rows: Array = []
-	var norms: Array = []
+	var rows := PackedVector3Array()
+	var norms := PackedVector3Array()
 	for i in range(rings + 1):
 		var u: float = float(i) / float(rings)
-		var line: Array = []
-		var nline: Array = []
 		for j in range(steps + 1):
 			var a: float = -span + 2.0 * span * float(j) / float(steps)
 			var got: Array = _shell_point(seat, along, away, edge, u, a,
 				long, wide)
-			line.append(got[0])
-			nline.append(got[1])
-		rows.append(line)
-		norms.append(nline)
-	for i in range(rings):
-		for j in range(steps):
-			for t in BAND_TRI:
-				var far: bool = int(t[0]) == 1
-				var nxt: bool = int(t[1]) == 1
-				var gi: int = i + (1 if far else 0)
-				var gj: int = j + (1 if nxt else 0)
-				st.set_normal(norms[gi][gj])
-				st.set_uv(Vector2(0.5, 0.5))
-				st.add_vertex(rows[gi][gj])
+			rows.append(got[0])
+			norms.append(got[1])
+	_emit_band_grid(st, rows, norms, rings + 1, steps + 1)
 
 
 # =============================================================================
@@ -3960,6 +4055,12 @@ func _process(delta: float) -> void:
 			_burst_accum += delta
 		else:
 			_burst_accum = 0.0
+		# КАКИЕ УДАРЫ ПОЛОЖЕНЫ, РЕШАЕТСЯ КАК ПРЕЖДЕ — КАЖДЫЙ КАДР И СРАЗУ; по кадрам
+		# растягивается только их исполнение (см. `_tick`). Решай мы это позже, по
+		# мере исполнения, — и подарок руки сгорал бы: часы подарка обнуляются в
+		# тот кадр, когда он кончился, а причитавшиеся удары к этому мигу могли ещё
+		# ждать своей очереди. Заодно пары «мир и подарок» складываются в удары
+		# ровно так, как складывались до разложения.
 		while _accum >= TICK or _burst_accum >= TICK:
 			var world: float = 0.0
 			var gift: float = 0.0
@@ -3969,7 +4070,20 @@ func _process(delta: float) -> void:
 			if _burst_accum >= TICK:
 				_burst_accum -= TICK
 				gift = TICK
-			_tick(world, gift)
+			_beat_queue.append(Vector2(world, gift))
+		# ОТСТАЛИ СВЕРХ `BEAT_LAG_MAX` — лишние удары забываются, и сад растёт
+		# медленнее часов, а не встаёт колом. Отстали на целый удар — кадр отдаёт
+		# ему больше, чтобы догнать.
+		while _beat_queue.size() > int(BEAT_LAG_MAX):
+			_beat_queue.pop_back()
+		var behind: bool = _beat_on and not _beat_queue.is_empty()
+		var deadline: int = Time.get_ticks_usec() \
+			+ int((maxf(BEAT_MS_BEHIND, beat_ms) if behind else beat_ms) * 1000.0)
+		while true:
+			if not _beat_on and not _beat_next():
+				break
+			if not _beat_run(deadline):
+				break
 	# ПЕРЕСБОРКА — ПОСЛЕ РОСТА И С ЗАПАСОМ НА КАДР (см. `_drain`). Идёт она и при
 	# остановленном времени: помеченное могло остаться от снесённого растения или
 	# от правки земли, и висеть непересобранным ему нельзя.
@@ -3982,6 +4096,7 @@ func _process(delta: float) -> void:
 # Сажаем в точку. Наклон берём у земли, а не у луча: под курсором может
 # оказаться кромка, и нормаль попадания там скачет.
 func plant_at(pos: Vector3, id: String) -> int:
+	beat_settle()
 	if not PlantsData.is_plant(id):
 		return -1
 	var spot: Dictionary = main.grid.calm_surface_near(pos)
@@ -4133,6 +4248,7 @@ func _unlink(pid: int) -> void:
 
 
 func remove_at(pid: int) -> void:
+	beat_settle()
 	if not patches.has(pid):
 		return
 	_unlink(pid)
@@ -4155,6 +4271,8 @@ func remove_at(pid: int) -> void:
 # обходит ВЕСЬ сад — работа выходит в квадрате от числа растений. На полутора
 # тысячах звеньев это минуты чистого ожидания.
 func clear_all() -> void:
+	# Начатый удар не доделываем, а бросаем: сад, по которому он шёл, снесён.
+	_beat_drop()
 	patches.clear()
 	_live.clear()
 	by_cell.clear()
@@ -4495,26 +4613,51 @@ func _crowded(pos: Vector3, bulk: float, id: String = "") -> bool:
 	# самосев вышел бы ковром, а не куртиной с просветами.
 	var mine: float = _patch_span(1.0, bulk) * float(def.get("room_k", 1.0))
 	var node: Vector3i = main.grid.node_of(home)
+	# ВЗРОСЛЫЙ РАДИУС СОСЕДА — ТА ЖЕ ФОРМУЛА, ЧТО В `_patch_span`, разложенная на
+	# общую часть и его размер. Эта проверка идёт по сотне соседей на каждый
+	# отросток (замер 11.09.2026: миллион пар за сорок пять секунд мохового сада,
+	# треть всех ударов сердца), и вызов с поиском вида в каталоге на каждую пару
+	# стоил дороже самого сравнения. Действия и их порядок прежние — число выходит
+	# то же до знака, а с ним и сад (проверено `--printbench`).
+	var adult: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE
+	var adult_k: float = lerpf(PATCH_YOUNG, PATCH_OLD,
+		(clampf(1.0 * float(STAGES) + 0.5, 1.0, float(STAGES)) - 1.0)
+		/ float(STAGES - 1))
+	var nodes: Dictionary = main.grid.node_index()
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			for dz in range(-1, 2):
-				var c: int = main.grid.node_seed(node + Vector3i(dx, dy, dz))
+				var c: int = int(nodes.get(node + Vector3i(dx, dy, dz), -1))
 				if c < 0:
 					continue
-				for pid in by_cell.get(c, {}):
+				var here = by_cell.get(c)
+				if here == null:
+					continue
+				for pid in here:
+					var q: Dictionary = patches[pid]
+					var qid: String = q["id"]
 					# Зазор ГУЛЯЕТ: без этого выходит правильная упаковка — та же
 					# решётка, только с кружками разного калибра.
-					var his: Dictionary = PlantsData.ITEMS.get(
-						String(patches[pid]["id"]), {})
 					var room: float = SIT_APART * (mine
-						+ _patch_span(1.0, float(patches[pid]["bulk"]))
-							* float(his.get("room_k", 1.0))) \
+						+ adult * float(q["bulk"]) * adult_k * _room_k(qid)) \
 						* _rng.randf_range(1.0 - vary, 1.0 + vary)
-					if id != "" and String(patches[pid]["id"]) != id:
+					if id != "" and qid != id:
 						room *= mix
-					if pos.distance_squared_to(patches[pid]["pos"]) < room * room:
+					if pos.distance_squared_to(q["pos"]) < room * room:
 						return true
 	return false
+
+
+# СВОЙ ЛОКОТЬ ВИДА (`room_k`) — из каталога, но спрашивается один раз на вид, а не
+# на каждую пару соседей: см. `_crowded`.
+var _room_k_of: Dictionary = {}
+
+func _room_k(id: String) -> float:
+	var got = _room_k_of.get(id)
+	if got == null:
+		got = float(PlantsData.ITEMS.get(id, {}).get("room_k", 1.0))
+		_room_k_of[id] = got
+	return got
 
 
 # =============================================================================
@@ -4763,269 +4906,406 @@ func _ripe_cap(p: Dictionary, def: Dictionary) -> float:
 		clampf(float(p.get("load", 0)) / TIP_LOAD, 0.0, 1.0))
 
 
+# УДАР СЕРДЦА — ОДИН ШАГ РОСТА ВСЕГО ЖИВОГО САДА.
+#
+# РАЗЛОЖЕН ПО КАДРАМ (11.09.2026). Прежде удар шёл целиком в одном кадре, и в
+# растущем моховом ковре он стоил 31 мс в среднем и до 99 мс худший — при кадре
+# в 16.7 мс это рывок экрана семь раз в секунду. Теперь кадр отдаёт удару не
+# больше `BEAT_MS`, остальное доделывают следующие кадры: до следующего удара у
+# шестидесяти кадров в секунду их девять.
+#
+# САД ВЫРАСТАЕТ ТОТ ЖЕ ДО ПОСЛЕДНЕГО ЗНАКА. Удар — три хода в строгом порядке:
+# обход живых, рождения, разметка показа. Порядок сохранён: растения обходятся
+# тем же списком, случайность тянется той же чередой, рождения идут после всего
+# обхода. Меняется только то, в каком кадре что посчитано. Проверено отпечатком
+# роста (`--printbench`) с нарочно мелкими кусками (`--beat-slice`).
+#
+# РУКА ИГРОКА УДАР НЕ РАЗРЫВАЕТ: всё, что правит сад снаружи (посадка, снятие,
+# кисть, правка земли, загрузка), сперва доделывает начатый удар и все
+# просроченные (`beat_settle`). Иначе мазок лёг бы посреди обхода, и рождения
+# посадили бы отростки на землю, которой уже нет.
+#
+# Стенды и самопроверка зовут `_tick` напрямую — он доводит удар до конца сразу,
+# как и прежде.
 func _tick(dt: float, gift: float = 0.0) -> void:
-	var sprouts: Array = []
-	var fallen: Array = []
+	beat_settle()
+	_beat_begin(dt, gift)
+	_beat_run(0)
+
+
+# Сколько миллисекунд кадр отдаёт удару, пока сад поспевает за часами, и сколько —
+# когда отстал на целый удар: тогда надо догонять, иначе отставание копилось бы.
+const BEAT_MS: float = 3.0
+const BEAT_MS_BEHIND: float = 8.0
+# ДАЛЬШЕ ЭТОГО ОТСТАВАНИЕ НЕ КОПИТСЯ, в ударах. Сад, которому машина не успевает
+# дать роста, растёт медленнее часов, а не стоит колом, догоняя разом.
+const BEAT_LAG_MAX: float = 6.0
+
+var _beat_on: bool = false        # удар начат и не доделан
+var _in_beat: bool = false        # ... и идёт прямо сейчас
+var _beat_dt: float = 0.0
+var _beat_gift: float = 0.0
+var _beat_walk: Array = []
+var _beat_at: int = 0
+var _beat_births: bool = false    # обход кончился, идут рождения
+var _beat_sprouts: Array = []
+var _beat_fallen: Array = []
+# НАРОЧНО МЕЛКИЕ КУСКИ — только для стенда: сколько растений или рождений делать
+# за один заход. Ноль — по времени, как в игре. Нужно, чтобы проверить отпечатком,
+# что разрыв удара посреди обхода не меняет сада.
+var beat_slice: int = 0
+# Запас кадра на удар — переменной, чтобы стенд показа мог сравнить с прежним
+# «весь удар в одном кадре» (`--beat-ms=1000`).
+var beat_ms: float = BEAT_MS
+
+
+func _beat_begin(dt: float, gift: float) -> void:
+	_beat_on = true
+	_beat_dt = dt
+	_beat_gift = gift
+	_beat_sprouts = []
+	_beat_fallen = []
 	_bloom_soon.clear()
 	# Обходим ТОЛЬКО тех, кто ещё может измениться. Ключи снимаем копией: по ходу
 	# обхода список правится — доросшие выбывают, новорождённые входят.
-	var walk: Array = _live.keys()
-	for pid in walk:
-		if not patches.has(pid):
-			_live.erase(pid)
-			continue
-		var p: Dictionary = patches[pid]
-		var def: Dictionary = PlantsData.ITEMS[p["id"]]
-		# ВИСЯЩЕМУ ЗВЕНУ БЕЗ РОДИТЕЛЯ ДЕРЖАТЬСЯ НЕ НА ЧЕМ. Родитель мог погибнуть
-		# или оторваться — тогда кусок остаётся парить сам по себе. Снимаем не на
-		# месте, а списком: гибель звена трогает соседей, а мы посреди обхода.
-		if bool(p.get("air", false)) and not patches.has(int(p.get("from", -1))):
-			fallen.append(pid)
-			continue
-		# СКОЛЬКО РОСТА ДОСТАЛОСЬ ЭТОМУ РАСТЕНИЮ ЗА УДАР. Слагаемых два: время
-		# мира и своя доля подаренного рукой игрока. Дальше по коду разницы между
-		# ними нет — подарок проливается через тот же самый рост, поэтому и
-		# зрелость, и новые звенья от него получаются настоящие.
-		# ОТРОСЛО СВОЁ — БОЛЬШЕ НЕ ШИРИТСЯ (см. `GROW_SPAN`), но СВОЁ ДОЗРЕВАЕТ.
-		#
-		# Это две разные вещи, и путать их нельзя. Звено, родившееся за секунду
-		# до срока, наследует прожитое лозой и по общим часам кончилось сразу —
-		# запрети ему и зреть, и оно застынет недоросшим огрызком на кончике
-		# каждой плети. Поэтому предел снимает только РАСПОЛЗАНИЕ: новых звеньев
-		# и кочек больше нет, а начатое доходит до своего вида.
-		var lived: float = float(p.get("lived", 0.0))
-		var done: bool = lived >= GROW_SPAN
-		# ДОЗРЕЛО — ЭТО ДО СВОЕГО ПОТОЛКА, А НЕ ДО ЕДИНИЦЫ. У концов веток он ниже
-		# (см. `_ripe_cap`), и по единице они не выбыли бы из живых НИКОГДА: сад
-		# перестал бы расти, а сердце обходило бы его до скончания века — ровно то,
-		# ради избавления от чего список живых и заводился.
-		# НАЧАТАЯ КИСТЬ ДОРАСТАЕТ И ПОСЛЕ СРОКА (её решение 02.09.2026: «пусть
-		# полностью дорастают после наступления порога роста цветочные лозы»).
-		#
-		# Срок ловил метёлку на полудлине, и на кадре она читалась не кистью, а
-		# обломком: у живого винограда кисть либо есть целиком, либо её нет.
-		# Начать НОВУЮ кисть срок по-прежнему не даёт — дорастает только начатое,
-		# и предел от этого не течёт: длина кисти своя и конечная (`bloom_max`).
-		# И У ДОРАСТАНИЯ ЕСТЬ СРОК. Замер поймал сразу: без него кисть, которой
-		# некуда расти (упёрлась в камень, не хватило места), не выбывает из живых
-		# НИКОГДА — и доросший сад снова тикает. Было 0.02 мс на удар при нуле
-		# живых, стало 0.77 мс при четырнадцати. Двадцати секунд кисти хватает с
-		# запасом: её длина конечна и мала.
-		var in_bloom: bool = int(p.get("bloom", 0)) > 0 \
-			and int(p["bloom"]) < int(p.get("bloom_max", 1)) \
-			and lived < GROW_SPAN + BLOOM_GRACE
-		var ripe: float = _ripe_cap(p, def)
-		if done and not in_bloom and float(p["m"]) >= ripe:
-			# Отросло и дозрело — из живых вон, больше его не спрашиваем.
-			_live.erase(pid)
-			continue
-		var span: float = dt + _burst_take(p, gift)
-		if span <= 0.0:
-			continue
-		# ЧАСЫ ИДУТ И ПОСЛЕ СРОКА — но только у того, кто ещё в живых, а таких
-		# после предела единицы: недоросшие кисти. По этим же часам им и отмеряется
-		# срок дорастания (`BLOOM_GRACE`), иначе отмерять было бы нечем.
-		p["lived"] = lived + span
-		var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) * (1.0 + def["shade_love"] * _shade(p))
-		# В складке растению вольготнее: туда наносит землю и дольше держится
-		# сырость. Величину складки считает сама сетка.
-		var fold: float = maxf(0.0, main.grid.cavity_of(int(p["cell"])))
-		rate *= 1.0 + def["joint_love"] * fold
-		# Ступень тем длиннее, чем растение взрослее.
-		rate /= STAGE_COST[clampi(int(p["m"] * float(STAGES)), 0, STAGES - 1)]
-		# НА РОВНОМ РОСТ МЕДЛЕННЕЕ — у тех, кому это записано. Лиане подпоркой
-		# служит опора, и без неё она должна не глохнуть совсем, а тянуться
-		# нехотя. Множитель идёт и в зрелость, и в частоту отростков: замедли одну
-		# зрелость — и плеть поползла бы с прежней скоростью, только с молодыми
-		# звеньями.
-		#
-		# РОВНОСТЬ БЕРЁМ У ОПОРЫ, А НЕ У НОРМАЛИ — И ЭТО ТРЕТЬЯ ПОПЫТКА.
-		#
-		# ГРАБЛИ, замеренные 2026-08-28 по жалобе пользователя «лиана растёт куда
-		# медленнее мха». Мерили наклоном земли: `tilt = 1 - nrm.y`. А нормаль —
-		# это та же крутизна, только пересчитанная (`nrm.y = 1/√(1+s²)`), и про неё
-		# в этом же файле уже записано, что глыбу от острова она не отличает
-		# ВОВСЕ: крутизна на камне в среднем 0.214, на земле 0.186. Отсюда
-		# `nrm.y` 0.978 против 0.983, то есть `tilt` 0.02 против 0.017 — и тормоз
-		# выходил 0.51 на камне против 0.508 на ровном. Задумано было «вдвое
-		# медленнее на ровном», а получилось ВДВОЕ МЕДЛЕННЕЕ ВЕЗДЕ, и награды за
-		# найденную опору не было никакой.
-		#
-		# Спрашиваем ту же опору, которой лиана выбирает сторону (`support_around`,
-		# замерено при рождении звена в `prop`): у неё размах настоящий — у подошвы
-		# глыбы 1.0, на чистом лугу 0.0.
-		var slow: float = 1.0
-		if def.has("flat_slow"):
-			slow = lerpf(float(def["flat_slow"]), 1.0,
-				clampf(float(p.get("prop", 0.0)), 0.0, 1.0))
-		# ПОТОЛОК НЕ ОТНИМАЕТ УЖЕ НАБРАННОГО. Ноша звена умеет и убывать (`_unlink`
-		# возвращает её вверх, когда кончик гибнет), потолок вместе с ней опустился
-		# бы — и лист, разок развернувшись, сложился бы назад. Такого у растения
-		# не бывает.
-		p["m"] = minf(maxf(ripe, float(p["m"])), p["m"] + rate * slow * span)
+	_beat_walk = _live.keys()
+	_beat_at = 0
+	_beat_births = false
 
-		# РАСТЁТ ТОЛЬКО КОНЧИК, а звено с отростком даёт второй редко. Без этого
-		# «сдержанное ветвление» не выйдет ничем: у мха отросток даёт каждая
-		# кочка, и лиана расплылась бы тем же ковром, только вытянутым.
-		var chance: float = float(def.get("spread_rate", PlantsData.SPREAD_RATE_DEFAULT)) \
-			if (not done or in_bloom) else 0.0
-		# КУРТИНА НЕ РАСХОДИТСЯ ДАЛЬШЕ СВОЕЙ ШИРИНЫ (`clump_wide`).
-		#
-		# Без этого предела самосев — тот же ковёр, только редкий: у мха и у мака
-		# отросток даёт КАЖДОЕ растение, а значит пятно ползёт наружу без конца.
-		# Замерено на первом же прогоне мака: из одного семени за полторы минуты
-		# 11 680 стеблей на весь остров. Куртина — это пятно с краем, и край ей
-		# надо назначить.
-		#
-		# Меряем от КОРНЯ КУРТИНЫ (`root` — тот мак, что посадила рука), а не от
-		# родителя: иначе каждое новое колено отмеряло бы свою ширину заново, и
-		# предел не значил бы ничего — ровно те же грабли, что у часов роста
-		# (см. `GROW_SPAN`, «часы принадлежат организму»).
-		var wide: float = float(def.get("clump_wide", 0.0))
-		if wide > 0.0 and chance > 0.0:
-			var root: int = int(p.get("root", -1))
-			if patches.has(root) and Vector3(p["pos"]).distance_to(
-					Vector3(patches[root]["pos"])) > wide:
-				chance = 0.0
-		if def.has("branch"):
-			var kids: int = int(p.get("kids", 0))
-			# СЕДЬМОЕ ПОКОЛЕНИЕ — ПОСЛЕДНЕЕ (см. `GEN_MAX`): отсюда пошёл бы
-			# восьмой номер, а его нет. Кончика это не касается — он продолжает
-			# своё поколение, и плеть седьмого тянется в длину как всякая другая.
-			if _gen_next(p) >= GEN_MAX:
-				chance = 0.0
-			elif kids >= int(def.get("branch_max", 2)):
-				chance = 0.0
-			elif bool(p.get("wake", false)):
-				# СПЯЩАЯ ПОЧКА ПРОСНУЛАСЬ, и ей ни возраст, ни соседи не помеха:
-				# ниже по стеблю все звенья старые, и обычные запреты не пустили
-				# бы ни одного. Растёт она как кончик — новый побег и есть новый
-				# кончик. См. `_wake_bud` о том, отчего почки просыпаются.
-				pass
-			elif kids > 0:
-				# БОКОВОЙ ПОБЕГ ИДЁТ ТОЛЬКО ИЗ МОЛОДОГО ЗВЕНА. Без этого срока
-				# редкость ветвления обманчива: попытки у старого звена не
-				# кончаются никогда, и рано или поздно ветвится КАЖДОЕ. Замерено:
-				# шесть развилок на тридцать шесть звеньев — это уже не
-				# сдержанно. У живой лозы новый побег тоже идёт по молодому.
-				#
-				# И РАЗВИЛКИ ДЕРЖАТСЯ ДРУГ ОТ ДРУГА ПОДАЛЬШЕ (`fork_gap`). Одной
-				# частоты мало: она делит развилки поровну между звеньями, а
-				# метлу делает не число, а их КУЧНОСТЬ — три подряд на одном
-				# участке видно метлой, три на разных концах плети не видно вовсе.
-				if float(p["m"]) > float(def.get("branch_until", 0.7)) \
-						or _fork_near(pid, int(def.get("fork_gap", 0))):
-					chance = 0.0
-				else:
-					# ДАЛЬНИМ ПОКОЛЕНИЯМ — ПРИБАВКА (решение пользователя
-					# 2026-08-20): за каждое поколение сверх `fork_gain_from`
-					# охота ветвиться растёт на `fork_gain`. Иначе тонкие ветви
-					# идут голыми прутьями, а у живой лозы всё наоборот — чем
-					# дальше от ствола, тем чаще деление.
-					var late: int = maxi(0, int(p.get("order", 0))
-						- int(def.get("fork_gain_from", 5)))
-					chance *= float(def["branch"]) * float(p.get("fork_k", 1.0)) \
-						* (1.0 + float(late) * float(def.get("fork_gain", 0.0)))
-		# ПЛЕТЬ СВЕСИЛАСЬ НА ВСЮ ДЛИНУ — расти ей больше некуда. Пробовать при этом
-		# не перестанешь: попытки упирались бы в отказ, а в числах проверки это
-		# читается как «лиана не находит места» — то есть одна беда прикинулась бы
-		# другой.
-		if p.has("hangs") and int(p["hangs"]) >= int(p.get("hang_max", 0)):
-			chance = 0.0
-			# ...А ЗНАЧИТ ЭТО ТУПИК, и лозе нужно продолжение в другом месте.
-			_spend_tip(pid, p, def)
-		# МЕТЁЛКА ДОРОСЛА — тоже конец, но конец ЗАКОННЫЙ: цветонос и должен
-		# кончиться, отцвести ему больше нечем. Спящую почку он поэтому не будит
-		# (это делает `_spend_tip`, у него своя проверка), а вот пробовать
-		# перестаёт — иначе в числах проверки его отказы читались бы как «лиана не
-		# находит места».
-		if int(p.get("bloom", 0)) >= int(p.get("bloom_max", 1)) \
-				and int(p.get("bloom", 0)) > 0:
-			chance = 0.0
-		if p["m"] >= float(def.get("spread_at", PlantsData.SPREAD_AT_DEFAULT)) and _rng.randf() < chance * slow * span:
-			# СЧИТАЕМ ПОПЫТКИ И УДАЧИ. «Лиана застряла» бывает по двум совершенно
-			# разным причинам: она не пробует расти (частота, зрелость, запрет на
-			# ветвление) или пробует и не находит куда (земля, наклон, шаг). По
-			# самому числу звеньев их не различить, а чинить надо разное.
-			if _is_stem(def):
-				_sprout_try += 1
-			var target := _sprout_from(pid, p, def)
-			# НЕ ПРОЙДЁТ ЛИ ЭТО КОЛЕНО СКВОЗЬ ЧУЖУЮ ВЕТВЬ (её решение 02.09.2026).
-			# Спрашиваем ЗДЕСЬ, а не внутри поиска: место уже выбрано, и проверка
-			# идёт один раз на удачную попытку, а не на каждую из шести сторон.
-			# Метёлки правило не касается — она висит свободно и ни во что не
-			# вплетается.
-			if not target.is_empty() and _is_stem(def) \
-					and int(target.get("bloom", 0)) <= 0 \
-					and _stem_blocked(pid, p, target, def):
-				target = _no_spot(def, 7)
-			if not target.is_empty():
-				if _is_stem(def):
-					_sprout_win += 1
-				sprouts.append([target, p["id"],
-					_child_bulk(float(p["bulk"]), def), pid])
-			elif _is_stem(def):
-				# КОНЧИК УПЁРСЯ. Одна неудача — случайность (сторона выпала
-				# неудачная), десяток подряд — тупик, из которого сам он уже не
-				# выйдет: место вокруг него не меняется.
-				p["miss"] = int(p.get("miss", 0)) + 1
-				if int(p["miss"]) >= int(def.get("wake_after", 0)):
-					_spend_tip(pid, p, def)
 
-		# ЦВЕТОНОС — ОТДЕЛЬНАЯ ПОПЫТКА, А НЕ ДОЛЯ ОБЫЧНОЙ (решение пользователя
-		# 2026-08-28: «не заменяют обычные побеги, а дополняют их»). Оттого он и
-		# считается здесь, ниже, своим числом и своей частотой: попади он в общий
-		# зачёт — и зацветшая ветвь росла бы медленнее нецветущей.
-		# Цветение — тоже расползание: доросшая лоза новых кистей не заводит.
-		if not done and _bloom_ready(p, def) \
-				and _rng.randf() < float(def["bloom_rate"]) * slow * span:
-			var born: Dictionary = _bloom_start(p, def, int(p["salt"]))
-			if not born.is_empty():
-				# ОДИН УЗЕЛ — ОДНА МЕТЁЛКА.
-				p["bloomed"] = true
-				# И МЕСТО ЗАНЯТО СРАЗУ, до самого рождения: следующий узел в этом
-				# же ударе обязан её увидеть.
-				_bloom_soon.append(Vector3(born["pos"]))
-				sprouts.append([born, p["id"],
-					_child_bulk(float(p["bulk"]), def), pid])
-			else:
-				# НЕ ВЫШЛО — ПРОБУЕМ ЕЩЁ НЕСКОЛЬКО РАЗ И ОТСТУПАЕМСЯ. Место вокруг
-				# узла не меняется само, и вечные попытки — это чистая работа
-				# впустую: сотня узлов, которым некуда выпустить кисть, спрашивала
-				# бы землю по полсотни раз в секунду до конца игры. Несколько
-				# попыток всё же даём: длина звена и виляние берутся случайно, и
-				# со второго раза кисть иногда проходит там, где не прошла с
-				# первого.
-				var tries: int = int(p.get("bloom_try", 0)) + 1
-				p["bloom_try"] = tries
-				if tries >= int(def.get("bloom_tries", 3)):
-					p["bloomed"] = true
-
-	for pid in fallen:
-		remove_at(pid)
-	for s in sprouts:
-		# Звено лианы садится ВПЛОТНУЮ к родителю — на то она и нить. Запрет на
-		# тесноту писался под ковёр мха, где две кочки в одной точке — это брак.
-		if _is_stem(PlantsData.ITEMS[String(s[1])]) \
-				or not _crowded(s[0]["pos"], float(s[2]), String(s[1])):
-			var kid: int = _create(s[0], s[1], 0.05, float(s[2]), int(s[3]))
-			# ОСТАТОК ПОДАРКА ПЕРЕХОДИТ К КОНЧИКУ. У лианы свободно растёт только
-			# он: отпустив побег, звено само больше не удлинится, и подаренное на
-			# нём просто сгорело бы. Так всплеск не даёт одно звено и гаснет, а
-			# бежит по плети дальше — это и есть «скачкообразный рост».
-			if kid > 0:
-				_burst_pass(int(s[3]), kid)
-				# Почка проснулась и дала побег — дальше она обычное звено.
-				if patches.has(int(s[3])):
-					patches[int(s[3])].erase("wake")
-					if patches[int(s[3])].has("heir"):
-						# Замена вышла — место занято навсегда: второго вожака
-						# рядом с этим быть не должно (см. `_bud_near`).
-						patches[int(s[3])]["heir_done"] = true
-					patches[int(s[3])].erase("heir")
+# ДОВЕСТИ НАЧАТЫЙ УДАР — до конца или до срока. `deadline` — мгновение в
+# микросекундах, после которого пора отдать кадр; ноль — без срока. Возвращает,
+# доделан ли удар.
+func _beat_run(deadline: int) -> bool:
+	_in_beat = true
+	var done_here: int = 0
+	if not _beat_births:
+		while _beat_at < _beat_walk.size():
+			_beat_plant(int(_beat_walk[_beat_at]))
+			_beat_at += 1
+			done_here += 1
+			if _beat_stop(deadline, done_here):
+				_in_beat = false
+				return false
+		for pid in _beat_fallen:
+			remove_at(pid)
+		_beat_fallen = []
+		_beat_births = true
+		_beat_at = 0
+	while _beat_at < _beat_sprouts.size():
+		_beat_birth(_beat_sprouts[_beat_at])
+		_beat_at += 1
+		done_here += 1
+		if _beat_stop(deadline, done_here):
+			_in_beat = false
+			return false
 	# Рост НЕ пересобирает на месте — только помечает. Собирает `_process` с
 	# запасом на кадр: иначе каждый толчок роста был бы заминкой.
 	_mark_steps()
+	_beat_walk = []
+	_beat_sprouts = []
+	_beat_on = false
+	_in_beat = false
+	return true
+
+
+func _beat_stop(deadline: int, done_here: int) -> bool:
+	if deadline <= 0:
+		return false
+	if beat_slice > 0:
+		return done_here % beat_slice == 0
+	return Time.get_ticks_usec() >= deadline
+
+
+# СЛЕДУЮЩИЙ УДАР ИЗ ОЧЕРЕДИ, если он есть. Очередь набирает `_process`: доли мира
+# и подарка в каждом ударе — ровно те, что были бы без разложения по кадрам.
+var _beat_queue: Array[Vector2] = []
+
+func _beat_next() -> bool:
+	if _beat_queue.is_empty():
+		return false
+	var next: Vector2 = _beat_queue.pop_front()
+	_beat_begin(next.x, next.y)
+	return true
+
+
+# ДОДЕЛАТЬ НАЧАТЫЙ УДАР И ВСЕ ПРОСРОЧЕННЫЕ — прямо сейчас. Зовут все, кто правит
+# сад снаружи удара. Изнутри самого удара (`remove_at` снимает упавших,
+# `flush_now` зовёт разметку) не делает ничего.
+func beat_settle() -> void:
+	if _in_beat:
+		return
+	if _beat_on:
+		_beat_run(0)
+	while _beat_next():
+		_beat_run(0)
+
+
+# БРОСИТЬ НАЧАТЫЙ УДАР, не доделывая: сад, по которому он шёл, снесён или заменён.
+func _beat_drop() -> void:
+	_beat_queue.clear()
+	_beat_on = false
+	_beat_walk = []
+	_beat_sprouts = []
+	_beat_fallen = []
+	_beat_births = false
+	_beat_at = 0
+
+
+func _beat_plant(pid: int) -> void:
+	var dt: float = _beat_dt
+	var gift: float = _beat_gift
+	if not patches.has(pid):
+		_live.erase(pid)
+		return
+	var p: Dictionary = patches[pid]
+	var def: Dictionary = PlantsData.ITEMS[p["id"]]
+	# ВИСЯЩЕМУ ЗВЕНУ БЕЗ РОДИТЕЛЯ ДЕРЖАТЬСЯ НЕ НА ЧЕМ. Родитель мог погибнуть
+	# или оторваться — тогда кусок остаётся парить сам по себе. Снимаем не на
+	# месте, а списком: гибель звена трогает соседей, а мы посреди обхода.
+	if bool(p.get("air", false)) and not patches.has(int(p.get("from", -1))):
+		_beat_fallen.append(pid)
+		return
+	# СКОЛЬКО РОСТА ДОСТАЛОСЬ ЭТОМУ РАСТЕНИЮ ЗА УДАР. Слагаемых два: время
+	# мира и своя доля подаренного рукой игрока. Дальше по коду разницы между
+	# ними нет — подарок проливается через тот же самый рост, поэтому и
+	# зрелость, и новые звенья от него получаются настоящие.
+	# ОТРОСЛО СВОЁ — БОЛЬШЕ НЕ ШИРИТСЯ (см. `GROW_SPAN`), но СВОЁ ДОЗРЕВАЕТ.
+	#
+	# Это две разные вещи, и путать их нельзя. Звено, родившееся за секунду
+	# до срока, наследует прожитое лозой и по общим часам кончилось сразу —
+	# запрети ему и зреть, и оно застынет недоросшим огрызком на кончике
+	# каждой плети. Поэтому предел снимает только РАСПОЛЗАНИЕ: новых звеньев
+	# и кочек больше нет, а начатое доходит до своего вида.
+	var lived: float = float(p.get("lived", 0.0))
+	var done: bool = lived >= GROW_SPAN
+	# ДОЗРЕЛО — ЭТО ДО СВОЕГО ПОТОЛКА, А НЕ ДО ЕДИНИЦЫ. У концов веток он ниже
+	# (см. `_ripe_cap`), и по единице они не выбыли бы из живых НИКОГДА: сад
+	# перестал бы расти, а сердце обходило бы его до скончания века — ровно то,
+	# ради избавления от чего список живых и заводился.
+	# НАЧАТАЯ КИСТЬ ДОРАСТАЕТ И ПОСЛЕ СРОКА (её решение 02.09.2026: «пусть
+	# полностью дорастают после наступления порога роста цветочные лозы»).
+	#
+	# Срок ловил метёлку на полудлине, и на кадре она читалась не кистью, а
+	# обломком: у живого винограда кисть либо есть целиком, либо её нет.
+	# Начать НОВУЮ кисть срок по-прежнему не даёт — дорастает только начатое,
+	# и предел от этого не течёт: длина кисти своя и конечная (`bloom_max`).
+	# И У ДОРАСТАНИЯ ЕСТЬ СРОК. Замер поймал сразу: без него кисть, которой
+	# некуда расти (упёрлась в камень, не хватило места), не выбывает из живых
+	# НИКОГДА — и доросший сад снова тикает. Было 0.02 мс на удар при нуле
+	# живых, стало 0.77 мс при четырнадцати. Двадцати секунд кисти хватает с
+	# запасом: её длина конечна и мала.
+	var in_bloom: bool = int(p.get("bloom", 0)) > 0 \
+		and int(p["bloom"]) < int(p.get("bloom_max", 1)) \
+		and lived < GROW_SPAN + BLOOM_GRACE
+	var ripe: float = _ripe_cap(p, def)
+	if done and not in_bloom and float(p["m"]) >= ripe:
+		# Отросло и дозрело — из живых вон, больше его не спрашиваем.
+		_live.erase(pid)
+		return
+	var span: float = dt + _burst_take(p, gift)
+	if span <= 0.0:
+		return
+	# ЧАСЫ ИДУТ И ПОСЛЕ СРОКА — но только у того, кто ещё в живых, а таких
+	# после предела единицы: недоросшие кисти. По этим же часам им и отмеряется
+	# срок дорастания (`BLOOM_GRACE`), иначе отмерять было бы нечем.
+	p["lived"] = lived + span
+	var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) * (1.0 + def["shade_love"] * _shade(p))
+	# В складке растению вольготнее: туда наносит землю и дольше держится
+	# сырость. Величину складки считает сама сетка.
+	var fold: float = maxf(0.0, main.grid.cavity_of(int(p["cell"])))
+	rate *= 1.0 + def["joint_love"] * fold
+	# Ступень тем длиннее, чем растение взрослее.
+	rate /= STAGE_COST[clampi(int(p["m"] * float(STAGES)), 0, STAGES - 1)]
+	# НА РОВНОМ РОСТ МЕДЛЕННЕЕ — у тех, кому это записано. Лиане подпоркой
+	# служит опора, и без неё она должна не глохнуть совсем, а тянуться
+	# нехотя. Множитель идёт и в зрелость, и в частоту отростков: замедли одну
+	# зрелость — и плеть поползла бы с прежней скоростью, только с молодыми
+	# звеньями.
+	#
+	# РОВНОСТЬ БЕРЁМ У ОПОРЫ, А НЕ У НОРМАЛИ — И ЭТО ТРЕТЬЯ ПОПЫТКА.
+	#
+	# ГРАБЛИ, замеренные 2026-08-28 по жалобе пользователя «лиана растёт куда
+	# медленнее мха». Мерили наклоном земли: `tilt = 1 - nrm.y`. А нормаль —
+	# это та же крутизна, только пересчитанная (`nrm.y = 1/√(1+s²)`), и про неё
+	# в этом же файле уже записано, что глыбу от острова она не отличает
+	# ВОВСЕ: крутизна на камне в среднем 0.214, на земле 0.186. Отсюда
+	# `nrm.y` 0.978 против 0.983, то есть `tilt` 0.02 против 0.017 — и тормоз
+	# выходил 0.51 на камне против 0.508 на ровном. Задумано было «вдвое
+	# медленнее на ровном», а получилось ВДВОЕ МЕДЛЕННЕЕ ВЕЗДЕ, и награды за
+	# найденную опору не было никакой.
+	#
+	# Спрашиваем ту же опору, которой лиана выбирает сторону (`support_around`,
+	# замерено при рождении звена в `prop`): у неё размах настоящий — у подошвы
+	# глыбы 1.0, на чистом лугу 0.0.
+	var slow: float = 1.0
+	if def.has("flat_slow"):
+		slow = lerpf(float(def["flat_slow"]), 1.0,
+			clampf(float(p.get("prop", 0.0)), 0.0, 1.0))
+	# ПОТОЛОК НЕ ОТНИМАЕТ УЖЕ НАБРАННОГО. Ноша звена умеет и убывать (`_unlink`
+	# возвращает её вверх, когда кончик гибнет), потолок вместе с ней опустился
+	# бы — и лист, разок развернувшись, сложился бы назад. Такого у растения
+	# не бывает.
+	p["m"] = minf(maxf(ripe, float(p["m"])), p["m"] + rate * slow * span)
+
+	# РАСТЁТ ТОЛЬКО КОНЧИК, а звено с отростком даёт второй редко. Без этого
+	# «сдержанное ветвление» не выйдет ничем: у мха отросток даёт каждая
+	# кочка, и лиана расплылась бы тем же ковром, только вытянутым.
+	var chance: float = float(def.get("spread_rate", PlantsData.SPREAD_RATE_DEFAULT)) \
+		if (not done or in_bloom) else 0.0
+	# КУРТИНА НЕ РАСХОДИТСЯ ДАЛЬШЕ СВОЕЙ ШИРИНЫ (`clump_wide`).
+	#
+	# Без этого предела самосев — тот же ковёр, только редкий: у мха и у мака
+	# отросток даёт КАЖДОЕ растение, а значит пятно ползёт наружу без конца.
+	# Замерено на первом же прогоне мака: из одного семени за полторы минуты
+	# 11 680 стеблей на весь остров. Куртина — это пятно с краем, и край ей
+	# надо назначить.
+	#
+	# Меряем от КОРНЯ КУРТИНЫ (`root` — тот мак, что посадила рука), а не от
+	# родителя: иначе каждое новое колено отмеряло бы свою ширину заново, и
+	# предел не значил бы ничего — ровно те же грабли, что у часов роста
+	# (см. `GROW_SPAN`, «часы принадлежат организму»).
+	var wide: float = float(def.get("clump_wide", 0.0))
+	if wide > 0.0 and chance > 0.0:
+		var root: int = int(p.get("root", -1))
+		if patches.has(root) and Vector3(p["pos"]).distance_to(
+				Vector3(patches[root]["pos"])) > wide:
+			chance = 0.0
+	if def.has("branch"):
+		var kids: int = int(p.get("kids", 0))
+		# СЕДЬМОЕ ПОКОЛЕНИЕ — ПОСЛЕДНЕЕ (см. `GEN_MAX`): отсюда пошёл бы
+		# восьмой номер, а его нет. Кончика это не касается — он продолжает
+		# своё поколение, и плеть седьмого тянется в длину как всякая другая.
+		if _gen_next(p) >= GEN_MAX:
+			chance = 0.0
+		elif kids >= int(def.get("branch_max", 2)):
+			chance = 0.0
+		elif bool(p.get("wake", false)):
+			# СПЯЩАЯ ПОЧКА ПРОСНУЛАСЬ, и ей ни возраст, ни соседи не помеха:
+			# ниже по стеблю все звенья старые, и обычные запреты не пустили
+			# бы ни одного. Растёт она как кончик — новый побег и есть новый
+			# кончик. См. `_wake_bud` о том, отчего почки просыпаются.
+			pass
+		elif kids > 0:
+			# БОКОВОЙ ПОБЕГ ИДЁТ ТОЛЬКО ИЗ МОЛОДОГО ЗВЕНА. Без этого срока
+			# редкость ветвления обманчива: попытки у старого звена не
+			# кончаются никогда, и рано или поздно ветвится КАЖДОЕ. Замерено:
+			# шесть развилок на тридцать шесть звеньев — это уже не
+			# сдержанно. У живой лозы новый побег тоже идёт по молодому.
+			#
+			# И РАЗВИЛКИ ДЕРЖАТСЯ ДРУГ ОТ ДРУГА ПОДАЛЬШЕ (`fork_gap`). Одной
+			# частоты мало: она делит развилки поровну между звеньями, а
+			# метлу делает не число, а их КУЧНОСТЬ — три подряд на одном
+			# участке видно метлой, три на разных концах плети не видно вовсе.
+			if float(p["m"]) > float(def.get("branch_until", 0.7)) \
+					or _fork_near(pid, int(def.get("fork_gap", 0))):
+				chance = 0.0
+			else:
+				# ДАЛЬНИМ ПОКОЛЕНИЯМ — ПРИБАВКА (решение пользователя
+				# 2026-08-20): за каждое поколение сверх `fork_gain_from`
+				# охота ветвиться растёт на `fork_gain`. Иначе тонкие ветви
+				# идут голыми прутьями, а у живой лозы всё наоборот — чем
+				# дальше от ствола, тем чаще деление.
+				var late: int = maxi(0, int(p.get("order", 0))
+					- int(def.get("fork_gain_from", 5)))
+				chance *= float(def["branch"]) * float(p.get("fork_k", 1.0)) \
+					* (1.0 + float(late) * float(def.get("fork_gain", 0.0)))
+	# ПЛЕТЬ СВЕСИЛАСЬ НА ВСЮ ДЛИНУ — расти ей больше некуда. Пробовать при этом
+	# не перестанешь: попытки упирались бы в отказ, а в числах проверки это
+	# читается как «лиана не находит места» — то есть одна беда прикинулась бы
+	# другой.
+	if p.has("hangs") and int(p["hangs"]) >= int(p.get("hang_max", 0)):
+		chance = 0.0
+		# ...А ЗНАЧИТ ЭТО ТУПИК, и лозе нужно продолжение в другом месте.
+		_spend_tip(pid, p, def)
+	# МЕТЁЛКА ДОРОСЛА — тоже конец, но конец ЗАКОННЫЙ: цветонос и должен
+	# кончиться, отцвести ему больше нечем. Спящую почку он поэтому не будит
+	# (это делает `_spend_tip`, у него своя проверка), а вот пробовать
+	# перестаёт — иначе в числах проверки его отказы читались бы как «лиана не
+	# находит места».
+	if int(p.get("bloom", 0)) >= int(p.get("bloom_max", 1)) \
+			and int(p.get("bloom", 0)) > 0:
+		chance = 0.0
+	if p["m"] >= float(def.get("spread_at", PlantsData.SPREAD_AT_DEFAULT)) and _rng.randf() < chance * slow * span:
+		# СЧИТАЕМ ПОПЫТКИ И УДАЧИ. «Лиана застряла» бывает по двум совершенно
+		# разным причинам: она не пробует расти (частота, зрелость, запрет на
+		# ветвление) или пробует и не находит куда (земля, наклон, шаг). По
+		# самому числу звеньев их не различить, а чинить надо разное.
+		if _is_stem(def):
+			_sprout_try += 1
+		var target := _sprout_from(pid, p, def)
+		# НЕ ПРОЙДЁТ ЛИ ЭТО КОЛЕНО СКВОЗЬ ЧУЖУЮ ВЕТВЬ (её решение 02.09.2026).
+		# Спрашиваем ЗДЕСЬ, а не внутри поиска: место уже выбрано, и проверка
+		# идёт один раз на удачную попытку, а не на каждую из шести сторон.
+		# Метёлки правило не касается — она висит свободно и ни во что не
+		# вплетается.
+		if not target.is_empty() and _is_stem(def) \
+				and int(target.get("bloom", 0)) <= 0 \
+				and _stem_blocked(pid, p, target, def):
+			target = _no_spot(def, 7)
+		if not target.is_empty():
+			if _is_stem(def):
+				_sprout_win += 1
+			_beat_sprouts.append([target, p["id"],
+				_child_bulk(float(p["bulk"]), def), pid])
+		elif _is_stem(def):
+			# КОНЧИК УПЁРСЯ. Одна неудача — случайность (сторона выпала
+			# неудачная), десяток подряд — тупик, из которого сам он уже не
+			# выйдет: место вокруг него не меняется.
+			p["miss"] = int(p.get("miss", 0)) + 1
+			if int(p["miss"]) >= int(def.get("wake_after", 0)):
+				_spend_tip(pid, p, def)
+
+	# ЦВЕТОНОС — ОТДЕЛЬНАЯ ПОПЫТКА, А НЕ ДОЛЯ ОБЫЧНОЙ (решение пользователя
+	# 2026-08-28: «не заменяют обычные побеги, а дополняют их»). Оттого он и
+	# считается здесь, ниже, своим числом и своей частотой: попади он в общий
+	# зачёт — и зацветшая ветвь росла бы медленнее нецветущей.
+	# Цветение — тоже расползание: доросшая лоза новых кистей не заводит.
+	if not done and _bloom_ready(p, def) \
+			and _rng.randf() < float(def["bloom_rate"]) * slow * span:
+		var born: Dictionary = _bloom_start(p, def, int(p["salt"]))
+		if not born.is_empty():
+			# ОДИН УЗЕЛ — ОДНА МЕТЁЛКА.
+			p["bloomed"] = true
+			# И МЕСТО ЗАНЯТО СРАЗУ, до самого рождения: следующий узел в этом
+			# же ударе обязан её увидеть.
+			_bloom_soon.append(Vector3(born["pos"]))
+			_beat_sprouts.append([born, p["id"],
+				_child_bulk(float(p["bulk"]), def), pid])
+		else:
+			# НЕ ВЫШЛО — ПРОБУЕМ ЕЩЁ НЕСКОЛЬКО РАЗ И ОТСТУПАЕМСЯ. Место вокруг
+			# узла не меняется само, и вечные попытки — это чистая работа
+			# впустую: сотня узлов, которым некуда выпустить кисть, спрашивала
+			# бы землю по полсотни раз в секунду до конца игры. Несколько
+			# попыток всё же даём: длина звена и виляние берутся случайно, и
+			# со второго раза кисть иногда проходит там, где не прошла с
+			# первого.
+			var tries: int = int(p.get("bloom_try", 0)) + 1
+			p["bloom_try"] = tries
+			if tries >= int(def.get("bloom_tries", 3)):
+				p["bloomed"] = true
+
+
+func _beat_birth(s: Array) -> void:
+	# Звено лианы садится ВПЛОТНУЮ к родителю — на то она и нить. Запрет на
+	# тесноту писался под ковёр мха, где две кочки в одной точке — это брак.
+	if _is_stem(PlantsData.ITEMS[String(s[1])]) \
+			or not _crowded(s[0]["pos"], float(s[2]), String(s[1])):
+		var kid: int = _create(s[0], s[1], 0.05, float(s[2]), int(s[3]))
+		# ОСТАТОК ПОДАРКА ПЕРЕХОДИТ К КОНЧИКУ. У лианы свободно растёт только
+		# он: отпустив побег, звено само больше не удлинится, и подаренное на
+		# нём просто сгорело бы. Так всплеск не даёт одно звено и гаснет, а
+		# бежит по плети дальше — это и есть «скачкообразный рост».
+		if kid > 0:
+			_burst_pass(int(s[3]), kid)
+			# Почка проснулась и дала побег — дальше она обычное звено.
+			if patches.has(int(s[3])):
+				patches[int(s[3])].erase("wake")
+				if patches[int(s[3])].has("heir"):
+					# Замена вышла — место занято навсегда: второго вожака
+					# рядом с этим быть не должно (см. `_bud_near`).
+					patches[int(s[3])]["heir_done"] = true
+				patches[int(s[3])].erase("heir")
 
 
 # На какой земле растение вообще держится. Список сторон берём из каталога:
@@ -6687,6 +6967,7 @@ func gift_to(pid: int, secs: float = PLANT_GIFT) -> void:
 const BURST_SPILL: float = 0.6
 
 func burst_at(at: Vector3, radius: float, gift: float = BURST_GIFT) -> void:
+	beat_settle()
 	if radius <= 0.0 or patches.is_empty():
 		return
 	var touched := false
@@ -6770,10 +7051,12 @@ func _burst_pass(from: int, to: int) -> void:
 # векторы, словари и списки; нод и материалов там нет, рендер живёт отдельно
 # в `cell_nodes` и при загрузке пересобирается пометкой ячеек.
 func export_garden() -> Dictionary:
+	beat_settle()
 	return {"patches": patches, "next": _next}
 
 
 func import_garden(d: Dictionary) -> void:
+	_beat_drop()
 	patches = d.get("patches", {})
 	_next = int(d.get("next", 1))
 	by_cell.clear()
@@ -6799,6 +7082,7 @@ func import_garden(d: Dictionary) -> void:
 
 
 func surface_changed(cells: Array = []) -> void:
+	beat_settle()
 	var suspect: Dictionary = {}
 	if cells.is_empty():
 		for pid in patches:
@@ -7141,6 +7425,7 @@ func _drain(budget: float) -> void:
 # ПЕРЕСОБРАТЬ ВСЁ НЕМЕДЛЕННО. Зовут это там, где игрок ждёт ответа СЕЙЧАС:
 # снёс растение, поправил землю под ним. Рост сюда не ходит — ему спешить некуда.
 func flush_now() -> void:
+	beat_settle()
 	_mark_steps()
 	_drain(0.0)
 
@@ -7319,6 +7604,16 @@ func _rebuild_part(cell: int, part: int, parts: int) -> int:
 	var mesh: ArrayMesh = mi.mesh
 	mesh.clear_surfaces()
 	tufts.set_material(_blade_mat)
+	# ОТПЕЧАТОК СОБРАННОГО — только для стенда `--printbench`: доказать, что
+	# ускоренная сборка кладёт в меш ровно то же самое, что и прежняя.
+	if print_meshes:
+		var arrays: Array = tufts.commit_to_arrays()
+		mesh_print = hash([mesh_print, key])
+		for slot in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TEX_UV,
+				Mesh.ARRAY_TEX_UV2, Mesh.ARRAY_COLOR, Mesh.ARRAY_CUSTOM0,
+				Mesh.ARRAY_CUSTOM1]:
+			if arrays[slot] != null:
+				mesh_print = hash([mesh_print, hash(arrays[slot])])
 	tufts.commit(mesh)
 	return mine
 
@@ -7399,6 +7694,45 @@ const DENSE_ROW: float = 0.30
 # ПОСТОЯННАЯ нарочно — собранная на месте, она бы заводила по шесть коротких
 # списков на каждый сектор каждого пояса каждой перестройки.
 const BAND_TRI := [[0, 0], [0, 1], [1, 1], [0, 0], [1, 1], [1, 0]]
+
+
+# ПОЯСА ТРЕУГОЛЬНИКОВ ПО СЕТКЕ ТОЧЕК — один на все трубки, шары и чаши, у которых
+# развёртка постоянная. Сетка лежит построчно: `rows` строк по `cols` точек;
+# строка — кольцо или полоса поперёк тела. Клетка кладётся ровно в порядке
+# `BAND_TRI`: (i,j) (i,j+1) (i+1,j+1), затем (i,j) (i+1,j+1) (i+1,j).
+#
+# ЗАЧЕМ ОН ЕСТЬ (11.09.2026). Каждый такой сборщик клал вершину тремя вызовами —
+# нормаль, развёртка, точка, — разбирая при этом таблицу `BAND_TRI` и списки
+# списков на каждую вершину. Развёртка у них одна на всё тело, и ставить её
+# довольно один раз: `SurfaceTool` помнит последнюю. Вершины выходят те же, в том
+# же порядке, с теми же нормалями — проверено отпечатком роста (`--printbench`).
+func _emit_band_grid(st: SurfaceTool, pts: PackedVector3Array,
+		nrms: PackedVector3Array, rows: int, cols: int) -> void:
+	if rows < 2 or cols < 2:
+		return
+	st.set_uv(Vector2(0.5, 0.5))
+	for i in range(rows - 1):
+		var r0: int = i * cols
+		var r1: int = r0 + cols
+		for j in range(cols - 1):
+			var a: int = r0 + j
+			var b: int = a + 1
+			var c: int = r1 + j + 1
+			var d: int = r1 + j
+			st.set_normal(nrms[a])
+			st.add_vertex(pts[a])
+			st.set_normal(nrms[b])
+			st.add_vertex(pts[b])
+			st.set_normal(nrms[c])
+			st.add_vertex(pts[c])
+			st.set_normal(nrms[a])
+			st.add_vertex(pts[a])
+			st.set_normal(nrms[c])
+			st.add_vertex(pts[c])
+			st.set_normal(nrms[d])
+			st.add_vertex(pts[d])
+
+
 # РАЗМЕР ПОЧТИ НЕ МЕНЯЕТСЯ С ВОЗРАСТОМ — так решено по кадру.
 #
 # Прежде кочка росла втрое (0.035 → 0.105 доли шага), и молодую было не
@@ -8523,8 +8857,8 @@ func _emit_tube(st: SurfaceTool, path: PackedVector3Array, r_a: float,
 	if side.length_squared() < 0.000001:
 		side = Vector3(ways[0]).cross(Vector3.UP)
 	side = side.normalized()
-	var rings: Array = []
-	var norms: Array = []
+	var rings := PackedVector3Array()
+	var norms := PackedVector3Array()
 	for k in range(n):
 		var way: Vector3 = ways[k]
 		# Переносим прежний `side` на новую ось — так грани не идут винтом.
@@ -8536,24 +8870,12 @@ func _emit_tube(st: SurfaceTool, path: PackedVector3Array, r_a: float,
 		side = side.normalized()
 		var turn: Vector3 = way.cross(side).normalized()
 		var r: float = lerpf(r_a, r_b, float(k) / float(n - 1))
-		var ring: Array = []
-		var out: Array = []
 		for i in range(TWIG_SIDES + 1):
 			var ang: float = TAU * float(i) / float(TWIG_SIDES)
 			var dir: Vector3 = side * cos(ang) + turn * sin(ang)
-			out.append(dir)
-			ring.append(path[k] + dir * r)
-		rings.append(ring)
-		norms.append(out)
-	for k in range(n - 1):
-		for i in range(TWIG_SIDES):
-			for t in BAND_TRI:
-				var far: bool = int(t[0]) == 1
-				var nxt: bool = int(t[1]) == 1
-				var at: int = k + 1 if far else k
-				st.set_normal(norms[at][i + 1 if nxt else i])
-				st.set_uv(Vector2(0.5, 0.5))
-				st.add_vertex(rings[at][i + 1 if nxt else i])
+			norms.append(dir)
+			rings.append(path[k] + dir * r)
+	_emit_band_grid(st, rings, norms, n, TWIG_SIDES + 1)
 
 
 func _emit_twig(st: SurfaceTool, a: Vector3, b: Vector3, r_a: float, r_b: float,
@@ -8573,23 +8895,20 @@ func _emit_twig(st: SurfaceTool, a: Vector3, b: Vector3, r_a: float, r_b: float,
 		side = way.cross(Vector3.UP)
 	side = side.normalized()
 	var turn: Vector3 = way.cross(side).normalized()
-	var ring_a: Array = []
-	var ring_b: Array = []
-	var outs: Array = []
+	# Два кольца сеткой в две строки: у концов одни и те же направления, значит и
+	# нормали строк одинаковые.
+	var pts := PackedVector3Array()
+	var nrms := PackedVector3Array()
+	pts.resize((sides + 1) * 2)
+	nrms.resize((sides + 1) * 2)
 	for i in range(sides + 1):
 		var ang: float = TAU * float(i) / float(sides)
 		var out: Vector3 = side * cos(ang) + turn * sin(ang)
-		outs.append(out)
-		ring_a.append(a + out * r_a)
-		ring_b.append(b + out * r_b)
-	for i in range(sides):
-		for k in BAND_TRI:
-			var far: bool = int(k[0]) == 1
-			var nxt: bool = int(k[1]) == 1
-			st.set_normal(outs[i + 1 if nxt else i])
-			st.set_uv(Vector2(0.5, 0.5))
-			var ring: Array = ring_b if far else ring_a
-			st.add_vertex(ring[i + 1] if nxt else ring[i])
+		nrms[i] = out
+		nrms[sides + 1 + i] = out
+		pts[i] = a + out * r_a
+		pts[sides + 1 + i] = b + out * r_b
+	_emit_band_grid(st, pts, nrms, 2, sides + 1)
 
 
 # =============================================================================
@@ -9733,11 +10052,27 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# =========================================================================
 	#  ТЕЛО: поверхность поля по кольцам
 	# =========================================================================
+	# ТОЧКИ, НОРМАЛИ И РАЗВЁРТКА — ПЛОСКИМИ МАССИВАМИ, строка на кольцо (11.09.2026).
+	# Прежде это были списки списков, обод читался из словаря на каждую точку, а
+	# срез купола и мягкий максимум звались функциями на каждого соседа каждой
+	# точки. Кочка пересобирается десятки раз за жизнь, и замер показал: тело
+	# кочки — две трети всей пересборки мохового сада. Действия и их порядок те же
+	# до знака; проверено отпечатком роста (`--printbench`).
 	var rings: int = RING_AT.size()
-	var pts: Array = []
+	var rim_mid := PackedVector3Array()
+	var rim_off := PackedVector3Array()
+	var rim_lump := PackedFloat64Array()
+	for s in range(SECTORS):
+		rim_mid.append(Vector3(rim[s]["mid"]))
+		rim_off.append(Vector3(rim[s]["off"]))
+		for r in range(rings):
+			rim_lump.append(float(rim[s]["lump"][r]))
+	var kin_n: int = kin_t.size()
+	var kin_p := PackedVector3Array(kin_t)
+	var pts := PackedVector3Array()
+	pts.resize(rings * SECTORS)
 	for r in range(rings):
 		var t: float = float(RING_AT[r])
-		var ring: Array = []
 		for s in range(SECTORS):
 			var keep: float = cut[s]
 			# Идём от середины к ободу ПО ЗЕМЛЕ, через прощупанную середину бока,
@@ -9745,10 +10080,9 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 			var tt: float = t * k * keep
 			var o: Vector3
 			if tt <= MID_RING:
-				o = Vector3(rim[s]["mid"]) * (tt / MID_RING)
+				o = rim_mid[s] * (tt / MID_RING)
 			else:
-				o = Vector3(rim[s]["mid"]).lerp(Vector3(rim[s]["off"]),
-					(tt - MID_RING) / (1.0 - MID_RING))
+				o = rim_mid[s].lerp(rim_off[s], (tt - MID_RING) / (1.0 - MID_RING))
 			var oh: float = o.dot(up)
 			var xt: Vector3 = o - up * oh
 			# ПОЛЕ — ЭТО ТОЛЩИНА МХА НАД ЗЕМЛЁЙ, а не высота над серединой кочки.
@@ -9758,28 +10092,45 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 			#
 			# Бугристость (`lump`) идёт только в свой бугор: у соседей она своя, и
 			# подглядывать в неё незачем.
+			#
+			# Срез купола — `_profile_fast`, вписанный на месте.
 			var far: float = xt.length() / span
-			var bump: float = high * float(rim[s]["lump"][r]) \
-				* (_profile_fast(far) if far < 1.0 else 0.0)
-			for i in range(kin_t.size()):
-				var d: float = (xt - Vector3(kin_t[i])).length() / kin_r[i]
+			var fall: float = 0.0
+			if far < 1.0:
+				if far <= 0.0:
+					fall = 1.0
+				else:
+					var ff: float = far * float(PROF_STEPS)
+					var fi: int = int(ff)
+					fall = lerpf(_prof_lut[fi], _prof_lut[fi + 1], ff - float(fi))
+			var bump: float = high * rim_lump[s * rings + r] * fall
+			for i in range(kin_n):
+				var d: float = (xt - kin_p[i]).length() / kin_r[i]
 				if d >= 1.0:
 					continue
 				# Влияние соседа ВВОДИТСЯ ПОСТЕПЕННО, с пятой ступени: не гасим
 				# его бугор, а подмешиваем слитую поверхность к своей. Гасить
 				# нельзя — сосед просел бы у себя дома, а не отступил от нас.
-				bump = lerpf(bump, _smax(bump, kin_top[i] * _profile_fast(d), blend),
+				#
+				# Срез чужого купола и мягкий максимум (`_smax`) — вписаны на месте.
+				var pd: float = 1.0
+				if d > 0.0:
+					var fd: float = d * float(PROF_STEPS)
+					var di: int = int(fd)
+					pd = lerpf(_prof_lut[di], _prof_lut[di + 1], fd - float(di))
+				var his: float = kin_top[i] * pd
+				var hs: float = clampf(0.5 + 0.5 * (bump - his) / blend, 0.0, 1.0)
+				bump = lerpf(bump, lerpf(his, bump, hs) + blend * hs * (1.0 - hs),
 					kin_weld[i])
 			# Утапливаем в землю только ТАМ, ГДЕ ОБОД И ПРАВДА ЛЁГ на землю: где
 			# его поднял сосед, топить нечего — иначе в перемычке прорежется щель.
 			bump -= _ring_sink[r] * high * clampf(1.0 - bump / (0.25 * high), 0.0, 1.0)
-			ring.append(centre + xt + up * (oh + bump))
-		pts.append(ring)
+			pts[r * SECTORS + s] = centre + xt + up * (oh + bump)
 	# Макушка — тоже по полю: рядом может стоять кочка крупнее, и тогда середина
 	# этой уходит под её склон, а не торчит из него бугорком.
 	var top: float = high * (0.95 + 0.10 * float(body["age"]))
-	for i in range(kin_t.size()):
-		var d: float = Vector3(kin_t[i]).length() / kin_r[i]
+	for i in range(kin_n):
+		var d: float = kin_p[i].length() / kin_r[i]
 		if d < 1.0:
 			top = lerpf(top, _smax(top, kin_top[i] * _profile_fast(d), blend),
 				kin_weld[i])
@@ -9788,15 +10139,16 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# Сторону нормали решаем по точке ВНУТРИ тела: у макушки она смотрит вверх,
 	# у крутого бока — наружу, и одна проверка на высоту тут не годится.
 	var inside: Vector3 = centre + up * (high * 0.35)
-	var nrms: Array = []
+	var nrms := PackedVector3Array()
+	nrms.resize(rings * SECTORS)
 	for r in range(rings):
-		var ring_n: Array = []
+		var row: int = r * SECTORS
 		for s in range(SECTORS):
-			var here: Vector3 = pts[r][s]
-			var nxt: Vector3 = pts[r][(s + 1) % SECTORS]
-			var prv: Vector3 = pts[r][(s + SECTORS - 1) % SECTORS]
-			var inner: Vector3 = apex if r == 0 else pts[r - 1][s]
-			var outer: Vector3 = pts[r + 1][s] if r + 1 < rings \
+			var here: Vector3 = pts[row + s]
+			var nxt: Vector3 = pts[row + (s + 1) % SECTORS]
+			var prv: Vector3 = pts[row + (s + SECTORS - 1) % SECTORS]
+			var inner: Vector3 = apex if r == 0 else pts[row - SECTORS + s]
+			var outer: Vector3 = pts[row + SECTORS + s] if r + 1 < rings \
 				else here + (here - inner)
 			var n: Vector3 = (nxt - prv).cross(outer - inner)
 			if n.length_squared() < 0.0000001:
@@ -9805,8 +10157,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 				n = n.normalized()
 				if n.dot(here - inside) < 0.0:
 					n = -n
-			ring_n.append(n)
-		nrms.append(ring_n)
+			nrms[row + s] = n
 
 	# ОБРАЗЕЦ КЛАДЁТСЯ ПО ПОВЕРХНОСТИ, А НЕ ОТ МАКУШКИ К ОБОДУ.
 	#
@@ -9834,22 +10185,22 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	var flat_x: Vector3 = Vector3(rim[0]["dir"]).normalized()
 	var flat_y: Vector3 = up.cross(flat_x).normalized()
 	var per_metre: float = 1.0 / (BODY_TEXEL * float(TILE))
-	var dir2: Array = []
+	var dir2 := PackedVector2Array()
 	for s in range(SECTORS):
 		var d: Vector3 = Vector3(rim[s]["dir"])
 		var flat := Vector2(d.dot(flat_x), d.dot(flat_y))
 		dir2.append(flat.normalized() if flat.length_squared() > 0.000001
 			else Vector2.RIGHT)
-	var cuts: Array = []
+	var cuts := PackedVector2Array()
+	cuts.resize(rings * SECTORS)
 	var walk := PackedFloat32Array()
 	walk.resize(SECTORS)
 	for r in range(rings):
-		var ring_uv: Array = []
+		var row: int = r * SECTORS
 		for s in range(SECTORS):
-			var back: Vector3 = apex if r == 0 else pts[r - 1][s]
-			walk[s] += Vector3(pts[r][s]).distance_to(back)
-			ring_uv.append(warp + dir2[s] * (walk[s] * per_metre))
-		cuts.append(ring_uv)
+			var back: Vector3 = apex if r == 0 else pts[row - SECTORS + s]
+			walk[s] += pts[row + s].distance_to(back)
+			cuts[row + s] = warp + dir2[s] * (walk[s] * per_metre)
 	var apex_uv: Vector2 = warp
 
 	# КЛЕТКУ ОБРАЗЦА ПЕРЕДАЁМ ВТОРОЙ РАЗМЕТКОЙ: заворот идёт внутри неё, и
@@ -9865,24 +10216,45 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 		st.set_normal(up)
 		st.set_uv(apex_uv)
 		st.add_vertex(apex)
-		st.set_normal(nrms[0][s])
-		st.set_uv(cuts[0][s])
-		st.add_vertex(pts[0][s])
-		st.set_normal(nrms[0][s2])
-		st.set_uv(cuts[0][s2])
-		st.add_vertex(pts[0][s2])
-		# Пояса между кольцами.
+		st.set_normal(nrms[s])
+		st.set_uv(cuts[s])
+		st.add_vertex(pts[s])
+		st.set_normal(nrms[s2])
+		st.set_uv(cuts[s2])
+		st.add_vertex(pts[s2])
+		# Пояса между кольцами — в порядке `BAND_TRI`: (r,s) (r,s2) (r+1,s2),
+		# затем (r,s) (r+1,s2) (r+1,s).
 		for r in range(rings - 1):
-			for q in BAND_TRI:
-				var rr: int = r + int(q[0])
-				var ss: int = s2 if int(q[1]) == 1 else s
-				st.set_normal(nrms[rr][ss])
-				st.set_uv(cuts[rr][ss])
-				st.add_vertex(pts[rr][ss])
+			var ia: int = r * SECTORS + s
+			var ib: int = r * SECTORS + s2
+			var ic: int = (r + 1) * SECTORS + s2
+			var ie: int = (r + 1) * SECTORS + s
+			st.set_normal(nrms[ia])
+			st.set_uv(cuts[ia])
+			st.add_vertex(pts[ia])
+			st.set_normal(nrms[ib])
+			st.set_uv(cuts[ib])
+			st.add_vertex(pts[ib])
+			st.set_normal(nrms[ic])
+			st.set_uv(cuts[ic])
+			st.add_vertex(pts[ic])
+			st.set_normal(nrms[ia])
+			st.set_uv(cuts[ia])
+			st.add_vertex(pts[ia])
+			st.set_normal(nrms[ic])
+			st.set_uv(cuts[ic])
+			st.add_vertex(pts[ic])
+			st.set_normal(nrms[ie])
+			st.set_uv(cuts[ie])
+			st.add_vertex(pts[ie])
 
 	# ВОРС ПО ОБОДУ — ПОСЛЕДНИМ, поверх готового тела: он и садится на его край.
-	_emit_rim_fuzz(st, def, pts[rings - 1], nrms[rings - 1], up, span, hue,
-		stage_f, m, int(p["salt"]))
+	# Ворс есть не у всякого вида; обод списком собираем только тому, у кого он есть.
+	if float(def.get("fuzz_tall", 0.0)) > 0.0:
+		var last: int = (rings - 1) * SECTORS
+		_emit_rim_fuzz(st, def, Array(pts.slice(last, last + SECTORS)),
+			Array(nrms.slice(last, last + SECTORS)), up, span, hue,
+			stage_f, m, int(p["salt"]))
 	_emit_spores(st, p, def, centre, up, span, high)
 	return true
 
@@ -10179,24 +10551,16 @@ func _emit_pod(st: SurfaceTool, foot: Vector3, way: Vector3, long: float,
 		side = way.cross(Vector3.RIGHT)
 	side = side.normalized()
 	var turn: Vector3 = way.cross(side).normalized()
-	var rings: Array = []
+	var pts := PackedVector3Array()
+	var nrms := PackedVector3Array()
 	for r in range(POD_RINGS.size()):
-		var line: Array = []
 		var at: Vector3 = foot + way * (long * float(POD_RINGS[r]))
 		for j in range(POD_SIDES + 1):
 			var a: float = TAU * float(j) / float(POD_SIDES)
 			var out: Vector3 = side * cos(a) + turn * sin(a)
-			line.append([at + out * (wide * float(POD_WIDE[r])), out])
-		rings.append(line)
-	for r in range(POD_RINGS.size() - 1):
-		for j in range(POD_SIDES):
-			for k in BAND_TRI:
-				var far: bool = int(k[0]) == 1
-				var nxt: bool = int(k[1]) == 1
-				var node: Array = rings[r + 1 if far else r][j + 1 if nxt else j]
-				st.set_normal(Vector3(node[1]))
-				st.set_uv(Vector2(0.5, 0.5))
-				st.add_vertex(Vector3(node[0]))
+			pts.append(at + out * (wide * float(POD_WIDE[r])))
+			nrms.append(out)
+	_emit_band_grid(st, pts, nrms, POD_RINGS.size(), POD_SIDES + 1)
 
 
 # ВОРС: картинки, растущие ИЗ ТЕЛА по его нормали. Направление берётся у самого

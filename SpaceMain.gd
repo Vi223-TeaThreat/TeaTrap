@@ -258,7 +258,7 @@ func _ready() -> void:
 	var bench: bool = false
 	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
 			"--meetbench", "--rockbench", "--scenebench", "--showbench",
-			"--dabbench", "--poppybench"]:
+			"--dabbench", "--poppybench", "--printbench"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	if not bench and FileAccess.file_exists(SEED_PATH):
@@ -333,6 +333,12 @@ func _ready() -> void:
 		# считает пересборки. См. `_show_bench`.
 		await _fill_world()
 		_show_bench(args)
+		get_tree().quit()
+	elif "--printbench" in args:
+		# Отпечаток роста: изменила ли правка сад или его облик хоть в чём-то.
+		# См. `_print_bench`.
+		await _fill_world()
+		_print_bench(args)
 		get_tree().quit()
 	elif "--poppybench" in args:
 		# Только мак, без остального сада: облик нового вида крутится десятками
@@ -6578,6 +6584,9 @@ func _show_bench(args: PackedStringArray) -> void:
 	for a in args:
 		if a.begins_with("--kind="):
 			kind = a.substr(7)
+	# `--beat-ms=N` — сколько кадр отдаёт удару сердца; большое число даёт прежнее
+	# «весь удар в одном кадре», и так видно, что дало его разложение.
+	plants.beat_ms = _arg_num(args, "--beat-ms", plants.BEAT_MS)
 	plants._rng.seed = 20260904
 	_seed_moss(6, kind)
 	_flush_chunks()
@@ -6592,8 +6601,23 @@ func _show_bench(args: PackedStringArray) -> void:
 	# был. Значит, у правки два разных исхода, и по одному счёту их не различить.
 	var queue_top: int = 0
 	var queue_sum: float = 0.0
+	# ЦЕНА КАДРА — ТО, ЧТО ВИДИТ ГЛАЗ (11.09.2026). Счёт пересборок говорит, сколько
+	# работы, а рывок делает не работа вообще, а ОДИН дорогой кадр. Кадр при
+	# шестидесяти в секунду — 16.7 мс на всё, и сад из них берёт свою долю: рост и
+	# пересборку. Считаем самый дорогой кадр и сколько кадров сад один вытянул за
+	# половину и за весь срок кадра.
+	var frame_top: float = 0.0
+	var frames_half: int = 0
+	var frames_full: int = 0
 	for _i in range(frames):
+		var tf: int = Time.get_ticks_usec()
 		plants._process(1.0 / 60.0)
+		var spent: float = float(Time.get_ticks_usec() - tf) / 1000.0
+		frame_top = maxf(frame_top, spent)
+		if spent > 8.3:
+			frames_half += 1
+		if spent > 16.7:
+			frames_full += 1
 		var q: int = plants.dirty_count()
 		queue_top = maxi(queue_top, q)
 		queue_sum += float(q)
@@ -6619,6 +6643,10 @@ func _show_bench(args: PackedStringArray) -> void:
 	print("Показ роста: весь прогон ", snappedf(whole, 0.1), " мс, из них ",
 		snappedf(100.0 * plants.built_ms / maxf(whole, 0.001), 0.1),
 		"% — пересборка; остальное сам рост")
+	print("Показ роста: кадры — самый дорогой ", snappedf(frame_top, 0.1),
+		" мс; дороже половины кадра (8.3 мс) ", frames_half, ", дороже целого",
+		" (16.7 мс) ", frames_full, " из ", frames,
+		" — второе число и есть рывки, которые видно")
 	print("Показ роста: плавность — простой ",
 		snappedf(100.0 * plants.morph_idle_s / maxf(plants.morph_span_s, 0.001), 0.1),
 		"% времени между показами (доехало и стоит; после посадки ",
@@ -6630,6 +6658,106 @@ func _show_bench(args: PackedStringArray) -> void:
 		"%, худший ", snappedf(100.0 * plants.morph_jump_top, 0.1),
 		"% размера; перетасовок куста ", plants.morph_reshuffles, " на ",
 		plants.morph_shows, " показов")
+
+
+# =============================================================================
+#  ОТПЕЧАТОК РОСТА  (`--printbench`)
+# =============================================================================
+#
+# ЗАЧЕМ ОН ЕСТЬ. Ускорить рост можно двумя путями: делать ТО ЖЕ САМОЕ дешевле или
+# делать МЕНЬШЕ. Второе судит её глаз. Первое глазом не судится вовсе — сад обязан
+# выйти прежним до последнего знака, и доказать это может только число.
+#
+# Стенд растит сад УДАРАМИ СЕРДЦА, а не кадрами: кадры идут по часам машины, и
+# что успело пересобраться к какому кадру, зависит от её нагрузки. Удары же
+# одинаковы всегда. Каждые три секунды роста сад пересобирается целиком, и в
+# отпечаток складываются все растения (место, зрелость, вид, размер, родитель) и
+# все меши — вершины, нормали, развёртки, цвет и догон, в том порядке, в каком
+# их собрала сборка.
+#
+# ЧИТАТЬ ТАК: отпечаток совпал с прогоном до правки — правка не изменила ни сада,
+# ни его облика. Разошёлся — изменила, и «дешевле то же самое» не вышло.
+#
+# Заодно меряется цена: удар сердца в среднем и ХУДШИЙ (худший и есть рывок кадра
+# в игре) и пересборка. `--kind=moss|poppy|vine`, `--secs=N`.
+func _print_bench(args: PackedStringArray) -> void:
+	var busy: float = _load_factor()
+	print("Нагрузка машины: ", snappedf(busy, 0.01),
+		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if busy > LOAD_ALARM
+			else "замерам можно верить"))
+	var kind: String = "moss"
+	for a in args:
+		if a.begins_with("--kind="):
+			kind = a.substr(7)
+	var secs: float = _arg_num(args, "--secs", 45.0)
+	# `--beat-slice=N` — рвать каждый удар сердца на куски по N растений (см.
+	# `_tick` в `SpacePlants.gd`): проверка, что разложение удара по кадрам сада
+	# не меняет.
+	var slice: int = int(_arg_num(args, "--beat-slice", 0.0))
+	# ЧАСЫ ДОГОНА — С НУЛЯ. Пока строился мир, кадры шли по настоящему времени, и
+	# часы успели убежать на столько, сколько заняла постройка у этой машины в
+	# этот раз. Догон пишет их в меш, и без обнуления меши у одного и того же
+	# сада выходили разными от прогона к прогону.
+	plants._grow_clock = 0.0
+	plants._rng.seed = 20260904
+	if kind == "vine":
+		_seed_structures()
+		_flush_chunks()
+		_seed_vine()
+	else:
+		_seed_moss(6, kind)
+	_flush_chunks()
+	plants.flush_now()
+	plants.built_reset()
+	plants.mesh_print = 0
+	plants.print_meshes = true
+	var ticks: int = int(round(secs / plants.TICK))
+	var beat_sum: float = 0.0
+	var beat_top: float = 0.0
+	var garden: int = 0
+	for i in range(ticks):
+		var t0: int = Time.get_ticks_usec()
+		# ТОЛЧОК ПРИ ПОСАДКЕ ЛЬЁТСЯ, КАК В ИГРЕ: пока подарок не вылит, удар несёт
+		# и его долю. Без этого посеянное стартовало бы без толчка, и сад вышел бы
+		# вдвое реже того, что растёт на экране.
+		var gift: float = plants.TICK if plants._burst_left > 0.0 else 0.0
+		plants._burst_left -= plants.TICK
+		if slice > 0:
+			# УДАР НАРОЧНО РВЁТСЯ НА МЕЛКИЕ КУСКИ — так же, как в игре его рвёт
+			# запас на кадр, только в предсказуемых местах. Отпечаток обязан выйти
+			# тем же, что и без разрыва.
+			plants.beat_slice = slice
+			plants._beat_begin(plants.TICK, gift)
+			while not plants._beat_run(1):
+				pass
+			plants.beat_slice = 0
+		else:
+			plants._tick(plants.TICK, gift)
+		var took: float = float(Time.get_ticks_usec() - t0) / 1000.0
+		beat_sum += took
+		beat_top = maxf(beat_top, took)
+		if (i + 1) % 20 == 0 or i == ticks - 1:
+			plants.flush_now()
+			garden = hash([garden, _garden_print()])
+	plants.print_meshes = false
+	print("Отпечаток роста (", kind, "): ", secs, " с роста, ударов ", ticks,
+		", растений ", plants.patches.size(), "; удар сердца в среднем ",
+		snappedf(beat_sum / maxf(float(ticks), 1.0), 0.01), " мс, худший ",
+		snappedf(beat_top, 0.1), " мс; пересборка ",
+		snappedf(plants.built_ms, 0.1), " мс на ", plants.built_all, " кусков")
+	print("Отпечаток роста: сад ", garden, ", меши ", plants.mesh_print,
+		" — совпали с прогоном до правки, значит сад и его облик прежние")
+
+
+func _garden_print() -> int:
+	var keys: Array = plants.patches.keys()
+	keys.sort()
+	var h: int = 0
+	for pid in keys:
+		var p: Dictionary = plants.patches[pid]
+		h = hash([h, pid, p["pos"], p["m"], p["id"], p["bulk"],
+			p.get("from", -1)])
+	return h
 
 
 # =============================================================================
