@@ -290,6 +290,18 @@ const GROW_HOLD: float = 60.0
 # земли, снятое растение), и тогда срок вышел бы близким к нулю, а скорость —
 # бесконечной.
 const MORPH_FAST: float = 4.0
+# Срок догона не короче этого — иначе скорость упёрлась бы в `MORPH_FAST` и
+# рывок вернулся бы с другой стороны.
+const MORPH_MIN: float = 0.25
+# ЗАПАС СРОКА: догон рассчитан длиннее промежутка до показа, чтобы растение
+# никогда не успевало встать. Недоехавшее подхватит следующий показ с того места,
+# где оно видно, так что лишний запас не стоит ничего, кроме отставания на доли
+# ступени — а ступень мака это пять процентов размера, глазом не видно.
+#
+# ПОЛТОРА, А НЕ 1.15, и это замер: показ опаздывает не только от прогноза, но и
+# от очереди пересборки, а её прогнозом не поймать. С 1.15 мак простаивал 41%
+# времени между показами при нагруженной машине.
+const MORPH_SLACK: float = 1.5
 
 
 # ОТКУДА И КУДА ЕДЕТ РАСТЕНИЕ. Зовётся ОДИН РАЗ перед его вершинами — и в этом
@@ -320,6 +332,99 @@ func _morph_set(st: SurfaceTool, at: Vector3, was: float, dur: float) -> void:
 func _morph_none(st: SurfaceTool) -> void:
 	st.set_custom(0, Color(0.0, 0.0, 0.0, 0.0))
 	st.set_custom(1, Color(0.0, 0.0, 0.0, 0.0))
+
+
+# ДОГОН С ПАМЯТЬЮ: ОТКУДА ЕХАЛИ, КУДА И СКОЛЬКО. Одна мерка на мох и на мак.
+#
+# Помним не зрелость, а РАЗМЕР: с какого начали (`seen_start`), к какому едем
+# (`seen_size`), за какой срок (`seen_dur`) и когда тронулись (`seen_at`). Отсюда
+# в любой миг известно, каким растение ВИДНО на экране, — и стенд показа меряет
+# по этому две беды плавности: простой (доехало и стоит, а показа всё нет) и
+# скачок (пересобранное начало ехать не с того размера, какой был виден).
+func _morph_track(st: SurfaceTool, p: Dictionary, def: Dictionary,
+		at: Vector3, size_now: float, m: float) -> void:
+	var now: float = _grow_clock
+	if not p.has("seen_size"):
+		# ПЕРВЫЙ ПОКАЗ — растение только что село: выезжает из точки.
+		_morph_set(st, at, 0.0, MORPH_BORN)
+		p["seen_start"] = 0.0
+		p["seen_size"] = size_now
+		p["seen_dur"] = MORPH_BORN
+		p["seen_at"] = now
+		p["seen_m"] = m
+		p["seen_born"] = true
+		return
+	var gone: float = now - float(p["seen_at"])
+	var dur_was: float = maxf(float(p["seen_dur"]), 0.0001)
+	# КАКИМ РАСТЕНИЕ ВИДНО СЕЙЧАС — по памяти прошлого догона.
+	var shown: float = lerpf(float(p["seen_start"]), float(p["seen_size"]),
+		clampf(gone / dur_was, 0.0, 1.0))
+	# ЕДЕМ ОТ ТОГО, ЧТО ВИДНО, А НЕ ОТ ПРОШЛОЙ ЦЕЛИ (11.09.2026).
+	#
+	# Прежде новый догон начинался с размера, к которому ехал прошлый, — как
+	# будто тот всегда успевал доехать. Не успевал он всякий раз, когда показ
+	# приходил раньше срока (соседское рождение, всплеск от руки, ускоренное
+	# время), и растение прыгало вперёд на недоеханный остаток: замер
+	# `--showbench` — у мха до 97% размера разом, у мака до 74%.
+	var start: float = shown
+	# СРОК — ДО СЛЕДУЮЩЕГО ПОКАЗА, А НЕ КАК В ПРОШЛЫЙ РАЗ.
+	#
+	# Прежний срок брался равным прошлому промежутку, с потолком в 30 секунд.
+	# Но ступени дорожают к старости (`STAGE_COST` 1-1-1-1-1-2-3-4-5), и каждый
+	# следующий промежуток ДЛИННЕЕ прошлого: догон доезжал раньше и растение
+	# стояло, пока не придёт показ. Замер: мак простаивал 33% времени между
+	# показами, мох — 26%. А поздний промежуток мака под 37 секунд, и потолок в
+	# 30 добавлял стоянку сверх того.
+	#
+	# Теперь срок СЧИТАЕТСЯ: сколько «цены» осталось до следующего порога показа
+	# (`_cost_way`), делённое на то, как быстро растение её проходило с прошлого
+	# показа. Темп берётся по факту, а не из карточки, — в нём уже сидят и тень,
+	# и складка, и ускоренное время.
+	#
+	# С ЗАПАСОМ (`MORPH_SLACK`): лучше не доехать, чем постоять. Недоехавшее
+	# следующий показ подхватит с того места, где оно видно, — скачка не будет.
+	var dur: float = maxf(dur_was - gone, 0.0)
+	var shots: int = maxi(int(def.get("show_steps", STEPS / SHOW_EVERY)), 1)
+	var was_m: float = float(p["seen_m"])
+	var way_done: float = _cost_way(m) - _cost_way(was_m)
+	if gone > 0.0001 and way_done > 0.000001:
+		var next_m: float = minf(1.0, (floor(m * float(shots)) + 1.0) / float(shots))
+		var way_left: float = _cost_way(next_m) - _cost_way(m)
+		if way_left > 0.000001:
+			dur = way_left / (way_done / gone) * MORPH_SLACK
+	dur = clampf(dur, MORPH_MIN, GROW_HOLD - 1.0)
+	morph_shows += 1
+	# ПАУЗА ПОСЛЕ ПОСАДКИ СЧИТАЕТСЯ ОТДЕЛЬНО: всход выезжает за доли секунды
+	# и ждёт первого показа крошечным — на глаз это не остановка роста.
+	if bool(p.get("seen_born", false)):
+		morph_born_span_s += gone
+		morph_born_idle_s += maxf(0.0, gone - dur_was)
+	else:
+		morph_span_s += gone
+		morph_idle_s += maxf(0.0, gone - dur_was)
+	p["seen_born"] = false
+	var jump: float = absf(start - shown) / maxf(size_now, 0.000001)
+	morph_jump_sum += jump
+	morph_jump_top = maxf(morph_jump_top, jump)
+	_morph_set(st, at, start / maxf(size_now, 0.000001), dur)
+	p["seen_start"] = start
+	p["seen_size"] = size_now
+	p["seen_dur"] = dur
+	p["seen_at"] = now
+	p["seen_m"] = m
+
+
+# СКОЛЬКО «ЦЕНЫ» РОСТА ПРОЙДЕНО К ЭТОЙ ЗРЕЛОСТИ — в ступенях, умноженных на их
+# цену (`STAGE_COST`). По ней догон и считает, сколько ехать до следующего показа:
+# зрелость у старого растения прибавляется медленнее, а цена — ровно, с тем же
+# темпом, что и у молодого (темп роста делится на цену ступени в `_tick`).
+func _cost_way(m: float) -> float:
+	var f: float = clampf(m, 0.0, 1.0) * float(STAGES)
+	var k: int = mini(int(f), STAGES - 1)
+	var way: float = 0.0
+	for i in range(k):
+		way += float(STAGE_COST[i])
+	return way + float(STAGE_COST[k]) * (f - float(k))
 
 
 # ДОВЕСТИ ВСЕ ДОГОНЫ ДО КОНЦА НЕМЕДЛЕННО. Нужно там, где кадр обязан показать
@@ -1981,15 +2086,7 @@ func _emit_poppy(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 	var grow: float = poppy_grow(def, m)
 
 	# ДОГОН: КУСТ ЕДЕТ К НОВОМУ РАЗМЕРУ ОТ ПРЕЖНЕГО, а не подскакивает на ступени.
-	var seen_m: float = float(p.get("seen_m", -1.0))
-	if seen_m < 0.0:
-		_morph_set(st, base, 0.0, MORPH_BORN)
-	else:
-		var was: float = poppy_grow(def, seen_m)
-		_morph_set(st, base, was / maxf(grow, 0.000001),
-			minf(_grow_clock - float(p.get("seen_at", 0.0)), 30.0))
-	p["seen_m"] = m
-	p["seen_at"] = _grow_clock
+	_morph_track(st, p, def, base, grow, m)
 
 	# СТЕБЛИ ТЯНУТСЯ К ОТВЕСУ, А НЕ ПО НОРМАЛИ ЗЕМЛИ. Мох ложится на склон, лиана
 	# ползёт по нему — им нормаль и нужна. Мак же тянется к свету: на пологом
@@ -2003,6 +2100,17 @@ func _emit_poppy(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 	var stem_c: Color = Color(def.get("stem_color", def["color"])) * shade
 
 	var many: int = poppy_stems(p, def)
+	# ПЕРЕТАСОВКА КУСТА — стенду показа: у уже вышедших стеблей сменилось
+	# отставание, а с ним возраст и место на дереве.
+	var lags := PackedFloat32Array()
+	for s_l in range(many):
+		lags.append(poppy_stem_lag(p, def, s_l, many))
+	var was_lags: PackedFloat32Array = p.get("seen_lags", PackedFloat32Array())
+	for s_l in range(mini(was_lags.size(), lags.size())):
+		if absf(was_lags[s_l] - lags[s_l]) > 0.000001:
+			morph_reshuffles += 1
+			break
+	p["seen_lags"] = lags
 	# ВЕСЬ КУСТ ОТРЕЗКАМИ — ДО ТОГО, КАК ПОЛОЖЕН ХОТЬ ОДИН СТЕБЕЛЬ. Лепестку
 	# надо знать, во что он упрётся, а укладка идёт стебель за стеблем: спроси
 	# он у уже положенного — и первый стебель никого бы не видел, а последний
@@ -2282,7 +2390,7 @@ func poppy_stem_path(p: Dictionary, def: Dictionary, s: int, many: int,
 		bulk: float, nudge: float = 0.0, from: Dictionary = {}) -> Dictionary:
 	var salt: int = poppy_stem_salt(int(p["salt"]), s)
 	var mine: float = poppy_stem_m(p, def, s, many)
-	var mgrow: float = poppy_grow(def, mine)
+	var mgrow: float = poppy_grow(def, mine) * poppy_stem_rise(p, def, s, many)
 	# ПОКОЛЕНИЕ ПОБЕГА и место, откуда он растёт, приходят готовыми: считает их
 	# `poppy_stem_tree`, одна на весь куст. Пусто — значит стебель из земли.
 	var gen: int = int(from.get("gen", 1))
@@ -2692,6 +2800,8 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var head: float = float(plan["head"])
 	var seat: Vector3 = top + along * (head * 0.08)
 	var tint: Color = poppy_paint(salt, def)
+	# СВОЙ УРОВЕНЬ РАСКРЫТИЯ У КАЖДОГО ЦВЕТКА — разбор у `poppy_open_level`.
+	var shape: Dictionary = poppy_open_shape(salt, def)
 	# СВОЯ ЗАКРУТКА У КАЖДОГО ЦВЕТКА. Её кадр 07.09.2026: «сейчас они все смотрят
 	# в одни и те же стороны у всех цветков».
 	#
@@ -2786,7 +2896,7 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		var pin_r: float = float(def.get("stamen_thin", 0.0012)) * bulk
 		var pin_c: Color = Color(def.get("stamen_color",
 			Color(0.10, 0.09, 0.11))) * shade
-		var tilt: float = deg_to_rad(float(def.get("stamen_open", 24.0)))
+		var tilt: float = deg_to_rad(float(shape["pins"]))
 		for i in range(pins):
 			var a: float = TAU * float(i) / float(pins) + _mix01(salt + 7) * TAU
 			var out_dir: Vector3 = (side * cos(a) + fore * sin(a)).normalized()
@@ -2814,6 +2924,8 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		"at": seat, "along": along, "face": turn_a, "wide": turn_b,
 		"long": head, "shade": shade, "salt": salt, "tint": tint,
 		"blocks": near, "stem": mine_stem,
+		"dip": float(shape["dip"]), "curl": float(shape["curl"]),
+		"flare": float(shape["flare"]),
 		# ДОНЦЕ — НА КРАЮ САМОЙ ЧАШЕЧКИ, В МЕТРАХ, А НЕ В ДОЛЯХ ЛЕПЕСТКА.
 		#
 		# Её кадр 08.09.2026: «лепестки и тычинки левитируют над чашечкой».
@@ -2826,7 +2938,7 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	}]
 	_emit_petals(st, outer, p, def, POPPY_PETAL_COL, POPPY_PETAL_KINDS,
 		1, int(def.get("petal_outer", 4)),
-		float(def.get("petal_open", 74.0)))
+		float(shape["out"]))
 	# ВНУТРЕННИЙ РЯД СТОИТ В ПРОСВЕТАХ ВНЕШНЕГО, А НЕ ПОВЕРХ ЕГО ЛЕПЕСТКОВ.
 	#
 	# Её кадр 07.09.2026 с обводкой: «второй ряд с 2 лепестками не должен
@@ -2849,13 +2961,15 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		"wide": in_b, "long": head * float(def.get("petal_inner_k", 0.82)),
 		"shade": shade * 0.94, "salt": salt + 991, "tint": tint,
 		"blocks": near, "stem": mine_stem,
+		"dip": float(shape["dip"]), "curl": float(shape["curl"]),
+		"flare": float(shape["flare"]),
 		# ВНУТРЕННИЙ РЯД — НА ТОМ ЖЕ КРАЮ, чуть ближе к середине: он сидит под
 		# внешним, а не над ним, и уж точно не в воздухе за краем.
 		"ring": float(plan["ring_in"]),
 	}]
 	_emit_petals(st, inner, p, def, POPPY_PETAL_COL, POPPY_PETAL_KINDS,
 		1, int(def.get("petal_inner", 2)),
-		float(def.get("petal_open_in", 52.0)))
+		float(shape["in"]))
 
 
 # СКОЛЬКО У КУСТА СТЕБЛЕЙ, ЧЕЙ ЭТО СТЕБЕЛЬ И КАКОВ ОН ЗРЕЛОСТЬЮ.
@@ -2864,13 +2978,92 @@ func _emit_poppy_flower(st: SurfaceTool, p: Dictionary, def: Dictionary,
 # сборка меша и проверка числами. Посчитай они порознь — и проверка докладывала
 # бы про куст, которого не видно на кадре. Тем же правилом живёт `head_is_pod`,
 # и по той же причине.
-func poppy_stems(p: Dictionary, def: Dictionary) -> int:
+# НАСКОЛЬКО РАСКРЫТ ЭТОТ ЦВЕТОК — ОДНА МЕРКА НА СБОРКУ И НА ПРОВЕРКУ.
+#
+# ЕЁ СЛОВО 11.09.2026: «сделай разброс закрытости цветка для всех цветков, где
+# 1 — почти закрытый цветок (лепестки очень близко к сердцевине, по силуэту
+# начинает напоминать бутон), а 9 — почти полностью раскрытый цветок».
+#
+# Уровень — целый, от 1 до `open_levels`, свой у каждого цветка и постоянный на
+# всю его жизнь: берётся от соли стебля, поровну на все уровни. Постоянный
+# нарочно — цветок, менявший раскрытие от показа к показу, дёргался бы на глазах,
+# а плавность роста только что и чинили.
+func poppy_open_level(salt: int, def: Dictionary) -> int:
+	var levels: int = maxi(int(def.get("open_levels", 9)), 1)
+	return clampi(1 + int(_mix01(salt + 7717) * float(levels)), 1, levels)
+
+
+func poppy_open_shape(salt: int, def: Dictionary) -> Dictionary:
+	return poppy_open_shape_at(poppy_open_level(salt, def), def)
+
+
+# ФОРМА ЛЕПЕСТКА НА ЭТОМ УРОВНЕ: оба ряда, чаша у донца, подъём, отгиб края и
+# тычинки. Всё идёт прямой долей между закрытым (`_shut`) и раскрытым (`_wide`)
+# краем из карточки. Спрашивают её и сборка, и стенд — порознь они разошлись бы.
+func poppy_open_shape_at(level: int, def: Dictionary) -> Dictionary:
+	var levels: int = maxi(int(def.get("open_levels", 9)), 2)
+	var q: float = clampf(float(level - 1) / float(levels - 1), 0.0, 1.0)
+	return {
+		"level": level,
+		"out": lerpf(float(def.get("petal_open_shut", 0.0)),
+			float(def.get("petal_open_wide", 70.0)), q),
+		"in": lerpf(float(def.get("petal_open_in_shut", 0.0)),
+			float(def.get("petal_open_in_wide", 56.0)), q),
+		"dip": lerpf(float(def.get("petal_dip_shut", 26.0)),
+			float(def.get("petal_dip_wide", 26.0)), q),
+		"curl": lerpf(float(def.get("petal_curl_shut", 0.9)),
+			float(def.get("petal_curl_wide", 0.9)), q),
+		"flare": lerpf(float(def.get("petal_flare_shut", 0.0)),
+			float(def.get("petal_flare_wide", 0.0)), q),
+		"pins": lerpf(float(def.get("stamen_open_shut", 24.0)),
+			float(def.get("stamen_open_wide", 24.0)), q),
+	}
+
+
+# ПОЛНОЕ ЧИСЛО СТЕБЛЕЙ КУСТА — постоянное с самой посадки.
+#
+# КУСТ НЕ ПЕРЕТАСОВЫВАЕТСЯ, КОГДА ПРИБАВЛЯЕТ СТЕБЕЛЬ (11.09.2026). Прежде число
+# стеблей росло округлением доли зрелости, и от этого числа считались и
+# отставание каждого стебля, и дерево побегов. Прибавился стебель — у всех
+# прочих разом менялись возраст и родитель: побеги перескакивали на другие
+# стебли, бутоны становились цветками на пустом месте. Замер `--showbench`:
+# перетасовка в 290 показах из 494 — больше половины всех пересборок куста
+# были не ростом, а перестановкой.
+#
+# Теперь дерево и отставания считаются от ПОЛНОГО числа, а стебель появляется
+# сам — когда до него дорастёт куст (`poppy_stems`).
+func poppy_stem_full(p: Dictionary, def: Dictionary) -> int:
 	var salt: int = int(p["salt"])
-	var many: int = int(lerpf(float(def.get("stems_low", 3)),
-		float(def.get("stems_high", 6)), _mix01(salt + 61)))
-	# Куст набирает стебли не разом: у всхода один, у взрослого все.
-	return maxi(1, int(round(float(maxi(many, 1))
-		* clampf(float(p["m"]) * 1.6, 0.35, 1.0))))
+	return maxi(1, int(lerpf(float(def.get("stems_low", 3)),
+		float(def.get("stems_high", 6)), _mix01(salt + 61))))
+
+
+# СКОЛЬКО СТЕБЛЕЙ УЖЕ ВЫШЛО. Стебель выходит тогда, когда куст дорос до его
+# отставания: возраст стебля — это возраст куста минус отставание, и до нуля он
+# не родился. Так у всхода один стебель, у взрослого все, и каждый выходит
+# ровно в свой срок. Отставание не убывает по счёту, поэтому вышедшие — всегда
+# первые по номеру, и прочий код может по-прежнему идти от нуля до `many`.
+func poppy_stems(p: Dictionary, def: Dictionary) -> int:
+	var full: int = poppy_stem_full(p, def)
+	var m: float = float(p["m"])
+	var out: int = 1
+	for s in range(1, full):
+		if m - poppy_stem_lag(p, def, s, full) <= 0.0:
+			break
+		out = s + 1
+	return out
+
+
+# СТЕБЕЛЬ ПРОРАСТАЕТ, А НЕ ПОЯВЛЯЕТСЯ ГОТОВЫМ. Вышедший стебель набирает размер
+# от нуля за `stem_emerge` зрелости — иначе он возникал бы разом, вместе с
+# листьями. Первый стебель не ждёт: его выход и есть посадка куста, а она
+# выезжает своим догоном (`MORPH_BORN`).
+func poppy_stem_rise(p: Dictionary, def: Dictionary, s: int, many: int) -> float:
+	if s == 0:
+		return 1.0
+	var raw: float = float(p["m"]) - poppy_stem_lag(p, def, s, many)
+	return smoothstep(0.0, 1.0, clampf(raw
+		/ maxf(float(def.get("stem_emerge", 0.1)), 0.0001), 0.0, 1.0))
 
 
 func poppy_stem_salt(salt: int, s: int) -> int:
@@ -2900,15 +3093,19 @@ func poppy_stem_salt(salt: int, s: int) -> int:
 func poppy_stem_tree(p: Dictionary, def: Dictionary, many: int) -> Array:
 	var salt: int = int(p["salt"])
 	var out: Array = []
+	# ДЕРЕВО — НА ПОЛНОЕ ЧИСЛО СТЕБЛЕЙ, отдаётся же только вышедшее: иначе с
+	# каждым новым стеблем менялось бы число корневых и побеги перескакивали бы
+	# на другие стебли (разбор у `poppy_stem_full`).
+	var full: int = maxi(poppy_stem_full(p, def), many)
 	# Из земли — примерно треть всех стеблей, но не меньше двух: с одним
 	# корневым куст превращается в одинокий прут с ветками.
-	var roots: int = clampi(int(round(float(many)
-		* float(def.get("branch_roots", 0.38)))), 1, many)
-	if many >= 3:
+	var roots: int = clampi(int(round(float(full)
+		* float(def.get("branch_roots", 0.38)))), 1, full)
+	if full >= 3:
 		roots = maxi(roots, 2)
 	var third: float = float(def.get("branch_third", 0.22))
 	var seconds: Array = []
-	for s in range(many):
+	for s in range(full):
 		if s < roots:
 			out.append({"gen": 1, "parent": -1, "at": 0.0})
 			continue
@@ -2923,6 +3120,7 @@ func poppy_stem_tree(p: Dictionary, def: Dictionary, many: int) -> Array:
 		else:
 			out.append({"gen": 2, "parent": (s - roots) % roots, "at": at})
 			seconds.append(s)
+	out.resize(mini(many, out.size()))
 	return out
 
 
@@ -2957,11 +3155,30 @@ func poppy_stem_m(p: Dictionary, def: Dictionary, s: int, many: int) -> float:
 	return clampf(float(p["m"]) - poppy_stem_lag(p, def, s, many), 0.02, 1.0)
 
 
-func poppy_stem_lag(p: Dictionary, def: Dictionary, s: int, many: int) -> float:
-	var salt: int = poppy_stem_salt(int(p["salt"]), s)
-	return float(def.get("stem_lag", 0.22)) \
-		* (float(s) / maxf(1.0, float(many - 1))) \
-		* (0.6 + 0.8 * _mix01(salt + 17))
+# ОТСТАВАНИЕ — ОТ ПОЛНОГО ЧИСЛА СТЕБЛЕЙ И НЕ УБЫВАЕТ ПО СЧЁТУ (11.09.2026). От
+# полного — чтобы вышедший стебель не менял возраст, когда выходит следующий;
+# не убывает — чтобы побег не мог родиться раньше того, на ком сидит (родитель
+# у него всегда раньше по счёту). Разбор — у `poppy_stem_full`.
+#
+# СЧИТАЕТСЯ ОДИН РАЗ НА ЖИЗНЬ КУСТА и лежит при нём (`lags`): отставания от
+# возраста не зависят вовсе, а спрашивают их на каждой сборке десятки раз —
+# пересчёт с нарастающим максимумом каждый раз заново стоил заметную долю
+# сборки.
+func poppy_stem_lag(p: Dictionary, def: Dictionary, s: int, _many: int) -> float:
+	var lags: PackedFloat32Array = p.get("lags", PackedFloat32Array())
+	if lags.is_empty():
+		var full: int = poppy_stem_full(p, def)
+		var lag: float = 0.0
+		lags.resize(full)
+		for j in range(full):
+			if j > 0:
+				var salt: int = poppy_stem_salt(int(p["salt"]), j)
+				lag = maxf(lag, float(def.get("stem_lag", 0.22))
+					* (float(j) / maxf(1.0, float(full - 1)))
+					* (0.6 + 0.8 * _mix01(salt + 17)))
+			lags[j] = lag
+		p["lags"] = lags
+	return lags[clampi(s, 0, lags.size() - 1)]
 
 
 # СТАЛ ЛИ ЭТОТ СТЕБЕЛЬ КОРОБОЧКОЙ.
@@ -3255,18 +3472,25 @@ func _emit_speck(st: SurfaceTool, at: Vector3, along: Vector3, out: Vector3,
 	if up_v.length_squared() < 0.000000001:
 		return
 	up_v = up_v.normalized()
+	# ОБЩЕЕ НА ВСЮ ПЛАСТИНКУ СТАВИТСЯ ОДИН РАЗ, А НЕ НА КАЖДУЮ ВЕРШИНУ (11.09.2026).
+	# Сборщик сам помнит последние нормаль, цвет и развёртку до следующей вершины
+	# (на этом же стоит и `_morph_set`), а крапинок на кусте под тысячу: прежние
+	# восемнадцать вызовов на пластинку и массив углов, заводимый заново на каждую,
+	# были заметной долей всей сборки куста.
 	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
 	st.set_color(tint.srgb_to_linear())
-	var corner: Array = [
-		at - up_v * (long * 0.5) - side_v * (wide * 0.5),
-		at - up_v * (long * 0.5) + side_v * (wide * 0.5),
-		at + up_v * (long * 0.5) + side_v * (wide * 0.5),
-		at + up_v * (long * 0.5) - side_v * (wide * 0.5),
-	]
-	for i in [0, 1, 2, 0, 2, 3]:
-		st.set_normal(out)
-		st.set_uv(Vector2(0.5, 0.5))
-		st.add_vertex(corner[int(i)])
+	st.set_normal(out)
+	st.set_uv(Vector2(0.5, 0.5))
+	var u: Vector3 = up_v * (long * 0.5)
+	var s: Vector3 = side_v * (wide * 0.5)
+	var c0: Vector3 = at - u - s
+	var c2: Vector3 = at + u + s
+	st.add_vertex(c0)
+	st.add_vertex(at - u + s)
+	st.add_vertex(c2)
+	st.add_vertex(c0)
+	st.add_vertex(c2)
+	st.add_vertex(at + u - s)
 
 
 # КРАПИНКИ ПО СТЕБЛЮ — ГУЩЕ У МОЛОДЫХ ПОБЕГОВ.
@@ -6742,11 +6966,31 @@ var built_ms: float = 0.0
 # пересборок стало меньше не вдвое» не разобрать вовсе.
 var marks_step: int = 0
 
+# ПЛАВНОСТЬ ПОКАЗА — для стенда (`_morph_track`): сколько показов, сколько секунд
+# между ними, сколько из них растение простояло доехавшим, какими были скачки
+# при пересборке (в долях размера) и сколько раз куст мака перетасовался.
+var morph_shows: int = 0
+var morph_span_s: float = 0.0
+var morph_idle_s: float = 0.0
+var morph_born_span_s: float = 0.0
+var morph_born_idle_s: float = 0.0
+var morph_jump_sum: float = 0.0
+var morph_jump_top: float = 0.0
+var morph_reshuffles: int = 0
+
 
 func built_reset() -> void:
 	built_all = 0
 	marks_step = 0
 	built_ms = 0.0
+	morph_shows = 0
+	morph_span_s = 0.0
+	morph_idle_s = 0.0
+	morph_born_span_s = 0.0
+	morph_born_idle_s = 0.0
+	morph_jump_sum = 0.0
+	morph_jump_top = 0.0
+	morph_reshuffles = 0
 
 
 # Сколько кусков ЖДЁТ пересборки прямо сейчас. Очередь эта и есть черта между
@@ -9031,7 +9275,7 @@ func petal_path(seat: Vector3, up: Vector3, out_dir: Vector3, long: float,
 func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 		def: Dictionary, first_col: int = BLOOM_COL,
 		kinds: int = BLOOM_KINDS, rows_over: int = 0, per_over: int = 0,
-		open_over: float = -1.0) -> void:
+		open_over: float = -999.0) -> void:
 	var tint: Color = def.get("flower_color", Color(1.0, 1.0, 1.0))
 	var lum: float = maxf(0.001, (tint.r + tint.g + tint.b) / 3.0)
 	var hue := Color(1.0, 1.0, 1.0).lerp(
@@ -9052,7 +9296,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 	var v_foot: float = (float((stage + 1) * TILE) - 0.5) / high_px
 	var rows: int = maxi(rows_over if rows_over > 0 else int(def.get("petal_rows", 2)), 1)
 	var per: int = maxi(per_over if per_over > 0 else int(def.get("petal_per_row", 3)), 1)
-	var open_in: float = deg_to_rad(open_over if open_over >= 0.0 else float(def.get("petal_open", 50.0)))
+	var open_in: float = deg_to_rad(open_over if open_over > -900.0 else float(def.get("petal_open", 50.0)))
 	var open_out: float = deg_to_rad(float(def.get("petal_open_far", 82.0)))
 	var bend: float = clampf(float(def.get("petal_bend", 0.33)), 0.05, 0.9)
 	# ЧАША ВМЕСТО ИЗЛОМА — только тем, у кого `petal_dip` задан. Умолчание
@@ -9071,6 +9315,11 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 	st.set_uv2(Vector2(-1.0, -1.0))
 	for f in flowers:
 		var up: Vector3 = f["along"]
+		# ФОРМА ЛЕПЕСТКА — СВОЯ У ЦВЕТКА, если он её принёс (мак: уровень
+		# раскрытия, `poppy_open_shape`), иначе из карточки, как у лианы.
+		var dip_f: float = deg_to_rad(float(f["dip"])) if f.has("dip") else dip
+		var curl_f: float = float(f.get("curl", curl))
+		var flare_f: float = deg_to_rad(float(f["flare"])) if f.has("flare") else flare
 		var ref: Vector3 = f["face"]
 		var ref2: Vector3 = f["wide"]
 		var base: Vector3 = f["at"]
@@ -9130,7 +9379,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 						d_try = d_try.normalized()
 						var g_try: float = _petal_gap(petal_path(
 							seat + d_try * ring_m, up, d_try, long,
-							bend, lean, dip, curl, flare)["pts"], blocks, mine_stem,
+							bend, lean, dip_f, curl_f, flare_f)["pts"], blocks, mine_stem,
 							half)
 						# ЗАДУМАННОЕ НАПРАВЛЕНИЕ — оно же и мерка «как было бы
 						# без всей этой возни»: ни отворота, ни складывания.
@@ -9172,7 +9421,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 				# нужен перелом у донца); у чаши их четыре и они идут по дуге.
 				# Считает их `petal_path` — одна на сборку и на проверку.
 				var line_of: Dictionary = petal_path(seat_at, up, out_dir, long,
-					bend, lean, dip, curl, flare)
+					bend, lean, dip_f, curl_f, flare_f)
 				# ЛЕПЕСТОК СКЛАДЫВАЕТСЯ ПЕРЕД ПРЕПЯТСТВИЕМ (её слово 07.09.2026).
 				#
 				# Сложенный — это три вещи разом, и порознь ни одна не годится:
@@ -9207,7 +9456,7 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 						bow_at = bow * lerpf(1.0, 2.2, fold)
 						var lean_at: float = lean * lerpf(1.0, 0.65, fold)
 						line_of = petal_path(seat_at, up, out_dir, long_at,
-							bend, lean_at, dip, curl, flare)
+							bend, lean_at, dip_f, curl_f, flare_f)
 						var tilt_at: Vector3 = (up * cos(lean_at)
 							+ out_dir * sin(lean_at))
 						if tilt_at.length_squared() > 0.000001:
@@ -9438,17 +9687,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary) -> bool:
 	# сколько раз была меньше» — это просто отношение двух её значений. Высота
 	# при этом чуть отстаёт от ширины (к старости кочка стелется), но за одну
 	# показанную ступень расхождение — доли процента.
-	var seen_m: float = float(p.get("seen_m", -1.0))
-	if seen_m < 0.0:
-		# ПЕРВЫЙ ПОКАЗ — растение только что село: выезжает из точки, а не
-		# выскакивает готовым.
-		_morph_set(st, centre, 0.0, MORPH_BORN)
-	else:
-		_morph_set(st, centre,
-			_patch_span(seen_m, float(p["bulk"])) / maxf(span, 0.000001),
-			minf(_grow_clock - float(p.get("seen_at", 0.0)), 30.0))
-	p["seen_m"] = m
-	p["seen_at"] = _grow_clock
+	_morph_track(st, p, def, centre, span, m)
 
 	# Цвет вида берём БЕЗ его темноты: тень и свет уже нарисованы на картинке,
 	# и умножение на тёмно-зелёный сделало бы кочку чёрной. И оттенок подмешиваем

@@ -5823,41 +5823,53 @@ func _poppy_check() -> void:
 	# тесное место может прийтись на середину пути.
 	var tight := 99.0
 	var tight_at := 0.0
-	for shut in range(11):
-		var ok: float = float(shut) / 10.0
-		var plan: Dictionary = plants.poppy_head_plan(card, 1.0, ok)
-		var ring: float = float(plan["pin_ring"])
-		var floor_y: float = minf(float(plan["heart_low"]), float(plan["pin_low"]))
-		for row in range(2):
-			var foot: float = float(plan["foot_out"] if row == 0
-				else plan["foot_in"])
-			var long: float = float(plan["head"]) * (1.0 if row == 0
-				else float(card.get("petal_inner_k", 0.82)))
-			var lean: float = deg_to_rad(float(card.get("petal_open", 74.0))
-				if row == 0 else float(card.get("petal_open_in", 52.0)))
-			# ДОНЦЕ ОТНЕСЕНО ОТ ОСИ на край цветоложа — тем же числом, каким его
-			# относит сборка. Мерить его на оси значило бы мерить цветок,
-			# которого нет: у оси лепестка не бывает вовсе.
-			# ДОНЦЕ ОТНЕСЕНО ОТ ОСИ на край чашечки — тем же числом, каким его
-			# относит сборка. Мерить его на оси значило бы мерить цветок,
-			# которого нет: у оси лепестка не бывает вовсе.
-			var line: Dictionary = plants.petal_path(
-				Vector3(float(plan["cup_r"]) * (0.95 if row == 0 else 0.80), foot, 0.0),
-				Vector3.UP, Vector3.RIGHT, long,
-				float(card.get("petal_bend", 0.22)), lean,
-				deg_to_rad(float(card.get("petal_dip", -1.0))),
-				float(card.get("petal_curl", 0.5)),
-				deg_to_rad(float(card.get("petal_flare", 0.0))))
-			var pts: Array = line["pts"]
-			for i in range(pts.size() - 1):
-				for t in range(9):
-					var at: Vector3 = Vector3(pts[i]).lerp(Vector3(pts[i + 1]),
-						float(t) / 8.0)
-					if at.x > ring:
-						continue          # уже вне головки — не о ней речь
-					if floor_y - at.y < tight:
-						tight = floor_y - at.y
-						tight_at = ok
+	var tight_lv := 0
+	var lv_top: int = maxi(int(card.get("open_levels", 9)), 1)
+	# ОБА КРАЯ РАЗБРОСА РАСКРЫТИЯ (11.09.2026): у закрытого цветка кончики идут
+	# к оси, у раскрытого донце уходит вниз — тесно может стать на любом краю.
+	for lv in range(1, lv_top + 1):
+		var shp: Dictionary = plants.poppy_open_shape_at(int(lv), card)
+		for shut in range(11):
+			var ok: float = float(shut) / 10.0
+			var plan: Dictionary = plants.poppy_head_plan(card, 1.0, ok)
+			var ring: float = float(plan["pin_ring"])
+			var floor_y: float = minf(float(plan["heart_low"]), float(plan["pin_low"]))
+			# НАД ГОЛОВКОЙ ЛЕПЕСТОК ИДЁТ НАД НЕЙ, А НЕ СКВОЗЬ НЕЁ: у закрытого
+			# цветка кончики и должны сходиться над тычинками. Верх головки — тем
+			# же счётом, каким его ставит сборка: макушка тела с диском либо
+			# кончики тычинок, что выше.
+			var hw_ok: float = float(plan["hw"])
+			var head_top: float = maxf(float(plan["heart_mid"])
+				+ float(plan["heart_long"]) * 0.42 + hw_ok * 0.16,
+				float(plan["pin_low"]) + hw_ok * float(card.get("stamen_long", 0.85))
+				* ok * cos(deg_to_rad(float(shp["pins"]))))
+			for row in range(2):
+				var foot: float = float(plan["foot_out"] if row == 0
+					else plan["foot_in"])
+				var long: float = float(plan["head"]) * (1.0 if row == 0
+					else float(card.get("petal_inner_k", 0.82)))
+				var lean: float = deg_to_rad(float(shp["out"] if row == 0
+					else shp["in"]))
+				# ДОНЦЕ ОТНЕСЕНО ОТ ОСИ на край чашечки — тем же числом, каким его
+				# относит сборка. Мерить его на оси значило бы мерить цветок,
+				# которого нет: у оси лепестка не бывает вовсе.
+				var line: Dictionary = plants.petal_path(
+					Vector3(float(plan["cup_r"]) * (0.95 if row == 0 else 0.80), foot, 0.0),
+					Vector3.UP, Vector3.RIGHT, long,
+					float(card.get("petal_bend", 0.22)), lean,
+					deg_to_rad(float(shp["dip"])), float(shp["curl"]),
+					deg_to_rad(float(shp["flare"])))
+				var pts: Array = line["pts"]
+				for i in range(pts.size() - 1):
+					for t in range(9):
+						var at: Vector3 = Vector3(pts[i]).lerp(Vector3(pts[i + 1]),
+							float(t) / 8.0)
+						if at.x > ring or at.y > head_top:
+							continue          # вне головки или над ней — не о ней речь
+						if floor_y - at.y < tight:
+							tight = floor_y - at.y
+							tight_at = ok
+							tight_lv = int(lv)
 	# ЛЕПЕСТКИ НЕ ПРОХОДЯТ СКВОЗЬ ЧУЖОЕ — её слово 07.09.2026. Считает это сама
 	# сборка, по той самой линии, что ложится в меш (стенду её взять неоткуда);
 	# здесь только сносим счёт и пересобираем сад заново, чтобы он набрался.
@@ -6225,6 +6237,8 @@ func _poppy_check() -> void:
 	var jit: float = deg_to_rad(float(card.get("petal_jitter", 0.0)))
 	var outer_n: int = int(card.get("petal_outer", 4))
 	var inner_n: int = int(card.get("petal_inner", 2))
+	var lv_seen := PackedInt32Array()
+	lv_seen.resize(maxi(int(card.get("open_levels", 9)), 1))
 	for pid in plants.patches:
 		var p: Dictionary = plants.patches[pid]
 		if String(p["id"]) != "poppy":
@@ -6236,6 +6250,7 @@ func _poppy_check() -> void:
 				continue          # не цветок — лепестков нет
 			var salt: int = plants.poppy_stem_salt(int(p["salt"]), s)
 			spins.append(plants.poppy_flower_spin(salt))
+			lv_seen[plants.poppy_open_level(salt, card) - 1] += 1
 			var turn_in: float = plants.poppy_inner_gap(salt, card)
 			for ki in range(inner_n):
 				var ai: float = plants.petal_angle(salt + 991, 0, ki, inner_n,
@@ -6260,28 +6275,108 @@ func _poppy_check() -> void:
 	print("Мак: закрутка венчиков — строй ", snappedf(order, 0.001), " на ",
 		spins.size(), " цветках; единица значила бы, что все смотрят в одну",
 		" сторону, ноль — полный разнобой")
+	var lv_line := ""
+	for i_l in range(lv_seen.size()):
+		lv_line += "%d:%d " % [i_l + 1, lv_seen[i_l]]
+	print("Мак: уровни раскрытия по куртине — ", lv_line.strip_edges(), " на ",
+		spins.size(), " цветках; поровну значит, что разброс честный")
 	# ЧАША — ТОЖЕ ЧИСЛОМ. Её слова: у донца лепесток смотрит чуть в землю, дальше
 	# изгибается кверху. Значит у линии есть НИЗ (ниже донца) и КОНЕЦ (выше
 	# донца), и оба обязаны быть по свою сторону. Ноль в обоих значил бы прямую
 	# доску, а низ без подъёма — зонтик вместо чаши.
+	# ПО ВСЕМ УРОВНЯМ РАЗБРОСА (11.09.2026): форма лепестка идёт прямой долей между
+	# закрытым и раскрытым краем, и чаша обязана остаться чашей на каждом уровне, а
+	# не только на краях — середина смешивает числа и могла бы выйти доской.
 	var cup_plan: Dictionary = plants.poppy_head_plan(card, 1.0, 1.0)
-	var cup_line: Dictionary = plants.petal_path(Vector3.ZERO, Vector3.UP,
-		Vector3.RIGHT, float(cup_plan["head"]),
-		float(card.get("petal_bend", 0.22)),
-		deg_to_rad(float(card.get("petal_open", 74.0))),
-		deg_to_rad(float(card.get("petal_dip", -1.0))),
-		float(card.get("petal_curl", 0.5)),
-		deg_to_rad(float(card.get("petal_flare", 0.0))))
-	var cup_low := 0.0
-	for at in cup_line["pts"]:
-		cup_low = minf(cup_low, Vector3(at).y)
-	var cup_pts: Array = cup_line["pts"]
-	print("Мак: чаша лепестка — от донца вниз на ",
-		snappedf(-cup_low * 1000.0, 0.1), " мм, конец выше донца на ",
-		snappedf(Vector3(cup_pts[cup_pts.size() - 1]).y * 1000.0, 0.1),
-		" мм при длине ", snappedf(float(cup_plan["head"]) * 1000.0, 0.1),
+	var cup_low_min := 99.0
+	var cup_low_lv := 0
+	var cup_tip_min := 99.0
+	var cup_tip_lv := 0
+	for lv in range(1, maxi(int(card.get("open_levels", 9)), 1) + 1):
+		var shc: Dictionary = plants.poppy_open_shape_at(lv, card)
+		var cup_line: Dictionary = plants.petal_path(Vector3.ZERO, Vector3.UP,
+			Vector3.RIGHT, float(cup_plan["head"]),
+			float(card.get("petal_bend", 0.22)),
+			deg_to_rad(float(shc["out"])), deg_to_rad(float(shc["dip"])),
+			float(shc["curl"]), deg_to_rad(float(shc["flare"])))
+		var cup_low := 0.0
+		for at in cup_line["pts"]:
+			cup_low = minf(cup_low, Vector3(at).y)
+		var cup_pts: Array = cup_line["pts"]
+		var cup_tip: float = Vector3(cup_pts[cup_pts.size() - 1]).y
+		if -cup_low < cup_low_min:
+			cup_low_min = -cup_low
+			cup_low_lv = lv
+		if cup_tip < cup_tip_min:
+			cup_tip_min = cup_tip
+			cup_tip_lv = lv
+	print("Мак: чаша лепестка по всем уровням — самое мелкое дно ",
+		snappedf(cup_low_min * 1000.0, 0.1), " мм ниже донца (уровень ",
+		cup_low_lv, "), самый низкий кончик ", snappedf(cup_tip_min * 1000.0, 0.1),
+		" мм выше донца (уровень ", cup_tip_lv, ") при длине ",
+		snappedf(float(cup_plan["head"]) * 1000.0, 0.1),
 		" мм — оба числа положительны только у чаши: ноль внизу это доска,",
 		" ноль вверху это зонтик")
+	# РАЗБРОС РАСКРЫТИЯ ПО УРОВНЯМ — её слово 11.09.2026: «1 — почти закрытый,
+	# по силуэту начинает напоминать бутон; 9 — почти полностью раскрытый».
+	#
+	# СИЛУЭТ ЧИСЛОМ: как далеко от оси уходит внешний ряд и насколько кончик выше
+	# донца. Первый уровень обязан стоять ближе к бутону, чем к девятому, —
+	# рядом печатаем и сам бутон.
+	#
+	# И ПРОСВЕТ ДО ТЫЧИНОК: у закрытого цветка лепестки идут вдоль головки, и
+	# пройди они сквозь тычинки — на кадре это щетина сквозь лепесток. Меряем, на
+	# сколько лепесток дальше от оси, чем тычинка на той же высоте.
+	var lv_n: int = maxi(int(card.get("open_levels", 9)), 2)
+	var sil := ""
+	var pin_gap := 99.0
+	var pin_gap_lv := 0
+	var fp: Dictionary = plants.poppy_head_plan(card, 1.0, 1.0)
+	var pin_len: float = float(fp["hw"]) * float(card.get("stamen_long", 0.85))
+	for lv in range(1, lv_n + 1):
+		var sh: Dictionary = plants.poppy_open_shape_at(lv, card)
+		var tilt_p: float = deg_to_rad(float(sh["pins"]))
+		var reach := 0.0
+		var tip_h := 0.0
+		for row in range(2):
+			var ln: Dictionary = plants.petal_path(
+				Vector3(float(fp["cup_r"]) * (0.95 if row == 0 else 0.80),
+					float(fp["foot_out"] if row == 0 else fp["foot_in"]), 0.0),
+				Vector3.UP, Vector3.RIGHT,
+				float(fp["head"]) * (1.0 if row == 0
+					else float(card.get("petal_inner_k", 0.82))),
+				float(card.get("petal_bend", 0.22)),
+				deg_to_rad(float(sh["out"] if row == 0 else sh["in"])),
+				deg_to_rad(float(sh["dip"])), float(sh["curl"]),
+				deg_to_rad(float(sh["flare"])))
+			var lp: Array = ln["pts"]
+			if row == 0:
+				tip_h = Vector3(lp[lp.size() - 1]).y - float(fp["foot_out"])
+			for i in range(lp.size() - 1):
+				for t in range(9):
+					var a3: Vector3 = Vector3(lp[i]).lerp(Vector3(lp[i + 1]),
+						float(t) / 8.0)
+					if row == 0:
+						reach = maxf(reach, a3.x)
+					var up_y: float = a3.y - float(fp["pin_low"])
+					if up_y >= 0.0 and up_y <= pin_len * cos(tilt_p):
+						var gap_p: float = a3.x - (float(fp["pin_ring"])
+							+ up_y * tan(tilt_p))
+						if gap_p < pin_gap:
+							pin_gap = gap_p
+							pin_gap_lv = lv
+		sil += "%d:%d/%d" % [lv, int(round(reach * 1000.0)),
+			int(round(tip_h * 1000.0))]
+		if lv < lv_n:
+			sil += "  "
+	print("Мак: раскрытие по уровням — радиус силуэта / высота кончика над",
+		" донцем, мм: ", sil, "; бутон для сравнения ",
+		int(round(float(card.get("bud_wide", 0.0)) * 500.0)), "/",
+		int(round(float(card.get("bud_long", 0.0)) * 1000.0)),
+		" — первый уровень обязан стоять ближе к бутону, чем к девятому")
+	print("Мак: закрытый цветок и тычинки — самый малый просвет ",
+		snappedf(pin_gap * 1000.0, 0.1), " мм (уровень ", pin_gap_lv,
+		"); ниже нуля значит, что лепесток проходит сквозь тычинки")
 	# ПУСТО — ЭТО НЕ ОШИБКА, А ОТВЕТ. С 09.09.2026 кольцо тычинок сдвинуто к
 	# середине (0.9 ширины тела вместо 1.5), а донца лепестков сидят на краю
 	# чашечки — то есть ЗА кольцом. Ни одна точка лепестка внутрь кольца больше
@@ -6294,7 +6389,7 @@ func _poppy_check() -> void:
 	else:
 		print("Мак: лепестки под головкой — самый малый просвет ",
 			snappedf(tight * 1000.0, 0.1), " мм, при раскрытии ",
-			snappedf(tight_at, 0.1),
+			snappedf(tight_at, 0.1), " на уровне ", tight_lv,
 			"; меряется от низа тёмного тела до самой высокой точки лепестка",
 			" внутри кольца тычинок, и ниже нуля значило бы, что лепесток",
 			" растёт СКВОЗЬ головку, а не под ней")
@@ -6524,6 +6619,17 @@ func _show_bench(args: PackedStringArray) -> void:
 	print("Показ роста: весь прогон ", snappedf(whole, 0.1), " мс, из них ",
 		snappedf(100.0 * plants.built_ms / maxf(whole, 0.001), 0.1),
 		"% — пересборка; остальное сам рост")
+	print("Показ роста: плавность — простой ",
+		snappedf(100.0 * plants.morph_idle_s / maxf(plants.morph_span_s, 0.001), 0.1),
+		"% времени между показами (доехало и стоит; после посадки ",
+		snappedf(100.0 * plants.morph_born_idle_s
+			/ maxf(plants.morph_born_span_s, 0.001), 0.1),
+		"%), скачок при пересборке — в",
+		" среднем ", snappedf(100.0 * plants.morph_jump_sum
+			/ maxf(float(plants.morph_shows), 1.0), 0.01),
+		"%, худший ", snappedf(100.0 * plants.morph_jump_top, 0.1),
+		"% размера; перетасовок куста ", plants.morph_reshuffles, " на ",
+		plants.morph_shows, " показов")
 
 
 # =============================================================================
