@@ -1687,6 +1687,13 @@ func _clear_toolbar() -> void:
 		toolbar_layer.queue_free()
 	toolbar_layer = null
 	toolbar_panel = null
+	# Значки и спрятанные части принадлежат снесённым панелям: держать их
+	# дальше значило бы трогать мёртвые узлы при первом же нажатии.
+	menu_bodies.erase("tools")
+	menu_bodies.erase("time")
+	menu_folds.erase("tools")
+	menu_folds.erase("time")
+	menu_titles.erase("time")
 	group_headers.clear()
 	group_boxes.clear()
 	group_open.clear()
@@ -1771,6 +1778,109 @@ func _chip_box(alpha: float) -> StyleBoxFlat:
 	return box
 
 
+# =============================================================================
+#  МЕНЮ СВОРАЧИВАЮТСЯ ДО ОДНОЙ ИКОНКИ
+# =============================================================================
+#
+# Её просьба 12.09.2026: «добавь для всех меню сворачиваемость до состояния
+# одной иконки». Свернуть можно все три: список инструментов слева, время
+# справа и подсказку сверху. От свёрнутого остаётся ровно значок на своём
+# прежнем месте, и он же разворачивает меню обратно.
+#
+# ЗНАЧКИ РИСУЮТСЯ КОДОМ, А НЕ БЕРУТСЯ ИЗ ШРИФТА. Шрифт игры знает буквы и
+# цифры, а всякий знак вроде ≡ или ▾ рисует пустой рамкой с кодом внутри —
+# грабля, на которой уже стояли. Рисунок из нескольких полосок читается
+# одинаково везде и растёт вместе с остальным интерфейсом (`ui_scale`).
+#
+# Состояние живёт в `menu_open` и ПЕРЕЖИВАЕТ ПЕРЕСБОРКУ ПАНЕЛЕЙ: её делает
+# всякое изменение размера окна, и свёрнутое меню не должно от этого
+# разворачиваться само.
+var menu_open: Dictionary = {"tools": true, "time": true, "hint": true}
+var menu_bodies: Dictionary = {}      # ключ меню -> та часть, что прячется
+var menu_folds: Dictionary = {}       # ключ меню -> его значок
+var menu_titles: Dictionary = {}      # ключ меню -> подпись рядом со значком
+# Чем меню показывается, когда свёрнуто: список — полосками, время — часами,
+# подсказка — буквой «i».
+const MENU_ICON: Dictionary = {"tools": "bars", "time": "clock", "hint": "info"}
+
+
+# Значок рисуем по клеточкам условной сетки 10×10, а клетку берём в `px`
+# экранных точек: так он остаётся чётким на любом масштабе интерфейса.
+func _icon_texture(kind: String, px: int) -> ImageTexture:
+	var unit: int = maxi(px, 1)
+	var side: int = 10 * unit
+	var img := Image.create(side, side, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var ink := Color(1, 1, 1, 0.88)
+	if kind == "bars":
+		for row in [2, 5, 8]:
+			img.fill_rect(Rect2i(unit, row * unit, side - 2 * unit, unit), ink)
+	elif kind == "clock":
+		var mid: float = float(side) * 0.5
+		for y in range(side):
+			for x in range(side):
+				var off: float = Vector2(float(x) + 0.5 - mid,
+					float(y) + 0.5 - mid).length()
+				if off <= mid - 0.5 * float(unit) and off >= mid - 1.5 * float(unit):
+					img.set_pixel(x, y, ink)
+		# Стрелки: короткая вправо, длинная вверх — так часы читаются и в
+		# десять точек шириной.
+		img.fill_rect(Rect2i(4 * unit, 2 * unit, unit, 3 * unit), ink)
+		img.fill_rect(Rect2i(5 * unit, 4 * unit, 2 * unit, unit), ink)
+	elif kind == "info":
+		img.fill_rect(Rect2i(4 * unit, unit, 2 * unit, 2 * unit), ink)
+		img.fill_rect(Rect2i(4 * unit, 4 * unit, 2 * unit, 5 * unit), ink)
+	else:
+		# «Свернуть» — одна полоска поперёк: меню схлопнется в неё саму.
+		img.fill_rect(Rect2i(unit, 4 * unit, side - 2 * unit, 2 * unit), ink)
+	return ImageTexture.create_from_image(img)
+
+
+func _icon_button(key: String) -> Button:
+	var b := Button.new()
+	b.flat = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.tooltip_text = "Свернуть меню до значка" if bool(menu_open.get(key, true)) \
+		else "Развернуть меню"
+	b.icon = _icon_texture("fold" if bool(menu_open.get(key, true))
+		else String(MENU_ICON.get(key, "bars")), ui_scale)
+	var tight := StyleBoxEmpty.new()
+	tight.content_margin_left = 3 * ui_scale
+	tight.content_margin_right = 3 * ui_scale
+	tight.content_margin_top = 2 * ui_scale
+	tight.content_margin_bottom = 2 * ui_scale
+	for state in ["normal", "hover", "pressed", "focus", "disabled"]:
+		b.add_theme_stylebox_override(state, tight)
+	# На стекле у значка должна быть подложка: сам по себе он слишком мелок,
+	# чтобы по нему целиться пальцем, и не выглядит нажимаемым.
+	if _touch_ui():
+		b.add_theme_stylebox_override("normal", _chip_box(0.10))
+		b.add_theme_stylebox_override("hover", _chip_box(0.20))
+		b.add_theme_stylebox_override("pressed", _chip_box(0.26))
+	b.pressed.connect(_toggle_menu.bind(key))
+	menu_folds[key] = b
+	return b
+
+
+func _toggle_menu(key: String) -> void:
+	var open: bool = not bool(menu_open.get(key, true))
+	menu_open[key] = open
+	if key == "hint":
+		_setup_hint()
+		return
+	var body = menu_bodies.get(key)
+	if body is Control:
+		body.visible = open
+	var title = menu_titles.get(key)
+	if title is Control:
+		title.visible = open
+	var fold = menu_folds.get(key)
+	if fold is Button:
+		fold.icon = _icon_texture("fold" if open
+			else String(MENU_ICON.get(key, "bars")), ui_scale)
+		fold.tooltip_text = "Свернуть меню до значка" if open else "Развернуть меню"
+
+
 func _setup_toolbar() -> void:
 	var layer := CanvasLayer.new()
 	add_child(layer)
@@ -1790,6 +1900,22 @@ func _setup_toolbar() -> void:
 	var column := VBoxContainer.new()
 	column.add_theme_constant_override("separation", 0)
 	panel.add_child(column)
+
+	# ЗНАЧОК СВОРАЧИВАНИЯ — первой строкой и у правого края: панель растёт снизу
+	# вверх от нижнего угла экрана, и свёрнутая остаётся ровно там, где значок
+	# был до этого.
+	var fold_row := HBoxContainer.new()
+	fold_row.alignment = BoxContainer.ALIGNMENT_END
+	column.add_child(fold_row)
+	fold_row.add_child(_icon_button("tools"))
+
+	var fold_body := VBoxContainer.new()
+	fold_body.add_theme_constant_override("separation", 0)
+	fold_body.visible = bool(menu_open.get("tools", true))
+	column.add_child(fold_body)
+	menu_bodies["tools"] = fold_body
+	# Дальше всё меню кладётся ВНУТРЬ сворачиваемой части, а не в саму колонку.
+	column = fold_body
 
 	# Три пункта верхнего уровня. Ярусы растительности вложены внутрь одного
 	# из них — иначе список занимал бы полэкрана.
@@ -1992,11 +2118,27 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 	column.add_theme_constant_override("separation", 0)
 	panel.add_child(column)
 
+	# Значок сворачивания — в одной строке с заголовком, у левого края: панель
+	# прижата к правому нижнему углу, и свёрнутая садится на место значка.
+	var head_row := HBoxContainer.new()
+	head_row.add_theme_constant_override("separation", 4 * ui_scale)
+	column.add_child(head_row)
+	head_row.add_child(_icon_button("time"))
+
 	var title := Label.new()
 	title.text = "Время"
 	title.modulate = Color(1, 1, 1, 0.5)
 	title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
-	column.add_child(title)
+	title.visible = bool(menu_open.get("time", true))
+	head_row.add_child(title)
+	menu_titles["time"] = title
+
+	var fold_body := VBoxContainer.new()
+	fold_body.add_theme_constant_override("separation", 0)
+	fold_body.visible = bool(menu_open.get("time", true))
+	column.add_child(fold_body)
+	menu_bodies["time"] = fold_body
+	column = fold_body
 
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", _chip_gap())
@@ -2261,7 +2403,18 @@ func _setup_hint() -> void:
 	hint_layer = CanvasLayer.new()
 	add_child(hint_layer)
 	var layer := hint_layer
+	# ЗНАЧОК СВОРАЧИВАНИЯ — в самом углу, а подсказка отодвигается вправо на его
+	# ширину. Свёрнутая подсказка оставляет на экране только его.
+	var open_hint: bool = bool(menu_open.get("hint", true))
+	var fold := _icon_button("hint")
+	fold.position = Vector2(14 * ui_scale, 14 * ui_scale)
+	layer.add_child(fold)
+	# РАЗМЕР ЗАДАЁМ ЯВНО: этот значок лежит прямо на слое, а не в контейнере, и
+	# без этого остался бы нулевым — то есть невидимым и ненажимаемым.
+	fold.reset_size()
+	var shift: int = 18 * ui_scale     # ширина значка с полями
 	var label := Label.new()
+	label.visible = open_hint
 	# На стекле подсказка ДРУГАЯ, а не та же вдвое крупнее: четыре мышиные
 	# строки там не только занимают пол-экрана, но и врут — ни Shift, ни
 	# колеса, ни боковых кнопок на телефоне нет.
@@ -2278,7 +2431,7 @@ func _setup_hint() -> void:
 		# интерфейс.
 		label.add_theme_font_size_override("font_size", UI_FONT * ui_scale)
 	var hint_px: int = ui_scale
-	label.position = Vector2(16 * hint_px, 16 * hint_px)
+	label.position = Vector2(16 * hint_px + shift, 16 * hint_px)
 	label.add_theme_color_override("font_color", Color.WHITE)
 	label.add_theme_color_override("font_outline_color", Color.BLACK)
 	label.add_theme_constant_override("outline_size", 4)
@@ -2288,7 +2441,11 @@ func _setup_hint() -> void:
 	fill_label = Label.new()
 	# Под подсказкой: на стекле она в две строки, и место под неё считаем от
 	# того же кегля, иначе на плотном экране надпись уезжала бы на середину.
-	fill_label.position = Vector2(16 * hint_px, 52 * hint_px if _touch_ui() else 76 * hint_px)
+	# Строка достройки острова не прячется вместе с подсказкой: это не меню, а
+	# ответ на «почему остров ещё не весь». Когда подсказка свёрнута, она
+	# поднимается на её место — рядом со значком.
+	fill_label.position = Vector2(16 * hint_px + shift,
+		(52 * hint_px if _touch_ui() else 76 * hint_px) if open_hint else 16 * hint_px)
 	fill_label.add_theme_font_size_override("font_size",
 		11 * ui_scale if _touch_ui() else UI_FONT * ui_scale)
 	fill_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
@@ -3750,6 +3907,9 @@ func _scene_bench(args: PackedStringArray) -> void:
 		print("Нагрузка машины: ", snappedf(busy, 0.01), "× — замерам можно верить")
 	var many: int = int(_arg_num(args, "--islands", 3.0))
 	var seed0: int = int(_arg_num(args, "--seed", float(WORLD_SEED + 1)))
+	# МЯГКОСТЬ СРЕЗА ГЛЫБЫ КРУГОМ КИСТИ — ключом, как и у стенда камня: перебор
+	# значений иначе требует правки кода между прогонами, а их десяток.
+	grid.block_clip = _arg_num(args, "--clip", grid.block_clip)
 	scene_id = "rocks"
 	var total := 0
 	for n in range(many):
@@ -5891,6 +6051,16 @@ func _poppy_check() -> void:
 		" мм. Первое — как встал бы лепесток без всякой проверки, второе — как",
 		" встал на деле; ниже нуля значит, что он всё же вошёл в стебель, лист",
 		" или чужую головку")
+	# КАРЛИКОВОСТЬ — её кадр 12.09.2026 с обводкой: «найди причину карликовости
+	# этих лепестков». Складывание укорачивало лепесток до 0.45 длины, и у
+	# цветка, которому тесно со всех сторон, такими выходили все лепестки разом
+	# при целой головке. Теперь предел укорочения 0.8, а тесноту разводит поворот.
+	print("Мак: карликовость лепестков — самый короткий ",
+		snappedf(plants.petal_short_min * 100.0, 0.1),
+		"% задуманной длины, короче девяти десятых — ", plants.petals_small,
+		" из ", plants.petals_seen,
+		". До правки 12.09.2026 предел был 45%: у тесного цветка укорачивались",
+		" ВСЕ лепестки, а головка оставалась целой — он и читался ощипанным")
 	# ПРОХОДЯТ ЛИ СТЕБЛИ СКВОЗЬ ДРУГ ДРУГА — её слово 09.09.2026 («подтяни
 	# проверку от лозы»). Считаем по живым кустам: сколько пар стеблей сошлось
 	# ближе суммы толщин и насколько глубоко зашла худшая пара.
@@ -5901,16 +6071,14 @@ func _poppy_check() -> void:
 		var pt3: Dictionary = plants.patches[pid3]
 		if String(pt3["id"]) != "poppy":
 			continue
-		var seat3: Vector3 = pt3["pos"]
-		var nrm3: Vector3 = pt3["nrm"]
-		var s3: Vector3 = nrm3.cross(Vector3.RIGHT)
-		if s3.length_squared() < 0.000001:
-			s3 = nrm3.cross(Vector3.UP)
-		s3 = s3.normalized()
-		var many3: int = plants.poppy_stems(pt3, card)
-		var paths3: Array = plants.poppy_bush_paths(pt3, card, many3, seat3,
-			nrm3, s3, nrm3.cross(s3).normalized(),
-			float(pt3.get("bulk", 1.0)))
+		# КУСТ — ТОТ, ЧТО УЛОЖЕН И СОБРАН В МЕШ (`poppy_laid`), а не своя копия.
+		# До 13.09.2026 стенд укладывал его сам, и сперва даже в своих осях (верх —
+		# нормаль земли), а сборка — в других; теперь укладка к тому же зависит от
+		# соседей, и копия мерила бы куст, которого на кадре нет.
+		var laid3: Dictionary = plants.poppy_laid(int(pid3))
+		if laid3.is_empty():
+			continue
+		var paths3: Array = laid3["paths"]
 		for i3 in range(paths3.size()):
 			var mine3: Dictionary = paths3[i3]
 			var before: Array = []
@@ -5927,6 +6095,70 @@ func _poppy_check() -> void:
 		cross_seen, ", худшая зашла на ", snappedf(-cross_deep * 1000.0, 0.1),
 		" мм. Ноль был бы недостижим: полтора десятка стеблей растут из ОДНОЙ",
 		" точки, и вплотную они стоят по построению")
+	# ПОБЕГ СИДИТ НА РОДИТЕЛЕ, А НЕ ВИСИТ РЯДОМ — её кадр 13.09.2026 с тремя
+	# обводками: «стебли висят в воздухе, это абсолютно недопустимо. Нужно
+	# сделать сочленение как у лианы».
+	#
+	# Две мерки на каждый побег. ЗАЗОР — насколько основание побега дальше от оси
+	# родителя, чем его поверхность: ниже нуля значит, что основание внутри
+	# родителя, как и надо. ТОЛЩИНА — во сколько раз побег у основания толще
+	# родителя в месте крепления. Трубка стебля квадратная (`TWIG_SIDES` 4), и
+	# торец побега целиком уходит внутрь, только если он не толще 0.707 —
+	# круга, вписанного в квадрат.
+	#
+	# Расстояние до оси родителя меряем по ВСЕЙ его ломаной, а не до узла, от
+	# которого побег отсчитан: мерка не должна повторять расчёт сборки.
+	var joint_n := 0
+	var joint_air := 0
+	var joint_gap := -9.9
+	var joint_fat := 0.0
+	for pid4 in plants.patches:
+		var pt4: Dictionary = plants.patches[pid4]
+		if String(pt4["id"]) != "poppy":
+			continue
+		# Куст — тот, что уложен и собран в меш (`poppy_laid`), а не своя копия.
+		var laid4: Dictionary = plants.poppy_laid(int(pid4))
+		if laid4.is_empty():
+			continue
+		var paths4: Array = laid4["paths"]
+		var tree4: Array = plants.poppy_stem_tree(pt4, card, paths4.size())
+		for k4 in range(paths4.size()):
+			var par4: int = int(tree4[k4]["parent"])
+			if par4 < 0 or par4 >= paths4.size():
+				continue
+			var kid4: Dictionary = paths4[k4]
+			var his4: PackedVector3Array = paths4[par4]["path"]
+			var foot4: Vector3 = PackedVector3Array(kid4["path"])[0]
+			var mg_par: float = float(paths4[par4]["mgrow"])
+			var ra4: float = float(paths4[par4].get("r_foot",
+				float(card.get("stem_foot", 0.005)) * mg_par))
+			var rb4: float = float(paths4[par4].get("r_head",
+				float(card.get("stem_thin", 0.0035)) * mg_par))
+			var near_d := 9.9
+			var near_r := 0.0
+			for h4 in range(his4.size() - 1):
+				var way4: Vector3 = his4[h4 + 1] - his4[h4]
+				var len4: float = way4.length_squared()
+				var tt4: float = 0.0 if len4 < 1e-12 else clampf(
+					(foot4 - his4[h4]).dot(way4) / len4, 0.0, 1.0)
+				var d4: float = foot4.distance_to(his4[h4] + way4 * tt4)
+				if d4 < near_d:
+					near_d = d4
+					near_r = lerpf(ra4, rb4,
+						(float(h4) + tt4) / float(maxi(his4.size() - 1, 1)))
+			joint_n += 1
+			var gap4: float = near_d - near_r
+			if gap4 > 0.0:
+				joint_air += 1
+			joint_gap = maxf(joint_gap, gap4)
+			var kid_r4: float = float(kid4.get("r_foot",
+				float(card.get("stem_foot", 0.005)) * float(kid4["mgrow"])))
+			joint_fat = maxf(joint_fat, kid_r4 / maxf(near_r, 0.000001))
+	print("Мак: побеги на родителе — висят в воздухе ", joint_air, " из ",
+		joint_n, "; самый большой зазор ", snappedf(joint_gap * 1000.0, 0.1),
+		" мм (ниже нуля — основание внутри родителя, так и надо); самый толстый",
+		" побег у основания ", snappedf(joint_fat, 0.01), " толщины родителя",
+		" (торец спрятан, если не больше 0.707)")
 	# БУТОН: РАЗМЕР И РАСКОЛ ПО СТУПЕНЯМ — её слово 08.09.2026 («втрое больше, на
 	# 3-4 стадиях разделяются ровно пополам, обнажая красные лепестки внутри»).
 	var bud_l: float = float(card.get("bud_long", 0.0))
@@ -6423,6 +6655,431 @@ func _poppy_check() -> void:
 		snappedf(steep, 0.01), " при пороге ",
 		snappedf(float(card["flat_at"]), 0.01),
 		" — ниже порога садиться не должен вовсе")
+	_poppy_cross_report(card)
+	_poppy_flower_report(card)
+	_poppy_petal_look(card, sheet_img)
+
+
+# ЦВЕТОК С ЧУЖИМИ ЧАСТЯМИ ВНУТРИ — её кадры 13.09.2026: «ещё не решена
+# проблема с пересечениями». На них сквозь цветки проходят стебли, коробочка
+# сидит внутри цветка, цветки заходят друг в друга лепестками.
+#
+# ПОЧЕМУ МЕРКА «ЧАСТИ КУСТА» ЭТОГО НЕ ВИДЕЛА. Цветок в ней — шарик по кольцу
+# тычинок, полтора сантиметра, тогда как лепесток — двенадцать; и мерит она
+# только внутри одного куста. Самая крупная часть цветка и соседние кусты
+# выпадали из счёта целиком — а на кадре именно они.
+#
+# ВЕНЧИК — ШАР ПО РАЗМАХУ ЛЕПЕСТКОВ на его уровне раскрытия: закрытый цветок
+# уже, раскрытый шире. Размах даёт та же линия лепестка, что у сборки
+# (`petal_path`), один раз на уровень. Проткнутым и налегающим считаем по ТРЁМ
+# ЧЕТВЕРТЯМ размаха: стебель, прошедший у самых кончиков, лепестка не рвёт, а
+# сквозь середину венчика — рвёт.
+const FLOWER_CORE: float = 0.75
+
+func _poppy_flower_report(card: Dictionary) -> void:
+	var levels: int = maxi(int(card.get("open_levels", 9)), 1)
+	var fp: Dictionary = plants.poppy_head_plan(card, 1.0, 1.0)
+	var full_head: float = maxf(float(fp["head"]), 0.0001)
+	var reach_of := PackedFloat32Array()
+	for lv in range(1, levels + 1):
+		var sh: Dictionary = plants.poppy_open_shape_at(lv, card)
+		var ln: Dictionary = plants.petal_path(
+			Vector3(float(fp["cup_r"]) * 0.95, float(fp["foot_out"]), 0.0),
+			Vector3.UP, Vector3.RIGHT, float(fp["head"]),
+			float(card.get("petal_bend", 0.22)), deg_to_rad(float(sh["out"])),
+			deg_to_rad(float(sh["dip"])), float(sh["curl"]),
+			deg_to_rad(float(sh["flare"])))
+		var far := 0.0
+		for pt in ln["pts"]:
+			var v: Vector3 = pt
+			far = maxf(far, Vector2(v.x, v.z).length())
+		reach_of.append(far / full_head)
+	var open_at: float = float(card.get("open_at", 0.6))
+	var full_at: float = float(card.get("open_full", 1.0))
+	var stems: Array = []
+	var flowers: Array = []
+	var heads: Array = []
+	var bush_no := 0
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) != "poppy":
+			continue
+		bush_no += 1
+		var bulk: float = float(p["bulk"])
+		# Куст — тот, что уложен и собран в меш (`poppy_laid`), а не своя копия.
+		var laid: Dictionary = plants.poppy_laid(int(pid))
+		if laid.is_empty():
+			continue
+		var paths: Array = laid["paths"]
+		for s in range(paths.size()):
+			var plan: Dictionary = paths[s]
+			var path: PackedVector3Array = plan["path"]
+			if path.size() < 2:
+				continue
+			var mgrow: float = float(plan["mgrow"])
+			var lo: Vector3 = path[0]
+			var hi: Vector3 = path[0]
+			for v in path:
+				lo = lo.min(v)
+				hi = hi.max(v)
+			stems.append({"bush": bush_no, "stem": s, "path": path, "lo": lo,
+				"hi": hi, "r": float(plan.get("r_foot",
+				float(card.get("stem_foot", 0.005)) * mgrow))})
+			var top: Vector3 = path[path.size() - 1]
+			var tip: Vector3 = (path[path.size() - 1]
+				- path[path.size() - 2]).normalized()
+			if bool(plan["is_bud"]):
+				var bud_l: float = float(card.get("bud_long", 0.05)) * bulk * mgrow
+				heads.append({"bush": bush_no, "stem": s,
+					"at": top + tip * (bud_l * 0.5),
+					"r": float(card.get("bud_wide", 0.02)) * bulk * mgrow * 0.5})
+			elif bool(plan["is_pod"]):
+				var pod_r: float = float(card.get("pod_wide", 0.017)) * bulk
+				heads.append({"bush": bush_no, "stem": s,
+					"at": top + tip * (pod_r * float(card.get("pod_squash", 0.82))),
+					"r": pod_r})
+			else:
+				var open_k: float = clampf((float(plan["mine"]) - open_at)
+					/ maxf(full_at - open_at, 0.001), 0.0, 1.0)
+				var head: float = float(plants.poppy_head_plan(card, bulk,
+					open_k)["head"])
+				var lv2: int = clampi(plants.poppy_open_level(int(plan["salt"]),
+					card), 1, levels)
+				flowers.append({"bush": bush_no, "stem": s,
+					"at": top + tip * (head * 0.3),
+					"r": reach_of[lv2 - 1] * head})
+	# СТЕБЛИ СКВОЗЬ ВЕНЧИК. Коробка стебля отсекает почти всех сразу.
+	var pierced := 0
+	var pierced_own := 0
+	var pierced_near := 0
+	for f in flowers:
+		var at: Vector3 = f["at"]
+		var core: float = float(f["r"]) * FLOWER_CORE
+		var by_own := false
+		var by_near := false
+		for sm in stems:
+			if int(sm["bush"]) == int(f["bush"]) and int(sm["stem"]) == int(f["stem"]):
+				continue
+			var lim: float = core + float(sm["r"])
+			var lo2: Vector3 = sm["lo"]
+			var hi2: Vector3 = sm["hi"]
+			var ex: float = maxf(maxf(lo2.x - at.x, 0.0), at.x - hi2.x)
+			var ey: float = maxf(maxf(lo2.y - at.y, 0.0), at.y - hi2.y)
+			var ez: float = maxf(maxf(lo2.z - at.z, 0.0), at.z - hi2.z)
+			if ex * ex + ey * ey + ez * ez > lim * lim:
+				continue
+			var way: PackedVector3Array = sm["path"]
+			for k in range(way.size() - 1):
+				if _seg_gap(at, at, way[k], way[k + 1]) < lim:
+					if int(sm["bush"]) == int(f["bush"]):
+						by_own = true
+					else:
+						by_near = true
+					break
+		if by_own or by_near:
+			pierced += 1
+		if by_own:
+			pierced_own += 1
+		if by_near:
+			pierced_near += 1
+	# ЦВЕТКИ ВНАХЛЁСТ.
+	var overlap := 0
+	var overlap_own := 0
+	for i in range(flowers.size()):
+		for j in range(i + 1, flowers.size()):
+			var room: float = (float(flowers[i]["r"]) + float(flowers[j]["r"])) \
+				* FLOWER_CORE
+			if Vector3(flowers[i]["at"]).distance_to(Vector3(flowers[j]["at"])) < room:
+				overlap += 1
+				if int(flowers[i]["bush"]) == int(flowers[j]["bush"]):
+					overlap_own += 1
+	# БУТОН ИЛИ КОРОБОЧКА ВНУТРИ ЧУЖОГО ВЕНЧИКА.
+	var swallowed := 0
+	for h in heads:
+		for f in flowers:
+			if int(h["bush"]) == int(f["bush"]) and int(h["stem"]) == int(f["stem"]):
+				continue
+			if Vector3(h["at"]).distance_to(Vector3(f["at"])) \
+					< float(f["r"]) * FLOWER_CORE + float(h["r"]):
+				swallowed += 1
+				break
+	print("Мак: цветки с чужими частями — проткнуты стеблем ", pierced, " из ",
+		flowers.size(), " (своим кустом ", pierced_own, ", соседним ",
+		pierced_near, "); цветков внахлёст ", overlap, " пар (в одном кусте ",
+		overlap_own, ", между кустами ", overlap - overlap_own,
+		"); бутонов и коробочек внутри чужого цветка ", swallowed, " из ",
+		heads.size(), ". Венчик — шар в три четверти размаха лепестков по его",
+		" уровню раскрытия; это то, что видно на её кадрах 13.09.2026")
+
+
+# ЧАСТИ КУСТА ДРУГ СКВОЗЬ ДРУГА — её слово 12.09.2026: «заведи проверку, чтобы
+# цветки, стебли, бутоны и листья по возможности не пересекали друг друга».
+#
+# ЧЕМ МЕРЯЕМ. Куст сводится к отрезкам с толщиной — стебель трубкой, лист палкой
+# вдоль пластины, головка шариком, — и делает это ТА ЖЕ функция, которой сборка
+# ищет помехи лепестку (`_poppy_blocks`). Держать здесь свою копию значило бы
+# мерить куст, которого на кадре нет.
+#
+# СЧИТАЕМ ПАРЫ ОТ РАЗНЫХ СТЕБЛЕЙ. Лист на своём стебле сидит вплотную по
+# устройству, головка сидит на своём же конце — мерить это нечего.
+#
+# «ПО ВОЗМОЖНОСТИ» — ЭТО ЧЕСТНО, И НОЛЬ ТУТ НЕДОСТИЖИМ: десяток стеблей растёт
+# из одной точки, и у самой земли они стоят вплотную. Число нужно затем, чтобы
+# видеть, когда пересечений становится больше, и какая пара частей виновата.
+func _poppy_cross_report(card: Dictionary) -> void:
+	var many_by := {}         # «лист↔стебель» -> сколько пар
+	var deep_by := {}         # та же пара -> самое глубокое заступание, м
+	var seen_pairs := {}      # какие пары ЧАСТЕЙ уже сочтены
+	var bushes := 0
+	var hurt := 0
+	var leaves_all := 0
+	var leaves_hurt := {}
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) != "poppy":
+			continue
+		bushes += 1
+		# КУСТ — ТОТ, ЧТО УЛОЖЕН И СОБРАН В МЕШ (`poppy_laid`), а не своя копия:
+		# с 13.09.2026 укладка зависит от соседей и от уже уложенного, и копия
+		# мерила бы другой куст.
+		var laid: Dictionary = plants.poppy_laid(int(pid))
+		if laid.is_empty():
+			continue
+		var paths: Array = laid["paths"]
+		var parts: Array = laid["blocks"]
+		var stems: int = paths.size()
+		# СОЧЛЕНЕНИЕ НЕ В СЧЁТ (13.09.2026). Побег садится на ось родителя нарочно,
+		# как у лианы, и у места крепления они касаются по устройству. Пару
+		# «побег — родитель» пропускаем, только если ОБА отрезка лежат у самого
+		# места крепления: дальше их встреча — уже настоящее пересечение.
+		var tree_c: Array = plants.poppy_stem_tree(p, card, stems)
+		var joint_zone := 0.06
+		# ИМЯ ЧАСТИ СКЛЕИВАЕМ ЗДЕСЬ, А НЕ В СБОРКЕ. Сборке оно не нужно вовсе, а
+		# полторы сотни склеек строк на куст стоили трети времени пересборки:
+		# замер 12.09.2026 — 4300 мс против 3000 на том же саде.
+		var part_of := PackedStringArray()
+		var leaf_no := {}
+		for b in parts:
+			var kind: String = String(b["kind"])
+			var stem_no: int = int(b["stem"])
+			if kind == "лист":
+				var seen_n: int = int(leaf_no.get(stem_no, 0))
+				leaf_no[stem_no] = seen_n + 1
+				part_of.append("л%d_%d" % [stem_no, seen_n])
+				leaves_all += 1
+			elif kind == "стебель":
+				part_of.append("с%d" % stem_no)
+			else:
+				part_of.append("г%d" % stem_no)
+		var was: int = 0
+		for i in range(parts.size()):
+			var one: Dictionary = parts[i]
+			for j in range(i + 1, parts.size()):
+				var two: Dictionary = parts[j]
+				if int(one["stem"]) == int(two["stem"]):
+					continue
+				if String(one["kind"]) == "стебель" and String(two["kind"]) == "стебель":
+					var sa: int = int(one["stem"])
+					var sb: int = int(two["stem"])
+					var kid := -1
+					if sa < tree_c.size() and int(tree_c[sa]["parent"]) == sb:
+						kid = sa
+					elif sb < tree_c.size() and int(tree_c[sb]["parent"]) == sa:
+						kid = sb
+					if kid >= 0:
+						var joint: Vector3 = PackedVector3Array(paths[kid]["path"])[0]
+						if _seg_gap(Vector3(one["a"]), Vector3(one["b"]), joint,
+								joint) < joint_zone and _seg_gap(Vector3(two["a"]),
+								Vector3(two["b"]), joint, joint) < joint_zone:
+							continue
+				var room: float = float(one["r"]) + float(two["r"])
+				# Грубое отсечение по серединам: дальше суммы половин длин и
+				# толщин отрезки сойтись не могут.
+				var mid1: Vector3 = (Vector3(one["a"]) + Vector3(one["b"])) * 0.5
+				var mid2: Vector3 = (Vector3(two["a"]) + Vector3(two["b"])) * 0.5
+				var span: float = room \
+					+ Vector3(one["a"]).distance_to(Vector3(one["b"])) * 0.5 \
+					+ Vector3(two["a"]).distance_to(Vector3(two["b"])) * 0.5
+				if mid1.distance_squared_to(mid2) > span * span:
+					continue
+				var gap: float = _seg_gap(Vector3(one["a"]), Vector3(one["b"]),
+					Vector3(two["a"]), Vector3(two["b"])) - room
+				if gap >= 0.0:
+					continue
+				var key: String = "%s↔%s" % [String(one["kind"]), String(two["kind"])] \
+					if String(one["kind"]) <= String(two["kind"]) \
+					else "%s↔%s" % [String(two["kind"]), String(one["kind"])]
+				# СЧИТАЕМ ЧАСТИ, А НЕ ОТРЕЗКИ. Стебель нарезан на полтора десятка
+				# звеньев, и лист, прошедший сквозь него, давал сразу четыре-пять
+				# «пересечений» — число росло от дробности сетки, а не от беды.
+				var pair: String = "%d|%s|%s" % [pid, part_of[i], part_of[j]]
+				if seen_pairs.has(pair):
+					deep_by[key] = maxf(float(deep_by.get(key, 0.0)), -gap)
+					continue
+				seen_pairs[pair] = true
+				many_by[key] = int(many_by.get(key, 0)) + 1
+				deep_by[key] = maxf(float(deep_by.get(key, 0.0)), -gap)
+				was += 1
+				if String(one["kind"]) == "лист":
+					leaves_hurt["%d|%s" % [pid, part_of[i]]] = true
+				if String(two["kind"]) == "лист":
+					leaves_hurt["%d|%s" % [pid, part_of[j]]] = true
+		if was > 0:
+			hurt += 1
+	var line := ""
+	var total := 0
+	for key in many_by:
+		total += int(many_by[key])
+		line += "%s %d (до %.1f мм)  " % [key, int(many_by[key]),
+			float(deep_by[key]) * 1000.0]
+	print("Мак: части куста друг сквозь друга — пар ", total, " на ", bushes,
+		" кустах (", snappedf(float(total) / maxf(1.0, float(bushes)), 0.1),
+		" на куст), листьев задето ", leaves_hurt.size(), " из ", leaves_all,
+		". По парам: ", line.strip_edges() if total > 0 else "ни одной",
+		". Считаются ЧАСТИ, а не звенья, и только от разных стеблей. Ноль",
+		" недостижим — у земли стебли растут из одной точки; следить надо за",
+		" ростом числа и за глубиной заступания")
+
+
+# РАССТОЯНИЕ МЕЖДУ ДВУМЯ ОТРЕЗКАМИ — своё, а не по точкам одного о другой:
+# проверка обязана считать иначе, чем сборка, иначе общая ошибка невидима.
+static func _seg_gap(p1: Vector3, q1: Vector3, p2: Vector3, q2: Vector3) -> float:
+	var d1: Vector3 = q1 - p1
+	var d2: Vector3 = q2 - p2
+	var r: Vector3 = p1 - p2
+	var a: float = d1.dot(d1)
+	var e: float = d2.dot(d2)
+	var f: float = d2.dot(r)
+	var s := 0.0
+	var t := 0.0
+	if a <= 0.000001 and e <= 0.000001:
+		return p1.distance_to(p2)
+	if a <= 0.000001:
+		t = clampf(f / e, 0.0, 1.0)
+	else:
+		var c: float = d1.dot(r)
+		if e <= 0.000001:
+			s = clampf(-c / a, 0.0, 1.0)
+		else:
+			var b: float = d1.dot(d2)
+			var den: float = a * e - b * b
+			s = clampf((b * f - c * e) / den, 0.0, 1.0) if den > 0.000001 else 0.0
+			t = (b * s + f) / e
+			if t < 0.0:
+				t = 0.0
+				s = clampf(-c / a, 0.0, 1.0)
+			elif t > 1.0:
+				t = 1.0
+				s = clampf((b - c) / a, 0.0, 1.0)
+	return (p1 + d1 * s).distance_to(p2 + d2 * t)
+
+
+# ЛЕПЕСТОК ГЛАЗАМИ ЧИСЕЛ: СИЛУЭТ СВЕРХУ И СВЕТ НА СГИБАХ — её кадр 11.09.2026, два
+# замечания разом: «на сгибах лепестков появляются светлые зоны» и «при виде
+# сверху силуэт цветка кажется больше квадратным, чем круглым».
+#
+# ОБА ЧИСЛА — ПО НАСТОЯЩЕЙ СБОРКЕ ЦВЕТКА (`_emit_poppy_flower`), а не по своей
+# копии формы: из меша берутся только лепестки (у них вторая разметка
+# отрицательная), и прозрачное вырезается той же картинкой, что и на кадре.
+#
+# СИЛУЭТ. Сверху вдоль оси цветка: для каждого градуса — самая дальняя
+# непрозрачная точка, по ним выпуклая оболочка, и печатается отношение самого
+# короткого её луча к самому длинному. У квадрата оно 0.71, у круга единица.
+# Пустые градусы — те, где сверху не видно ни одного лепестка: крест просветов.
+#
+# СВЕТ. Светлые зоны давала нормаль, перевёрнутая у донца: соседние вершины
+# одного треугольника смотрели почти в разные стороны (160° и больше), и свет
+# между ними шёл через ноль. Печатается наибольший такой угол.
+func _poppy_petal_look(card: Dictionary, sheet_img: Image) -> void:
+	var levels: int = maxi(int(card.get("open_levels", 9)), 1)
+	var sw: int = sheet_img.get_width()
+	var sh: int = sheet_img.get_height()
+	var u_lo: float = float(plants.POPPY_PETAL_COL) / float(plants.COLS)
+	var u_hi: float = float(plants.POPPY_PETAL_COL + plants.POPPY_PETAL_KINDS) \
+		/ float(plants.COLS)
+	var sil := ""
+	var turn_worst := 0.0
+	var turn_lv := 0
+	for lv in range(1, levels + 1):
+		var salts: Array = []
+		var probe := 1
+		while salts.size() < 6 and probe < 100000:
+			if plants.poppy_open_level(probe, card) == lv:
+				salts.append(probe)
+			probe += 1
+		var ratio_sum := 0.0
+		var empty_sum := 0
+		for salt in salts:
+			var st := SurfaceTool.new()
+			st.begin(Mesh.PRIMITIVE_TRIANGLES)
+			plants._emit_poppy_flower(st, {"m": 0.99}, card, Vector3.ZERO,
+				Vector3.UP, Vector3.RIGHT, Vector3.BACK, int(salt), 1.0, 1.0,
+				float(card.get("open_at", 0.444)), 1.0, plants.STAGES - 1)
+			var arr: Array = st.commit_to_arrays()
+			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+			var nrms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+			var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV]
+			var uv2s: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV2]
+			var far := PackedFloat32Array()
+			far.resize(360)
+			far.fill(0.0)
+			for tri in range(0, verts.size() - 2, 3):
+				if uv2s[tri].x >= 0.0 or uvs[tri].x < u_lo or uvs[tri].x > u_hi:
+					continue
+				for j in range(3):
+					var turn: float = rad_to_deg(nrms[tri + j].angle_to(nrms[tri + (j + 1) % 3]))
+					if turn > turn_worst:
+						turn_worst = turn
+						turn_lv = lv
+				var steps := 24
+				for i in range(steps + 1):
+					for k in range(steps + 1 - i):
+						var wa: float = float(i) / float(steps)
+						var wb: float = float(k) / float(steps)
+						var wc: float = 1.0 - wa - wb
+						var uv: Vector2 = uvs[tri] * wa + uvs[tri + 1] * wb + uvs[tri + 2] * wc
+						if sheet_img.get_pixel(clampi(int(uv.x * sw), 0, sw - 1),
+								clampi(int(uv.y * sh), 0, sh - 1)).a < 0.5:
+							continue
+						var at: Vector3 = verts[tri] * wa + verts[tri + 1] * wb + verts[tri + 2] * wc
+						var deg: int = int((atan2(at.z, at.x) + PI) / TAU * 360.0) % 360
+						far[deg] = maxf(far[deg], Vector2(at.x, at.z).length())
+			var ring := PackedVector2Array()
+			for deg in range(360):
+				if far[deg] <= 0.0:
+					empty_sum += 1
+					continue
+				var a_d: float = TAU * (float(deg) + 0.5) / 360.0 - PI
+				ring.append(Vector2(cos(a_d), sin(a_d)) * far[deg])
+			var hull: PackedVector2Array = Geometry2D.convex_hull(ring)
+			var short := 99.0
+			var long := 0.0
+			for deg in range(360):
+				var a_r: float = TAU * (float(deg) + 0.5) / 360.0 - PI
+				var ray: Vector2 = Vector2(cos(a_r), sin(a_r)) * 10.0
+				var hit_r := 0.0
+				for h in range(hull.size() - 1):
+					var hit = Geometry2D.segment_intersects_segment(Vector2.ZERO, ray,
+						hull[h], hull[h + 1])
+					if hit != null:
+						hit_r = maxf(hit_r, Vector2(hit).length())
+				short = minf(short, hit_r)
+				long = maxf(long, hit_r)
+			ratio_sum += short / maxf(long, 0.0001)
+		@warning_ignore("integer_division")
+		sil += "%d:%.2f/%d " % [lv, ratio_sum / maxf(1.0, float(salts.size())),
+			empty_sum / maxi(1, salts.size())]
+	print("Мак: цветок сверху — короткий луч силуэта к длинному / пустых градусов",
+		" из 360 по уровням раскрытия: ", sil.strip_edges(), " (шесть цветков на",
+		" уровень). Квадрат это 0.71, круг 1.00; до чаши поперёк (11.09.2026) было",
+		" 1:0.83/59 3:0.87/55 5:0.85/61 7:0.80/47 9:0.78/44 — четыре лепестка",
+		" стояли крестом")
+	print("Мак: нормали лепестка — наибольший угол между вершинами одного",
+		" треугольника ", snappedf(turn_worst, 0.1), "° (уровень ", turn_lv,
+		"). Перевёрнутая у донца нормаль давала 168.5°: вершины смотрели почти в",
+		" разные стороны, и свет между ними шёл через ноль светлой полосой. Изгиб",
+		" самой чаши у закрытого цветка — около сотни градусов, и свет по нему",
+		" идёт плавно")
 
 
 func _solo_grow(id: String, ticks: int) -> Vector2i:
@@ -6587,6 +7244,12 @@ func _show_bench(args: PackedStringArray) -> void:
 	# `--beat-ms=N` — сколько кадр отдаёт удару сердца; большое число даёт прежнее
 	# «весь удар в одном кадре», и так видно, что дало его разложение.
 	plants.beat_ms = _arg_num(args, "--beat-ms", plants.BEAT_MS)
+	# `--slices=1` собирает куст целиком, как до 12.09.2026: этим и видно, что
+	# дало деление тяжёлого растения на доли.
+	plants.slice_cap = int(_arg_num(args, "--slices", float(plants.PART_MAX)))
+	# `--steps=0` — подготовка куста мака без деления на шаги, как до 13.09.2026:
+	# сравнивать с ним прогонами вперемешку, а не с числами прошлого дня.
+	plants.step_split = _arg_num(args, "--steps", 1.0) > 0.5
 	plants._rng.seed = 20260904
 	_seed_moss(6, kind)
 	_flush_chunks()
@@ -6647,6 +7310,17 @@ func _show_bench(args: PackedStringArray) -> void:
 		" мс; дороже половины кадра (8.3 мс) ", frames_half, ", дороже целого",
 		" (16.7 мс) ", frames_full, " из ", frames,
 		" — второе число и есть рывки, которые видно")
+	if plants.bush_lays > 0:
+		print("Показ роста: куст мака по частям — укладка стеблей ",
+			plants.bush_lays, " раз, в среднем ",
+			snappedf(plants.bush_lay_ms / float(plants.bush_lays), 0.01),
+			" мс, самая дорогая ", snappedf(plants.bush_lay_top, 0.1),
+			" мс; помехи с отворотом листьев — в среднем ",
+			snappedf(plants.bush_block_ms / float(plants.bush_lays), 0.01),
+			" мс, самые дорогие ", snappedf(plants.bush_block_top, 0.1),
+			" мс; сборка стеблей одной доли — самая дорогая ",
+			snappedf(plants.bush_emit_top, 0.1), " мс. Пересборке отведено ",
+			plants.REBUILD_MS, " мс на кадр")
 	print("Показ роста: плавность — простой ",
 		snappedf(100.0 * plants.morph_idle_s / maxf(plants.morph_span_s, 0.001), 0.1),
 		"% времени между показами (доехало и стоит; после посадки ",
@@ -6658,6 +7332,13 @@ func _show_bench(args: PackedStringArray) -> void:
 		"%, худший ", snappedf(100.0 * plants.morph_jump_top, 0.1),
 		"% размера; перетасовок куста ", plants.morph_reshuffles, " на ",
 		plants.morph_shows, " показов")
+	# НАГРУЗКА В КОНЦЕ ПРОГОНА — вторым замером. В начале машина может быть
+	# свободна, а к середине занята: 13.09.2026 прогон начался при 1.02×, соседние
+	# шли при 2.9×, и сама укладка куста «подорожала» у него втрое при той же
+	# работе. Миллисекундам верить, только если свободна и в начале, и в конце.
+	var busy_end: float = _load_factor()
+	print("Нагрузка машины в конце прогона: ", snappedf(busy_end, 0.01), "× — ",
+		"ЗАМЕРАМ ВЫШЕ НЕ ВЕРИТЬ" if busy_end > LOAD_ALARM else "замерам можно верить")
 
 
 # =============================================================================
@@ -6710,6 +7391,16 @@ func _print_bench(args: PackedStringArray) -> void:
 	plants.flush_now()
 	plants.built_reset()
 	plants.mesh_print = 0
+	plants.shape_print = 0
+	plants.shape_verts = 0
+	# СКОЛЬКО ДОЛЕЙ РАЗРЕШЕНО РАСТЕНИЮ. `--slices=1` собирает куст целиком, как
+	# до 12.09.2026: этим и доказывается, что деление на доли не меняет формы —
+	# сравнивать надо строку «форма».
+	plants.slice_cap = int(_arg_num(args, "--slices", float(plants.PART_MAX)))
+	# `--neighbors=0` — куст мака не смотрит на соседей. С ними укладка зависит от
+	# порядка пересборки, и сравнение «целиком против долями» по форме честно только
+	# без них: так проверяется, что остальная сборка облика не трогает.
+	plants.neighbor_aware = _arg_num(args, "--neighbors", 1.0) > 0.5
 	plants.print_meshes = true
 	var ticks: int = int(round(secs / plants.TICK))
 	var beat_sum: float = 0.0
@@ -6739,6 +7430,21 @@ func _print_bench(args: PackedStringArray) -> void:
 		if (i + 1) % 20 == 0 or i == ticks - 1:
 			plants.flush_now()
 			garden = hash([garden, _garden_print()])
+	# ОТПЕЧАТОК ФОРМЫ СНИМАЕТСЯ ОДНОЙ ПОЛНОЙ ПЕРЕСБОРКОЙ В КОНЦЕ, а не копится
+	# по ходу прогона. Копить его нельзя: с делением куста на доли соседняя
+	# пометка пересобирает заодно и чужую долю, и накопленная сумма зависела бы
+	# от того, сколько раз что пересобиралось, а не от того, что вышло.
+	plants.shape_print = 0
+	plants.shape_verts = 0
+	# ОТПЕЧАТОК МЕШЕЙ ЭТА ПЕРЕСБОРКА НЕ ТРОГАЕТ. Он копится по ходу прогона, и
+	# прибавь к нему лишнюю пересборку — эталоны всех видов сменились бы от
+	# самого стенда при том же саде и тех же мешах. Так и вышло 13.09.2026: у
+	# лианы, мха и лиамоха сменились меши при совпавших садах.
+	var mesh_kept: int = plants.mesh_print
+	for cell in plants.by_cell.keys():
+		plants._mark_cell(cell)
+	plants.flush_now()
+	plants.mesh_print = mesh_kept
 	plants.print_meshes = false
 	print("Отпечаток роста (", kind, "): ", secs, " с роста, ударов ", ticks,
 		", растений ", plants.patches.size(), "; удар сердца в среднем ",
@@ -6746,7 +7452,10 @@ func _print_bench(args: PackedStringArray) -> void:
 		snappedf(beat_top, 0.1), " мс; пересборка ",
 		snappedf(plants.built_ms, 0.1), " мс на ", plants.built_all, " кусков")
 	print("Отпечаток роста: сад ", garden, ", меши ", plants.mesh_print,
-		" — совпали с прогоном до правки, значит сад и его облик прежние")
+		", форма ", plants.shape_print, " на ", plants.shape_verts, " вершинах",
+		" — совпали с прогоном до правки, значит сад и его облик прежние. ФОРМА",
+		" не зависит от того, на сколько мешей разложен куст: её и сравнивать,",
+		" если менялось деление на доли")
 
 
 func _garden_print() -> int:
