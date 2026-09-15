@@ -243,11 +243,8 @@ var _hang_deep := PackedInt32Array()
 var _ring_sink := PackedFloat32Array()
 const PROF_STEPS: int = 32
 var _prof_lut := PackedFloat32Array()
-# Сплошной прямоугольник каждой клетки листа, в долях всей картинки. Ищется по
-# самой картинке при запуске — см. `_scan_solid`.
-var _solid_uv: Array = []
+# Сколько просвечивающих точек в сплошных столбцах листа — см. `_scan_solid`.
 var _solid_holes: int = 0
-var _solid_least: int = 0         # самая тесная клетка, в точках
 # Сколько секторов за всё время не нашли под собой земли и были поджаты внутрь.
 # Именно этот путь и давал повисшие над обрывом края, поэтому его надо видеть.
 var _stub_sectors: int = 0
@@ -284,63 +281,105 @@ var slice_cap: int = PART_MAX
 # вершину: куда и с какой скоростью ей ехать. Кладём её третьей разметкой
 # (`CUSTOM0`), а шейдер вычитает `скорость × остаток срока` — см. `Blades.gdshader`.
 #
-# ЧАСЫ ТУТ НАСТОЯЩИЕ, а не игровые: догон доводит до размера, УЖЕ посчитанного
-# при сборке, и останавливать его вместе с временем мира незачем — наоборот,
-# остановленное время застало бы кочку на полпути и там бы и держало.
+# ЧАСОВ ДВОЕ (14.09.2026, её слово: «время поломано. Рост скачет только при
+# переключении скоростей течения времени и стопа»).
+#
+# Прежде догон шёл только по НАСТОЯЩИМ секундам и гадал срок по темпу прошлого
+# промежутка — отсюда три беды, которые показал стенд `--showbench --switch`:
+# после «стопа» сад ещё рос на вид до конца восьмисекундного отрезка; после пуска и
+# после смены скорости растения стояли, потому что темп был снят на другой
+# скорости или вместе со стоянкой; а мак простаивал треть времени и на ровном
+# ходу — очередь пересборки опаздывала против гаданного срока.
+#
+# Теперь рост на экране идёт по ЧАСАМ МИРА (`_world_clock`: «стоп» их держит, 2×
+# гонит вдвое), а подаренное рукой — по настоящим (`_grow_clock`): кисть роста
+# работает при стоящем времени, и её отклик обязан идти.
 var _grow_clock: float = 0.0
-# Сколько длится догон у новорождённого — звена лозы, кочки, только что севшей.
-# Ему ехать не от прежнего размера, а от нуля, и срока прошлой ступени у него
-# нет.
+var _world_clock: float = 0.0
+# Пометка растения: с прошлой сборки ему досталось от подарка руки. Доводка его
+# тогда идёт настоящими часами, даже если подарок уже вылит (см. `_morph_world`).
+const GIFT_SEEN: String = "gift_seen"
+# Сколько длится выезд новорождённого — звена лозы, кочки, только что севшей: ему
+# ехать не от прежнего размера, а из точки.
 const MORPH_BORN: float = 0.7
-# Дальше этого назад растение не поджимается НИКОГДА — то же число стоит в
-# `Blades.gdshader` (`GROW_HOLD`), и держит оно ровно одно: часы могли уйти
-# вперёд рывком, и без потолка меш уехал бы неизвестно куда.
-const GROW_HOLD: float = 60.0
-# Быстрее этого не разгоняемся: кусок могли пересобрать дважды подряд (правка
-# земли, снятое растение), и тогда срок вышел бы близким к нулю, а скорость —
-# бесконечной.
-const MORPH_FAST: float = 4.0
-# Срок догона не короче этого — иначе скорость упёрлась бы в `MORPH_FAST` и
-# рывок вернулся бы с другой стороны.
+# Доводка недостачи не короче этого — иначе растение, пересобранное дважды подряд,
+# доводилось бы рывком ...
 const MORPH_MIN: float = 0.25
-# ЗАПАС СРОКА: догон рассчитан длиннее промежутка до показа, чтобы растение
-# никогда не успевало встать. Недоехавшее подхватит следующий показ с того места,
-# где оно видно, так что лишний запас не стоит ничего, кроме отставания на доли
-# ступени — а ступень мака это пять процентов размера, глазом не видно.
-#
-# ПОЛТОРА, А НЕ 1.15, и это замер: показ опаздывает не только от прогноза, но и
-# от очереди пересборки, а её прогнозом не поймать. С 1.15 мак простаивал 41%
-# времени между показами при нагруженной машине.
-const MORPH_SLACK: float = 1.5
+# ... и не дольше этого: сильно отставшее всё же должно догнать в обозримый срок.
+const MORPH_LONG: float = 30.0
+# ДОВОДКА НЕ БЫСТРЕЕ ПОЛОВИНЫ СОБСТВЕННОГО РОСТА: вместе с ним растение едет самое
+# большее в полтора раза быстрее настоящего. Отставшее (очередь пересборки, дорогой
+# куст) иначе нагоняло бы рывком — стенд `--switch` зовёт это «вдвое быстрее
+# настоящего», и при двойке догон как раз упирался в его черту.
+const MORPH_RUSH: float = 1.5
+# Растение, которое больше не растёт, доводится этим темпом — долей размера в секунду.
+const MORPH_CALM: float = 0.05
 
 
-# ОТКУДА И КУДА ЕДЕТ РАСТЕНИЕ. Зовётся ОДИН РАЗ перед его вершинами — и в этом
-# вся соль.
+# ЧТО КЛАДЁТСЯ В РАЗМЕТКУ ДОГОНА. Зовётся ОДИН РАЗ перед вершинами растения — и в
+# этом вся соль.
 #
-# ГРАБЛИ, СВОИ ЖЕ И СВЕЖИЕ (04.09.2026). Сперва догон писался на КАЖДУЮ вершину:
-# каждой своя скорость, посчитанная на месте. Работало, но пересборка кочки
-# подорожала на 41% — вершин у неё под две сотни, и лишний вызов на каждую съел
-# ровно то, ради чего всё затевалось. Замер: 4.9 мс на кусок против 6.9.
+# ГРАБЛИ, СВОИ ЖЕ (04.09.2026). Сперва догон писался на КАЖДУЮ вершину: каждой
+# своя скорость, посчитанная на месте. Работало, но пересборка кочки подорожала на
+# 41% — вершин у неё под две сотни, и лишний вызов на каждую съел ровно то, ради
+# чего всё затевалось. А писать туда нечего: рост кочки — это увеличение ВОКРУГ ЕЁ
+# СЕРЕДИНЫ, у всех её вершин одна середина и одни числа. Это свойство растения, а
+# не точки; кладём его один раз, разность `точка − середина` считает шейдер.
 #
-# А писать туда нечего: рост кочки — это увеличение ВОКРУГ ЕЁ СЕРЕДИНЫ, то есть
-# у всех её вершин одна и та же середина и одна и та же скорость. Значит, это не
-# свойство точки, а свойство растения; кладём его один раз, а разность
-# `точка − середина` считает шейдер, которому она даром.
-#
-#   at    — середина, к которой поджимаем;
-#   was   — во сколько раз оно было меньше (1.0 — не двигать, 0.0 — из точки);
-#   dur   — за сколько секунд доехать.
-func _morph_set(st: SurfaceTool, at: Vector3, was: float, dur: float) -> void:
-	if was >= 0.999 or dur <= 0.0001:
-		_morph_none(st)
-		return
-	_morph_c0 = Color(at.x, at.y, at.z, minf((1.0 - was) / dur, MORPH_FAST))
-	_morph_c1 = Color(_grow_clock + dur, 0.0, 0.0, 0.0)
+#   at    — середина, вокруг которой растёт;
+#   pace  — темп роста после сборки, доля собранного размера в секунду своих часов;
+#   owe   — недостача: насколько на экране растение меньше собранного (единица —
+#           выезд из точки; ниже нуля — было крупнее и стоит, пока рост не догонит);
+#   inv   — единица на срок доводки недостачи;
+#   cap   — потолок роста вперёд, доля собранного размера (не больше двух);
+#   world — часы мира или настоящие;
+#   t0    — миг сборки по этим часам.
+func _morph_put(st: SurfaceTool, at: Vector3, pace: float, owe: float, inv: float,
+		cap: float, world: bool, t0: float) -> void:
+	_morph_c0 = Color(at.x, at.y, at.z, pace)
+	_morph_c1 = Color(t0, owe, inv, clampf(cap - 1.0, 0.0, 1.0) + (2.0 if world else 0.0))
 	# Без меша — тоже можно: куст мака считает догон ОТДЕЛЬНЫМ шагом подготовки
 	# (`_poppy_step`), а в меш числа кладут потом его доли.
 	if st != null:
 		st.set_custom(0, _morph_c0)
 		st.set_custom(1, _morph_c1)
+
+
+# ВЫЕЗД ИЗ ТОЧКИ — у звена лозы, только что появившегося: колено выдвигается из
+# родителя. Растёт лоза новыми звеньями, а выросшее звено дальше не двигается.
+func _morph_pop(st: SurfaceTool, p: Dictionary, at: Vector3) -> void:
+	var world: bool = _morph_world(p)
+	_morph_put(st, at, 0.0, 1.0, 1.0 / MORPH_BORN, 1.0, world,
+		_world_clock if world else _grow_clock)
+	p.erase(GIFT_SEEN)
+
+
+# ЧЬИМИ ЧАСАМИ ЕХАТЬ. Подарок руки ещё льётся — настоящими: кисть работает при
+# стоящем времени. Подарок вылит, а время стоит — тоже настоящими: доводить надо то,
+# что подарок уже вырастил, иначе мазок кистью не показал бы ничего до пуска
+# времени. Всё прочее — часами мира.
+func _morph_world(p: Dictionary) -> bool:
+	if p.has("burst"):
+		return false
+	return not (bool(p.get(GIFT_SEEN, false)) and is_zero_approx(time_scale))
+
+
+# Сколько секунд своих часов прошло с последней сборки растения.
+func _morph_since(p: Dictionary) -> float:
+	var now: float = _world_clock if int(p.get("seen_clock", 0)) == 1 else _grow_clock
+	return maxf(now - float(p.get("seen_at", now)), 0.0)
+
+
+# ВО СКОЛЬКО РАЗ РАСТЕНИЕ СЕЙЧАС НА ЭКРАНЕ КРУПНЕЕ СОБРАННОГО — та же формула, что в
+# `Blades.gdshader`, по памяти последней сборки (`_morph_track`).
+func _morph_scale(p: Dictionary) -> float:
+	var since: float = _morph_since(p)
+	var owe: float = float(p.get("seen_owe", 0.0))
+	var ahead: float = minf(1.0 + float(p.get("seen_pace", 0.0)) * since,
+		float(p.get("seen_cap", 1.0)))
+	var left: float = maxf(owe, 0.0) \
+		* maxf(1.0 - since * float(p.get("seen_inv", 0.0)), 0.0)
+	return maxf(1.0 - owe, ahead - left)
 
 
 func _morph_none(st: SurfaceTool) -> void:
@@ -381,84 +420,128 @@ var step_split: bool = true
 var neighbor_aware: bool = true
 
 
-# ДОГОН С ПАМЯТЬЮ: ОТКУДА ЕХАЛИ, КУДА И СКОЛЬКО. Одна мерка на мох и на мак.
+# ДОГОН С ПАМЯТЬЮ. Одна мерка на мох и на мак.
 #
-# Помним не зрелость, а РАЗМЕР: с какого начали (`seen_start`), к какому едем
-# (`seen_size`), за какой срок (`seen_dur`) и когда тронулись (`seen_at`). Отсюда
-# в любой миг известно, каким растение ВИДНО на экране, — и стенд показа меряет
-# по этому две беды плавности: простой (доехало и стоит, а показа всё нет) и
-# скачок (пересобранное начало ехать не с того размера, какой был виден).
+# Помним ПОСЛЕДНЮЮ СБОРКУ: собранный размер (`seen_size`), недостачу (`seen_owe`),
+# темп и потолок роста вперёд (`seen_pace`, `seen_cap`), срок доводки (`seen_inv`),
+# чьи часы (`seen_clock`) и миг по ним (`seen_at`). Отсюда в любой миг известно,
+# каким растение ВИДНО на экране (`_morph_scale`), — и новая сборка едет ровно от
+# этого: скачка при пересборке не бывает по построению.
+#
+# ТЕМП НЕ УГАДЫВАЕТСЯ, А СЧИТАЕТСЯ (14.09.2026). Прежде срок догона гадал, когда
+# придёт следующая пересборка, по темпу прошлого промежутка, — и ошибался всякий
+# раз, когда промежуток был снят на другой скорости времени, со стоянкой или с
+# очередью. Но рост растения известен наперёд: «цена» роста идёт ровно
+# (`_cost_way`), и её темп — та же формула, что в ударе сердца (`_cost_pace`).
+# Значит, размер через любое время известен, и растение едет к нему само — по хорде
+# до ВТОРОГО порога показа, с запасом на целый показ, если очередь пересборки
+# опоздает. Хорда лежит под кривой роста (ступени к старости дорожают), и видимое
+# настоящего не обгоняет.
 func _morph_track(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		at: Vector3, size_now: float, m: float) -> void:
-	var now: float = _grow_clock
+	var world: bool = _morph_world(p)
+	var now: float = _world_clock if world else _grow_clock
+	var size_safe: float = maxf(size_now, 0.000001)
+	var owe: float = 0.0
+	var born: bool = false
+	var pop_left: float = MORPH_BORN
 	if not p.has("seen_size"):
-		# ПЕРВЫЙ ПОКАЗ — растение только что село: выезжает из точки.
-		_morph_set(st, at, 0.0, MORPH_BORN)
-		p["seen_start"] = 0.0
-		p["seen_size"] = size_now
-		p["seen_dur"] = MORPH_BORN
-		p["seen_at"] = now
-		p["seen_m"] = m
-		p["seen_born"] = true
-		return
-	var gone: float = now - float(p["seen_at"])
-	var dur_was: float = maxf(float(p["seen_dur"]), 0.0001)
-	# КАКИМ РАСТЕНИЕ ВИДНО СЕЙЧАС — по памяти прошлого догона.
-	var shown: float = lerpf(float(p["seen_start"]), float(p["seen_size"]),
-		clampf(gone / dur_was, 0.0, 1.0))
-	# ЕДЕМ ОТ ТОГО, ЧТО ВИДНО, А НЕ ОТ ПРОШЛОЙ ЦЕЛИ (11.09.2026).
-	#
-	# Прежде новый догон начинался с размера, к которому ехал прошлый, — как
-	# будто тот всегда успевал доехать. Не успевал он всякий раз, когда показ
-	# приходил раньше срока (соседское рождение, всплеск от руки, ускоренное
-	# время), и растение прыгало вперёд на недоеханный остаток: замер
-	# `--showbench` — у мха до 97% размера разом, у мака до 74%.
-	var start: float = shown
-	# СРОК — ДО СЛЕДУЮЩЕГО ПОКАЗА, А НЕ КАК В ПРОШЛЫЙ РАЗ.
-	#
-	# Прежний срок брался равным прошлому промежутку, с потолком в 30 секунд.
-	# Но ступени дорожают к старости (`STAGE_COST` 1-1-1-1-1-2-3-4-5), и каждый
-	# следующий промежуток ДЛИННЕЕ прошлого: догон доезжал раньше и растение
-	# стояло, пока не придёт показ. Замер: мак простаивал 33% времени между
-	# показами, мох — 26%. А поздний промежуток мака под 37 секунд, и потолок в
-	# 30 добавлял стоянку сверх того.
-	#
-	# Теперь срок СЧИТАЕТСЯ: сколько «цены» осталось до следующего порога показа
-	# (`_cost_way`), делённое на то, как быстро растение её проходило с прошлого
-	# показа. Темп берётся по факту, а не из карточки, — в нём уже сидят и тень,
-	# и складка, и ускоренное время.
-	#
-	# С ЗАПАСОМ (`MORPH_SLACK`): лучше не доехать, чем постоять. Недоехавшее
-	# следующий показ подхватит с того места, где оно видно, — скачка не будет.
-	var dur: float = maxf(dur_was - gone, 0.0)
-	var shots: int = maxi(int(def.get("show_steps", STEPS / SHOW_EVERY)), 1)
-	var was_m: float = float(p["seen_m"])
-	var way_done: float = _cost_way(m) - _cost_way(was_m)
-	if gone > 0.0001 and way_done > 0.000001:
-		var next_m: float = minf(1.0, (floor(m * float(shots)) + 1.0) / float(shots))
-		var way_left: float = _cost_way(next_m) - _cost_way(m)
-		if way_left > 0.000001:
-			dur = way_left / (way_done / gone) * MORPH_SLACK
-	dur = clampf(dur, MORPH_MIN, GROW_HOLD - 1.0)
-	morph_shows += 1
-	# ПАУЗА ПОСЛЕ ПОСАДКИ СЧИТАЕТСЯ ОТДЕЛЬНО: всход выезжает за доли секунды
-	# и ждёт первого показа крошечным — на глаз это не остановка роста.
-	if bool(p.get("seen_born", false)):
-		morph_born_span_s += gone
-		morph_born_idle_s += maxf(0.0, gone - dur_was)
+		# ПЕРВЫЙ ПОКАЗ. Только что село — выезжает из точки; загруженное из снимка
+		# сада — стоит как есть (`seen_calm`, см. `import_garden`).
+		if not bool(p.get("seen_calm", false)):
+			owe = 1.0
+			born = true
 	else:
-		morph_span_s += gone
-		morph_idle_s += maxf(0.0, gone - dur_was)
-	p["seen_born"] = false
-	var jump: float = absf(start - shown) / maxf(size_now, 0.000001)
-	morph_jump_sum += jump
-	morph_jump_top = maxf(morph_jump_top, jump)
-	_morph_set(st, at, start / maxf(size_now, 0.000001), dur)
-	p["seen_start"] = start
+		_morph_count(p, m)
+		owe = 1.0 - float(p["seen_size"]) * _morph_scale(p) / size_safe
+		# НАЧАТЫЙ ВЫЕЗД ДОВОДИТСЯ В СВОЙ СРОК. Кочку, только что севшую, часто
+		# пересобирают через доли секунды — соседка родилась в той же части ячейки, —
+		# и выезд из точки, остановленный на трети, иначе попадал под предел доводки
+		# (`MORPH_RUSH`) и тянулся из земли секундами: стенд показал отставание
+		# молодого ковра почти в половину размера.
+		if bool(p.get("seen_born", false)):
+			var inv_was: float = float(p.get("seen_inv", 0.0))
+			if inv_was > 0.0:
+				pop_left = 1.0 / inv_was - _morph_since(p)
+				if pop_left > 0.0:
+					born = true
+					pop_left = maxf(pop_left, 0.05)
+	# ВПЕРЁД — хорда до второго порога показа, а у подарка руки — до его конца.
+	var pace: float = 0.0
+	var cap: float = 1.0
+	var ripe: float = _ripe_cap(p, def)
+	if m < ripe - 0.000001:
+		var per_sec: float = _cost_pace(p, def)
+		var horizon: float = 0.0
+		if world:
+			var shots: int = maxi(int(def.get("show_steps", STEPS / SHOW_EVERY)), 1)
+			var m_far: float = minf(ripe, (floor(m * float(shots)) + 2.0) / float(shots))
+			horizon = (_cost_way(m_far) - _cost_way(m)) / maxf(per_sec, 0.000001)
+		elif p.has("burst"):
+			# Подарок льётся `BURST_PACE` секунд роста в настоящую секунду, и заодно
+			# идёт мир, если время не стоит.
+			horizon = float(p["burst"]) / BURST_PACE
+			per_sec *= BURST_PACE + time_scale
+		if per_sec > 0.0 and horizon > 0.0:
+			var m_end: float = minf(ripe,
+				_cost_way_to_m(_cost_way(m) + per_sec * horizon))
+			cap = clampf(_show_size(p, def, m_end) / size_safe, 1.0, 2.0)
+			pace = (cap - 1.0) / horizon
+	# ДОВОДКА — недостача убывает не быстрее собственного роста (`MORPH_RUSH`).
+	var inv: float = 0.0
+	if born:
+		inv = 1.0 / pop_left
+	elif owe > 0.0:
+		var d: float = owe / ((MORPH_RUSH - 1.0) * pace) if pace > 0.0 \
+			else owe / MORPH_CALM
+		inv = 1.0 / clampf(d, MORPH_MIN, MORPH_LONG)
+	_morph_put(st, at, pace, owe, inv, cap, world, now)
 	p["seen_size"] = size_now
-	p["seen_dur"] = dur
+	p["seen_owe"] = owe
+	p["seen_inv"] = inv
+	p["seen_pace"] = pace
+	p["seen_cap"] = cap
+	p["seen_clock"] = 1 if world else 0
 	p["seen_at"] = now
 	p["seen_m"] = m
+	p["seen_born"] = born
+	p.erase("seen_calm")
+	p.erase(GIFT_SEEN)
+
+
+# СЧЁТ ДЛЯ СТЕНДА ПОКАЗА (`--showbench`): сколько растение с прошлой сборки
+# ПРОСТОЯЛО, хотя росло, — доехало до потолка роста вперёд, а сборки всё нет. Выезд
+# после посадки считается отдельно: всход крошечный, и его стоянка глазу не видна.
+func _morph_count(p: Dictionary, m: float) -> void:
+	var gone: float = _morph_since(p)
+	var pace: float = float(p.get("seen_pace", 0.0))
+	var moving: float = 0.0
+	if pace > 0.0:
+		moving = (float(p.get("seen_cap", 1.0)) - 1.0) / pace
+	elif float(p.get("seen_inv", 0.0)) > 0.0 and float(p.get("seen_owe", 0.0)) > 0.0:
+		moving = 1.0 / float(p["seen_inv"])
+	var idle: float = maxf(0.0, gone - moving) \
+		if m > float(p.get("seen_m", m)) + 0.000001 else 0.0
+	morph_shows += 1
+	if bool(p.get("seen_born", false)):
+		morph_born_span_s += gone
+		morph_born_idle_s += idle
+	else:
+		morph_span_s += gone
+		morph_idle_s += idle
+
+
+# КАКИМ РАСТЕНИЕ ВИДНО И КАКОЕ ОНО ЕСТЬ — для стенда показа (`--switch`). Первое
+# число — размер на экране по памяти догона, второе — размер по зрелости, той же
+# меркой, какой его собирает сборка. Лоза и ещё не показанные — (-1, -1).
+func show_probe(p: Dictionary) -> Vector2:
+	var def: Dictionary = PlantsData.ITEMS[String(p["id"])]
+	# ВСХОД НЕ В СЧЁТ: новорождённое выезжает из точки за доли секунды при почти
+	# стоящей зрелости, и отношение видимого к настоящему у него бессмысленно.
+	if _is_stem(def) or not p.has("seen_size") or bool(p.get("seen_born", false)):
+		return Vector2(-1.0, -1.0)
+	return Vector2(float(p["seen_size"]) * _morph_scale(p),
+		_show_size(p, def, float(p["m"])))
 
 
 # СКОЛЬКО «ЦЕНЫ» РОСТА ПРОЙДЕНО К ЭТОЙ ЗРЕЛОСТИ — в ступенях, умноженных на их
@@ -474,14 +557,45 @@ func _cost_way(m: float) -> float:
 	return way + float(STAGE_COST[k]) * (f - float(k))
 
 
-# ДОВЕСТИ ВСЕ ДОГОНЫ ДО КОНЦА НЕМЕДЛЕННО. Нужно там, где кадр обязан показать
-# сад таким, какой он есть, а не застигнутым на полпути: снимки (`--shot`) и
-# загруженный сад. Часы просто переводятся вперёд — доводить нечего, размер уже
-# посчитан и лежит в меше.
+# ТЕМП «ЦЕНЫ» РОСТА В СЕКУНДУ МИРА — та же формула, что в ударе сердца
+# (`_beat_plant`), только без ступени: цена роста идёт ровно, ступень в неё уже
+# вложена (`_cost_way`). Нужен догону, чтобы вести растение вперёд по его
+# настоящему росту, а не гадать.
+func _cost_pace(p: Dictionary, def: Dictionary) -> float:
+	var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) \
+		* (1.0 + def["shade_love"] * _shade(p))
+	rate *= 1.0 + def["joint_love"] * maxf(0.0, main.grid.cavity_of(int(p["cell"])))
+	if def.has("flat_slow"):
+		rate *= lerpf(float(def["flat_slow"]), 1.0,
+			clampf(float(p.get("prop", 0.0)), 0.0, 1.0))
+	return rate * float(STAGES)
+
+
+# ОБРАТНОЕ К `_cost_way`: до какой зрелости доводит столько «цены».
+func _cost_way_to_m(way: float) -> float:
+	var left: float = maxf(way, 0.0)
+	for i in range(STAGES):
+		var c: float = float(STAGE_COST[i])
+		if left <= c:
+			return (float(i) + left / c) / float(STAGES)
+		left -= c
+	return 1.0
+
+
+# РАЗМЕР, ПО КОТОРОМУ ИДЁТ ДОГОН, при заданной зрелости: у мака — рост куста, у
+# кочек — ширина. Той же меркой, какой их собирает сборка.
+func _show_size(p: Dictionary, def: Dictionary, m: float) -> float:
+	if _is_poppy(def):
+		return poppy_grow(def, m)
+	return tuft_span_at(p, m)
+
+
+# КАДРУ — САД КАК ЕСТЬ. Нужно там, где снимок обязан показать сад таким, какой он
+# есть, а не застигнутым посреди доводки: снимки (`--shot`). Размер уже посчитан и
+# лежит в меше — шейдеру велено показывать собранное (`grow_settle`).
 func settle_show() -> void:
-	_grow_clock += GROW_HOLD
 	if _blade_mat != null:
-		_blade_mat.set_shader_parameter("grow_now", _grow_clock)
+		_blade_mat.set_shader_parameter("grow_settle", true)
 
 
 func setup(main_ref: Node3D) -> void:
@@ -525,103 +639,40 @@ func setup(main_ref: Node3D) -> void:
 		_prof_lut[i] = _profile(float(i) / float(PROF_STEPS))
 
 
-# СПЛОШНОЙ ПРЯМОУГОЛЬНИК КАЖДОЙ КЛЕТКИ — ищем ПО САМОЙ КАРТИНКЕ, один раз при
-# запуске. Тело кочки — цельная оболочка, и брать ей рисунок можно только оттуда,
-# где он закрашен насквозь: любая прозрачная точка станет дырой навылет, потому
-# что движок режет по порогу, а не смешивает.
+# СПЛОШНЫЕ СТОЛБЦЫ ЛИСТА ПРОВЕРЯЕМ ЦЕЛИКОМ, один раз при запуске. Тело кочки,
+# тело лиамоха и кора носят образец с повтором и берут клетку ЦЕЛИКОМ: любая
+# прозрачная точка в ней станет дырой навылет, потому что движок режет по
+# порогу, а не смешивает.
 #
-# Знать наперёд, где у клетки закрашено, нельзя: лист рисует пользователь, и
-# высота куртинки в клетке у каждого возраста своя. Поэтому не угадываем, а
-# СМОТРИМ: идём от корней вверх, пока в строке есть сплошной кусок не уже
-# `DENSE_ROW` ширины клетки, и пересекаем эти куски между собой. Пересечение
-# сплошных отрезков сплошное по построению — дыр внутри не будет.
+# ПРЕЖДЕ ЗДЕСЬ ИСКАЛСЯ СПЛОШНОЙ ПРЯМОУГОЛЬНИК клетки: тело брало рисунок только
+# из него. С тех пор как тело берёт клетку целиком, прямоугольник не читал никто,
+# а сторож считал дыры ВНУТРИ прямоугольника — там, где их нет по построению:
+# дыра в клетке его только сужала. Проверено 14.09.2026: пять проколотых точек
+# прежний сторож доложил как «дыр 0».
 func _scan_solid(sheet: Texture2D) -> void:
-	_solid_uv.resize(STAGES * COLS)
 	_solid_holes = 0
-	_solid_least = 1 << 30
 	var img: Image = sheet.get_image() if sheet != null else null
 	if img == null:
-		for i in range(STAGES * COLS):
-			_solid_uv[i] = Rect2(0.4, 0.4, 0.2, 0.2)
-		_solid_least = 0
 		return
 	if img.is_compressed():
 		img.decompress()
-	var w: int = img.get_width()
-	var h: int = img.get_height()
 	@warning_ignore("integer_division")
-	var cw: int = maxi(1, w / COLS)
+	var cw: int = maxi(1, img.get_width() / COLS)
 	@warning_ignore("integer_division")
-	var ch: int = maxi(1, h / STAGES)
-	for s in range(STAGES):
-		for kd in range(COLS):
-			var box: Rect2i = _dense_box(img, kd * cw, s * ch, cw, ch)
-			# Тесноту считаем ТОЛЬКО по столбцу тела: у клеток с фигурками
-			# сплошного места мало по природе, и его там никто не ищет.
-			if kd == BODY_COL or kd == LIA_BODY_COL:
-				_solid_least = mini(_solid_least, box.size.x * box.size.y)
-			_solid_uv[s * COLS + kd] = Rect2(
-				float(box.position.x) / float(w), float(box.position.y) / float(h),
-				float(box.size.x) / float(w), float(box.size.y) / float(h))
-			# Сторож: внутри найденного прямоугольника прозрачных точек быть не
-			# может. Если появились — разметка врёт, и центр опять просветится.
-			#
-			# СПРАШИВАЕМ ТОЛЬКО У СПЛОШНЫХ СТОЛБЦОВ — тела и коры. У вырезанной
-			# фигурки плотной строки может не найтись вовсе (у листа внизу клетки
-			# один черешок в две точки шириной), и тогда `_dense_box` отдаёт
-			# запасную точку у корней — а она там прозрачная. Сторож поднял бы
-			# крик о дыре в теле, которой нет: разметку вырезанных клеток никто
-			# не читает.
-			if kd != BODY_COL and kd != BARK_COL and kd != LIA_BODY_COL:
-				continue
-			for y in range(box.position.y, box.position.y + box.size.y):
-				for x in range(box.position.x, box.position.x + box.size.x):
+	var ch: int = maxi(1, img.get_height() / STAGES)
+	for kd in [BODY_COL, BARK_COL, LIA_BODY_COL]:
+		for s in range(STAGES):
+			for y in range(s * ch, (s + 1) * ch):
+				for x in range(kd * cw, (kd + 1) * cw):
 					if img.get_pixel(x, y).a < 0.5:
 						_solid_holes += 1
 
 
-func _dense_box(img: Image, ox: int, oy: int, cw: int, ch: int) -> Rect2i:
-	var lo := -1
-	var hi := -1
-	var top: int = oy + ch
-	for y in range(oy + ch - 1, oy - 1, -1):
-		# Самый длинный СПЛОШНОЙ кусок строки. Именно сплошной, а не «от первой
-		# закрашенной до последней»: между двумя холмиками бывает просвет, и по
-		# краям он бы попал внутрь прямоугольника.
-		var run := 0
-		var best := 0
-		var best_end := -1
-		for x in range(ox, ox + cw):
-			if img.get_pixel(x, y).a >= 0.5:
-				run += 1
-				if run > best:
-					best = run
-					best_end = x
-			else:
-				run = 0
-		if best_end < 0 or float(best) < DENSE_ROW * float(cw):
-			break
-		var x0: int = best_end - best + 1
-		var nl: int = x0 if lo < 0 else maxi(lo, x0)
-		var nh: int = best_end if hi < 0 else mini(hi, best_end)
-		if nh - nl + 1 < 2:
-			break
-		lo = nl
-		hi = nh
-		top = y
-	if lo < 0:
-		# Ни одной плотной строки — клетка пустая или нарисована совсем иначе.
-		# Берём точку у корней: пусть тело будет одноцветным, но не дырявым.
-		@warning_ignore("integer_division")
-		return Rect2i(ox + cw / 2, oy + ch - 2, 1, 1)
-	return Rect2i(lo, top, hi - lo + 1, oy + ch - top)
-
-
-# Сколько просвечивающих точек попало в разметку тела (норма — ноль) и насколько
-# тесной вышла самая скупая клетка. Числом меряется то, что иначе видно только на
-# кадре: дыра в центре молодой кочки и одноцветное тело.
-func see_through() -> Vector2i:
-	return Vector2i(_solid_holes, _solid_least)
+# Сколько просвечивающих точек в сплошных столбцах листа (норма — ноль). Числом
+# меряется то, что иначе видно только на кадре: дыра навылет в теле кочки или в
+# коре стебля.
+func see_through() -> int:
+	return _solid_holes
 
 
 # Сколько секторов не нашли земли и были поджаты внутрь. Ноль значит, что путь
@@ -4179,7 +4230,7 @@ func _emit_speck(st: SurfaceTool, at: Vector3, along: Vector3, out: Vector3,
 	up_v = up_v.normalized()
 	# ОБЩЕЕ НА ВСЮ ПЛАСТИНКУ СТАВИТСЯ ОДИН РАЗ, А НЕ НА КАЖДУЮ ВЕРШИНУ (11.09.2026).
 	# Сборщик сам помнит последние нормаль, цвет и развёртку до следующей вершины
-	# (на этом же стоит и `_morph_set`), а крапинок на кусте под тысячу: прежние
+	# (на этом же стоит и `_morph_put`), а крапинок на кусте под тысячу: прежние
 	# восемнадцать вызовов на пластинку и массив углов, заводимый заново на каждую,
 	# были заметной долей всей сборки куста.
 	st.set_uv2(Vector2(float(BARK_COL) / float(COLS), float(stage) / float(STAGES)))
@@ -4646,12 +4697,14 @@ func _make_blade_texture() -> ImageTexture:
 
 
 func _process(delta: float) -> void:
-	# ЧАСЫ ДОГОНА (см. `_morph_set`). Идут всегда и по настоящим секундам: они
-	# отмеряют не рост, а доводку уже посчитанного размера. Шейдер читает их
-	# отсюда — одно число на кадр на весь сад.
+	# ЧАСЫ ДОГОНА (см. `_morph_track`): настоящие идут всегда, часы мира — со
+	# скоростью времени и стоят на «стоп». Шейдер читает оба — два числа на кадр на
+	# весь сад.
 	_grow_clock += delta
+	_world_clock += delta * time_scale
 	if _blade_mat != null:
 		_blade_mat.set_shader_parameter("grow_now", _grow_clock)
+		_blade_mat.set_shader_parameter("world_now", _world_clock)
 	if not patches.is_empty():
 		# ДВОЕ ЧАСОВ, И ОНИ РАЗНЫЕ.
 		#
@@ -5075,6 +5128,10 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		"lived": (float(patches[from].get("lived", 0.0)) if patches.has(from)
 			else 0.0),
 	}
+	# РОДИЛОСЬ В УДАРЕ С ПОДАРКОМ РУКИ — выезжает настоящими часами, если время стоит
+	# (`_morph_world`): кочка, отросшая под кистью роста, иначе ждала бы пуска.
+	if _in_beat and _beat_gift > 0.0:
+		patches[pid][GIFT_SEEN] = true
 	if _is_stem(def):
 		patches[pid].merge(_stem_traits(from, def))
 		# ВИСИТ ЛИ ЗВЕНО В ВОЗДУХЕ и сколько таких подряд. Вольная ветвь отлипает
@@ -5720,7 +5777,12 @@ func _beat_plant(pid: int) -> void:
 		# Отросло и дозрело — из живых вон, больше его не спрашиваем.
 		_live.erase(pid)
 		return
-	var span: float = dt + _burst_take(p, gift)
+	var took: float = _burst_take(p, gift)
+	# ПОДАРОК РУКИ ПОШЁЛ В РОСТ — доводка этого растения поедет настоящими часами
+	# (`_morph_world`): при стоящем времени иначе мазок кистью не показал бы ничего.
+	if took > 0.0:
+		p[GIFT_SEEN] = true
+	var span: float = dt + took
 	if span <= 0.0:
 		return
 	# ЧАСЫ ИДУТ И ПОСЛЕ СРОКА — но только у того, кто ещё в живых, а таких
@@ -6795,7 +6857,11 @@ const HANG_LIFT: float = 0.5
 const HANG_OFF: float = 0.5
 # Над чем плеть вообще может висеть, в метрах вниз. Нет земли на эту глубину —
 # значит, мы за краем сада, и висеть тут нельзя.
-const HANG_OVER: float = 4.0
+#
+# ВТРОЕ ГЛУБЖЕ (её слово 14.09.2026: «увеличь максимальную высоту строительства,
+# роста и всего в 3 раза»). Скала растёт теперь до двенадцати метров, и при
+# прежних четырёх плеть с её макушки не свешивалась бы вовсе: под ней «нет земли».
+const HANG_OVER: float = 12.0
 # И на сколько плеть обязана отойти от опоры, в метрах: ближе — это уже не
 # свисание, а лежание на камне.
 #
@@ -7686,6 +7752,17 @@ func import_garden(d: Dictionary) -> void:
 		# Восстанавливаем по счёту детей — он у сохранённого сада верен.
 		if not patches[pid].has("bore") and int(patches[pid].get("kids", 0)) > 0:
 			patches[pid]["bore"] = true
+		# ПАМЯТЬ ДОГОНА ИЗ СНИМКА НЕ ГОДИТСЯ: её часы — часы прошлого запуска.
+		# Загруженное стоит как есть и дальше растёт от этого (`seen_calm`). У лозы
+		# память — лишь пометка «звено уже показано», её оставляем.
+		var q: Dictionary = patches[pid]
+		if not _is_stem(PlantsData.ITEMS[String(q["id"])]):
+			for key in ["seen_start", "seen_size", "seen_dur", "seen_at", "seen_m",
+					"seen_born", "seen_owe", "seen_inv", "seen_pace", "seen_cap",
+					"seen_clock"]:
+				q.erase(key)
+			q["seen_calm"] = true
+		q.erase(GIFT_SEEN)
 		var cell: int = int(patches[pid]["cell"])
 		if not by_cell.has(cell):
 			by_cell[cell] = {}
@@ -7848,7 +7925,7 @@ const REBUILD_MS: float = 4.0               # запас на пересборк
 #
 # ОТСТАВАНИЕ ЭТИМ НЕ СТРАШНО, и вот почему оно стало не страшно только теперь:
 # кусок, ждущий своей очереди, больше не значит «растение застыло». Растение всё
-# это время едет к своему размеру само (см. `_morph_set`), и на глаз очередь
+# это время едет к своему размеру само (см. `_morph_track`), и на глаз очередь
 # читается не задержкой, а тем, что рост идёт плавно.
 #
 # ПОД РУКОЙ ИГРОКА ДОЛГ НЕ ДЕЙСТВУЕТ. Пока идёт всплеск от кисти или только что
@@ -7956,7 +8033,7 @@ func _mark_steps() -> void:
 		# `--showbench --kind=poppy` держал очередь в 17-21 кусок, то есть сад
 		# ОТСТАВАЛ от собственного роста — и вот это и читается рывками. Показать
 		# реже, но вовремя, глазу лучше, чем чаще и с опозданием: между показами
-		# растение едет к новому размеру само (`_morph_set`), а вот опоздание
+		# растение едет к новому размеру само (`_morph_track`), а вот опоздание
 		# догонять нечем.
 		var shots: int = int(PlantsData.ITEMS[String(p["id"])].get("show_steps",
 			STEPS / SHOW_EVERY))
@@ -8230,12 +8307,13 @@ func _rebuild_part(cell: int, part: int, parts: int) -> int:
 
 	var tufts := SurfaceTool.new()
 	tufts.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# ДВЕ ЛИШНИЕ РАЗМЕТКИ — ДОГОН (см. `_morph_set`): в первой середина растения
-	# и скорость, во второй миг, к которому доехать. Заводятся СРАЗУ ПОСЛЕ
-	# начала и до первой вершины: набор разметок у `SurfaceTool` решается один
-	# раз на всю поверхность, а спрашивает он его с уже начатой.
+	# ДВЕ ЛИШНИЕ РАЗМЕТКИ — ДОГОН (см. `_morph_put`): в первой середина растения
+	# и темп роста вперёд, во второй миг сборки, недостача, срок доводки и
+	# потолок с часами. Заводятся СРАЗУ ПОСЛЕ начала и до первой вершины: набор
+	# разметок у `SurfaceTool` решается один раз на всю поверхность, а
+	# спрашивает он его с уже начатой.
 	tufts.set_custom_format(0, SurfaceTool.CUSTOM_RGBA_FLOAT)
-	tufts.set_custom_format(1, SurfaceTool.CUSTOM_R_FLOAT)
+	tufts.set_custom_format(1, SurfaceTool.CUSTOM_RGBA_FLOAT)
 	_morph_none(tufts)
 	var any_tuft := false
 	var mine: int = 0
@@ -8378,23 +8456,11 @@ const FUZZ_MIN: int = 4
 # Оба правила оставлены, берётся большее из них.
 const FUZZ_TALL: float = 0.62               # рост ворсинки в долях «М»
 const FUZZ_OF_SPAN: float = 0.5             # ... и в долях радиуса кочки
-# Куда по картинке смотрит тело кочки — в долях СПЛОШНОГО ПРЯМОУГОЛЬНИКА клетки,
-# а не самой клетки.
-#
-# ГРАБЛИ: сперва тело брало нутро клетки на глазок, 45–85% её высоты. У молодых
-# возрастов куртинка нарисована только у нижнего края, выше прозрачный фон, а
-# движок режет по порогу — и у кочки МЛАДШЕ СЕДЬМОЙ СТУПЕНИ ПРОСВЕЧИВАЛ ЦЕНТР:
-# макушка тела попадала в пустоту. К седьмой рисунок дорастал, и дыра сама
-# закрывалась. Теперь сплошной прямоугольник у каждой клетки НАХОДИТСЯ ПО САМОЙ
-# КАРТИНКЕ при запуске, поэтому дыр не будет ни при какой рисовке.
 # СТОРОНА ОДНОЙ ТОЧКИ ОБРАЗЦА В МИРЕ — этим числом и задаётся, насколько мох
 # пиксельный. Больше — точка крупнее и мха на кочке умещается меньше. От размера
 # кочки не зависит: на крупной точек просто больше, и потому заросль читается
 # одной поверхностью, а не набором наклеек разного калибра.
 const BODY_TEXEL: float = 0.009
-# Строка клетки считается плотной, если сплошной кусок в ней не уже этой доли
-# ширины клетки. По таким строкам и собирается прямоугольник.
-const DENSE_ROW: float = 0.30
 # Два треугольника пояса между кольцами: сдвиг по кольцу и по сектору. Таблица
 # ПОСТОЯННАЯ нарочно — собранная на месте, она бы заводила по шесть коротких
 # списков на каждый сектор каждого пояса каждой перестройки.
@@ -9421,7 +9487,7 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 		# стоймя, а к макушке заваливается в сторону роста. Рисуется отдельно
 		# (`_emit_root`), а сюда колена не приходится вовсе.
 		if fresh:
-			_morph_set(st, Vector3(mine["at"]), 0.0, MORPH_BORN)
+			_morph_pop(st, p, Vector3(mine["at"]))
 		_emit_root(st, p, def, mine)
 		_emit_leaves(st, p, def, mine, mine)
 		_emit_blooms(st, p, def, mine, mine)
@@ -9429,7 +9495,7 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 	var a: Vector3 = theirs["at"]
 	var b: Vector3 = mine["at"]
 	if fresh:
-		_morph_set(st, a, 0.0, MORPH_BORN)
+		_morph_pop(st, p, a)
 	var span: float = a.distance_to(b)
 	if span < 0.0001:
 		return false
@@ -10760,6 +10826,19 @@ func _make_fuzz(rim: Array, side: Vector3, along: Vector3, creep: float,
 	return fuzz
 
 
+# ШИРИНА КОЧКИ ПРИ ЭТОЙ ЗРЕЛОСТИ — одна мерка на сборку и на стенд показа: стенд
+# сверяет с ней, каким кочку ВИДНО (`show_probe`).
+func tuft_span(p: Dictionary) -> float:
+	return tuft_span_at(p, float(p["m"]))
+
+
+func tuft_span_at(p: Dictionary, m: float) -> float:
+	var stage_no: float = clampf(m * float(STAGES) + 0.5, 1.0, float(STAGES))
+	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
+		(stage_no - 1.0) / float(STAGES - 1))
+	return main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at * float(p["bulk"])
+
+
 func _emit_tuft(st: SurfaceTool, p: Dictionary, slice_i: int = 0,
 		slices: int = 1, pid: int = -1) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[p["id"]]
@@ -10784,8 +10863,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary, slice_i: int = 0,
 	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
 		(stage_no - 1.0) / float(STAGES - 1))
 	var k: float = wide_at / PATCH_OLD
-	var span: float = main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at \
-		* float(p["bulk"])
+	var span: float = tuft_span(p)
 	var high: float = span * BODY_RISE * float(body["rise"]) * _flat_of(m)
 
 	# ДОГОН: КОЧКА ЕДЕТ К ЭТОМУ РАЗМЕРУ ОТ ТОГО, КАКОЙ БЫЛА В ПРОШЛУЮ СБОРКУ.
@@ -10991,9 +11069,9 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary, slice_i: int = 0,
 	var apex_uv: Vector2 = warp
 
 	# КЛЕТКУ ОБРАЗЦА ПЕРЕДАЁМ ВТОРОЙ РАЗМЕТКОЙ: заворот идёт внутри неё, и
-	# шейдеру надо знать, где она начинается. Берём клетку ЦЕЛИКОМ, а не найденный
-	# сплошной кусок (`_scan_solid`): повторяться без шва образец умеет только по
-	# целой клетке, а что она сплошная — стережёт `see_through`.
+	# шейдеру надо знать, где она начинается. Берём клетку ЦЕЛИКОМ: повторяться без
+	# шва образец умеет только по целой клетке, а что она сплошная — стережёт
+	# `see_through`.
 	st.set_uv2(Vector2(float(_body_col(def)) / float(COLS),
 		float(bstage) / float(STAGES)))
 	st.set_color((hue * float(body["shade"])).srgb_to_linear())

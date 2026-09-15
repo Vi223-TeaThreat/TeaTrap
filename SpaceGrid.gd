@@ -1427,6 +1427,7 @@ func _fill_terrain(radius: float, bottom: float,
 	_smooth_cavity()
 	for i in range(seeds.size()):
 		_refresh_shade(i)
+	_look_build()
 
 
 # ВПАДИНА. Насколько ячейка сидит в складке: −1 на голом выступе, 0 на ровном,
@@ -1531,6 +1532,7 @@ func end_batch() -> void:
 	for j in _batch:
 		_refresh_cavity(j)
 	_smooth_cavity(_batch.keys())
+	_look_put(_batch.keys())
 	_refresh_shade_round(_batch)
 	_batch = {}
 
@@ -1649,8 +1651,15 @@ func flush_look(budget: float = 0.0) -> void:
 			if budget > 0.0 and Time.get_ticks_usec() >= deadline:
 				return
 		if _look_step == 3:
+			# КАРТИНКУ ОБЛИКА ДОПИСЫВАЕМ ЗДЕСЬ, А НЕ ВМЕСТЕ С РАЗГЛАЖИВАНИЕМ: та ступень
+			# неделима, и запись четырёх тысяч точек после широкого мазка роняла лишние
+			# кадры (`--dabbench`, широкая кисть: 12 -> 17 из 120). Кольцо включает
+			# сам набор, так что дописано будет всё, что пересчитано.
+			var look_on: bool = not _look_bytes.is_empty()
 			while _look_at < _look_ring.size():
 				_refresh_shade(_look_ring[_look_at])
+				if look_on:
+					_look_put_one(_look_ring[_look_at])
 				_look_at += 1
 				if budget > 0.0 and Time.get_ticks_usec() >= deadline:
 					return
@@ -2213,6 +2222,132 @@ func cavity_of(index: int) -> float:
 	return cavity[index]
 
 
+# =============================================================================
+#  ПОЛЕ ОБЛИКА — ПОРОДА И ВПАДИНА ОБЪЁМНОЙ КАРТИНКОЙ ДЛЯ ШЕЙДЕРА
+# =============================================================================
+#
+# ЗИГЗАГ ПО КРАЮ КАМНЯ И ЗЕЛЕНИ (её слово 14.09.2026: «Максимально убери и/или
+# усложни зигзагообразный паттерн (не заменяя на прямую), он сейчас есть повсюду —
+# как в трещинах, так и в краях камней, границах между породами и пр.»).
+#
+# ОТКУДА ОН. Доля породы и впадина приходили в шейдер С ВЕРШИН и между вершинами
+# тянулись линейно, а всякий порог по такой величине идёт прямым отрезком поперёк
+# треугольника решётки. Доля породы у соседних семян к тому же почти двоичная — ноль
+# или единица через одну ячейку, — и граница камня ложилась по рёбрам треугольников,
+# а шум поверх только бахромил эти отрезки. Зелень и тень в ложбинах — то же: впадина
+# меняется на десятые за ячейку, а шум поверх неё — на сотые.
+#
+# ЧТО ТЕПЕРЬ. Обе величины лежат ОБЪЁМНОЙ КАРТИНКОЙ, точка на узел решётки, и шейдер
+# берёт их в каждой точке кадра кубическим сплайном. У такой величины нет ни
+# треугольников, ни рёбер: граница по ней идёт кривой, и шум уводит её в стороны
+# по-настоящему. Картинка маленькая (полтора мегабайта) и дописывается там, где
+# впадина уже пересчитана (`flush_look` и прочие), — облик и так отложен на кадр.
+# Отправляет её на видеокарту `look_upload`, не чаще раза в кадр.
+var _look_min: Vector3i = Vector3i.ZERO
+var _look_dims: Vector3i = Vector3i.ONE
+var _look_bytes: PackedByteArray = PackedByteArray()
+var _look_images: Array[Image] = []
+var _look_tex: ImageTexture3D = null
+var _look_dirty: Dictionary = {}          # слой по z -> пора отправить
+
+
+func _look_build() -> void:
+	var lx: int = 1 << 30
+	var ly: int = 1 << 30
+	var lz: int = 1 << 30
+	var hx: int = -(1 << 30)
+	var hy: int = -(1 << 30)
+	var hz: int = -(1 << 30)
+	for at in range(0, _node_xyz.size(), 3):
+		lx = mini(lx, _node_xyz[at])
+		hx = maxi(hx, _node_xyz[at])
+		ly = mini(ly, _node_xyz[at + 1])
+		hy = maxi(hy, _node_xyz[at + 1])
+		lz = mini(lz, _node_xyz[at + 2])
+		hz = maxi(hz, _node_xyz[at + 2])
+	_look_min = Vector3i(lx, ly, lz)
+	_look_dims = Vector3i(hx - lx + 1, hy - ly + 1, hz - lz + 1)
+	var count: int = _look_dims.x * _look_dims.y * _look_dims.z
+	# ФОН: породы нет, впадина ровная (середина шкалы). Узор из четырёх байт
+	# удваивается, пока не накроет всю картинку, — поштучно это сотни тысяч записей.
+	_look_bytes = PackedByteArray([0, 128, 0, 255])
+	while _look_bytes.size() < count * 4:
+		_look_bytes.append_array(_look_bytes)
+	_look_bytes.resize(count * 4)
+	# ВПАДИНУ ПИШЕМ ПРЯМО, МИМО `_look_put`: при постройке породы нет ни у кого, а
+	# пометка слоя на каждое из трёхсот тысяч семян одна стоила полсекунды.
+	var wide: int = _look_dims.x
+	var high: int = _look_dims.y
+	for j in range(seeds.size()):
+		var at: int = j * 3
+		var t: int = (((_node_xyz[at + 2] - lz) * high + _node_xyz[at + 1] - ly) * wide
+			+ _node_xyz[at] - lx) * 4
+		_look_bytes[t + 1] = clampi(int(round((0.5 + 0.5 * cavity[j]) * 255.0)), 0, 255)
+	_look_put(stone.keys())
+	var plane: int = _look_dims.x * _look_dims.y * 4
+	_look_images.clear()
+	for z in range(_look_dims.z):
+		_look_images.append(Image.create_from_data(_look_dims.x, _look_dims.y, false,
+			Image.FORMAT_RGBA8, _look_bytes.slice(z * plane, (z + 1) * plane)))
+	_look_tex = ImageTexture3D.new()
+	_look_tex.create(Image.FORMAT_RGBA8, _look_dims.x, _look_dims.y, _look_dims.z,
+		false, _look_images)
+	_look_dirty.clear()
+
+
+# Дописать в картинку породу и впадину у этих семян.
+func _look_put(cells) -> void:
+	if _look_bytes.is_empty():
+		return
+	for c in cells:
+		_look_put_one(int(c))
+
+
+func _look_put_one(j: int) -> void:
+	var at: int = j * 3
+	var z: int = _node_xyz[at + 2] - _look_min.z
+	var t: int = ((z * _look_dims.y + _node_xyz[at + 1] - _look_min.y) * _look_dims.x
+		+ _node_xyz[at] - _look_min.x) * 4
+	_look_bytes[t] = int(round(stone_of(j) * 255.0))
+	_look_bytes[t + 1] = clampi(int(round((0.5 + 0.5 * cavity[j]) * 255.0)), 0, 255)
+	_look_dirty[z] = true
+
+
+# Отправить дописанное на видеокарту. Зовут раз в кадр и после сборки мешей разом.
+#
+# НЕ ЧАЩЕ ДВАДЦАТИ РАЗ В СЕКУНДУ, если не велено сразу (`now`). Картинка уходит
+# целиком — полтора мегабайта, — а при удержании кисти дописывается почти каждый
+# кадр; цену отправки без экрана не измерить, а на веб-сборке она выше. Облик и так
+# отстаёт от формы на кадр-другой, лишние полкадра глазу не видны.
+const LOOK_UPLOAD_MS: int = 50
+var _look_sent_at: int = -LOOK_UPLOAD_MS
+
+func look_upload(now: bool = false) -> void:
+	if _look_dirty.is_empty() or _look_tex == null:
+		return
+	if not now and Time.get_ticks_msec() - _look_sent_at < LOOK_UPLOAD_MS:
+		return
+	_look_sent_at = Time.get_ticks_msec()
+	var plane: int = _look_dims.x * _look_dims.y * 4
+	for z in _look_dirty:
+		_look_images[z] = Image.create_from_data(_look_dims.x, _look_dims.y, false,
+			Image.FORMAT_RGBA8, _look_bytes.slice(int(z) * plane, (int(z) + 1) * plane))
+	_look_dirty.clear()
+	_look_tex.update(_look_images)
+
+
+func look_texture() -> ImageTexture3D:
+	return _look_tex
+
+
+func look_min() -> Vector3:
+	return Vector3(_look_min)
+
+
+func look_dims() -> Vector3:
+	return Vector3(_look_dims)
+
+
 # Мягкий минимум: там, где два ограничения близки, стык скругляется на `k`.
 static func _smin(a: float, b: float, k: float) -> float:
 	var h: float = clampf(0.5 + 0.5 * (b - a) / k, 0.0, 1.0)
@@ -2257,13 +2392,62 @@ func fill_of(index: int) -> float:
 # рвётся, складке взяться неоткуда. В словаре при этом лежит НЕОБРЕЗАННЫЙ счёт —
 # иначе отмена, вычитая своё, не вернула бы ровно то, что было.
 const EDIT_CAP: float = 6.0
+# ВЫШЕ ЗЕМЛИ ПРЕДЕЛ ПРАВКИ РАСТЁТ — её слово 14.09.2026: «Увеличь максимальную высоту
+# строительства, роста и всего в 3 раза. На 3 кадре изображена скала, которая
+# верхней стороной упирается в „крышу“ мира».
+#
+# КРЫШЕЙ БЫЛ НЕ ВЕРХ МИРА, А ЭТОТ ПРЕДЕЛ. Природное поле над землёй убывает на
+# единицу за ячейку и не обрезается (см. `_fill_terrain`), а правка насыщалась на
+# шести — значит, породой могло стать только то, что не выше шести ячеек (четырёх
+# метров) над исходной землёй. Держи кнопку сколько угодно: макушка упиралась в
+# плоскую крышку, а сам мир (двадцать метров вверх) стоял пустым.
+#
+# ПОДНИМАЕМ ПРЕДЕЛ НА ВЫСОТУ НАД ЗЕМЛЁЙ, а не весь разом. У земли он прежний: там
+# поле и так около половины, и крупная правка дала бы крутой перепад, от которого
+# поверхность липнет к семенам (грабля выше). А на высоте `h` ячеек природное поле
+# уже минус `h`, и правке нужно ровно на `h` больше, чтобы у макушки поле было тем
+# же, что у подошвы. Поле нигде не выходит за прежние шесть с половиной — насыпь
+# остаётся такой же гладкой, а расти может втрое выше: до восемнадцати ячеек (12 м).
+#
+# ЗАМЕР (`--towerbench`). Широкая скала при двадцати четырёх ячейках запаса дорастала
+# до 17.9 м — почти до верха мира, вшестеро выше прежних 2.7; просили втрое, и запас
+# оставлен двенадцать. Столб в одну точку упирается раньше предела и при любом
+# запасе — 7.3 м против прежних 2.7: с узкой макушки растушёвка (`_dab_relax`)
+# снимает больше, чем мазок кладёт.
+const EDIT_LIFT: float = 12.0
+# Лепится ли уже по поднятому пределу. Стартовая сцена ставит скалы по старому и
+# переводится (`lift_edits`): иначе её скалы, собранные удержанием, выросли бы сами.
+var edit_lift: bool = true
 
 # Мягко и БЕЗ ИЗЛОМОВ ПО ВСЕЙ ДЛИНЕ. Отдельной ветки «вдали от потолка вернуть
 # как есть» тут быть не должно: на её границе снова появится излом, только в
 # другом месте. У малых величин `tanh` и так почти не гнёт — на единице разница
 # в один процент.
 func _edit_of(index: int) -> float:
-	return EDIT_CAP * tanh(edit_val[index] / EDIT_CAP)
+	var room: float = EDIT_CAP
+	if edit_lift:
+		room += clampf(0.5 - base_fill[index], 0.0, EDIT_LIFT)
+	return room * tanh(edit_val[index] / room)
+
+
+# ПРАВКИ — В ПОДНЯТЫЙ ПРЕДЕЛ, НЕ ТРОГАЯ ФОРМЫ. У каждой ячейки ищем такой счёт,
+# чтобы при новом пределе поле вышло ровно прежним: `room·tanh(e'/room) = 6·tanh(e/6)`.
+# Нужно стартовой сцене (её скалы стоят по старому пределу) и саду, сохранённому до
+# 14.09.2026. Ниже исходной земли предел прежний, и там не меняется ничего.
+func lift_edits() -> void:
+	if edit_lift:
+		return
+	edit_lift = true
+	for j in range(edit_val.size()):
+		var e: float = edit_val[j]
+		if e == 0.0:
+			continue
+		var room: float = EDIT_CAP + clampf(0.5 - base_fill[j], 0.0, EDIT_LIFT)
+		if room <= EDIT_CAP:
+			continue
+		var kept: float = clampf(EDIT_CAP * tanh(e / EDIT_CAP) / room,
+			-0.999999, 0.999999)
+		edit_val[j] = room * 0.5 * log((1.0 + kept) / (1.0 - kept))
 # Подтягивание к соседям — это диффузия: она разглаживает не только сам мазок,
 # но и всё, что уже вылеплено рядом. При большой силе мазок возле холма
 # подъедал холм. Держим её слабой: острия она снимает и такой, а форму,
@@ -2749,6 +2933,7 @@ func apply_delta(delta: Dictionary, mult: float,
 	for j in seen:
 		_refresh_cavity(j)
 	_smooth_cavity(seen.keys())
+	_look_put(seen.keys())
 	_refresh_shade_round(seen)
 	return zone.keys()
 
@@ -2793,6 +2978,7 @@ func restore_state(ed: Dictionary, st: Dictionary, lu: Array) -> Array:
 	for j in edge:
 		_refresh_cavity(j)
 	_smooth_cavity(edge.keys())
+	_look_put(edge.keys())
 	_refresh_shade_round(edge)
 	return edge.keys()
 
@@ -3209,6 +3395,8 @@ const LUMP_MERGE: float = 1.8     # ближе этого, в метрах, — 
 const LUMP_CELL: float = 3.0      # сторона клетки поиска глыб, м
 # Докуда от середины мазка глыба считается телом, долей радиуса кисти.
 const LUMP_CORE: float = 0.8
+# ... и гаснет к этой доле радиуса: там кончается сырая краска мазка.
+const LUMP_FADE: float = 0.92
 # Полуширина шва между глыбами. Шире ячейки решётки — иначе вместо ложбины
 # выйдет дрожь; см. тот же расчёт у швов по трещинам.
 const SEAM_WIDE: float = 1.4
@@ -3410,38 +3598,53 @@ func _refresh_seam(index: int) -> void:
 		seam_dir[index] = Vector3.ZERO
 		return
 	var p: Vector3 = seeds[index]
+	# ГЛЫБА ВЛИЯЕТ НА ШОВ НЕ ДАЛЬШЕ СВОЕЙ СЕРДЦЕВИНЫ, а не всего радиуса кисти.
+	# Иначе шов уходит к самой кромке мазка и режет там, где породы почти нет, —
+	# то есть выходит за границы мазка, чего и просили не делать. Замерено: масса
+	# мазка кончается ровно на радиусе, сырая краска на 0.92 его.
+	#
+	# ГРАНИЦА ВЛИЯНИЯ МЯГКАЯ (14.09.2026, её слово про зигзаг «в краях камней»).
+	# Прежде глыба выпадала из счёта разом, на 0.8 радиуса: шов у точки прыгал
+	# со своего значения в ноль или на шов с другой глыбой, и поле ступенькой до
+	# двадцати сантиметров давало карниз уже ячейки и зазубрину по краю. Теперь
+	# глыба гаснет от 0.8 до 0.92 радиуса (`LUMP_FADE`), а шов берётся наибольший
+	# по всем соседкам ближайшей — сменить соседку скачком ему больше не с чего.
+	var near: Array = _lumps_near(p)
+	var k1: int = -1
 	var d1: float = 1000000.0
-	var d2: float = 1000000.0
-	var at1: Vector3 = Vector3.ZERO
-	var at2: Vector3 = Vector3.ZERO
-	for k in _lumps_near(p):
+	for k in near:
 		if float(lumps[k]["mass"]) <= 0.0:
 			continue
 		var d: float = p.distance_to(lumps[k]["pos"])
-		# ГЛЫБА ВЛИЯЕТ НА ШОВ НЕ ДАЛЬШЕ СВОЕЙ СЕРДЦЕВИНЫ, а не всего радиуса
-		# кисти. Иначе шов уходит к самой кромке мазка и режет там, где породы
-		# почти нет, — то есть выходит за границы мазка, чего и просили не
-		# делать. Замерено: масса мазка кончается ровно на радиусе, сырая
-		# краска на 0.92 его; берём 0.8 — заведомо внутри тела.
-		if d > float(lumps[k]["r"]) * LUMP_CORE:
+		if d > float(lumps[k]["r"]) * LUMP_FADE:
 			continue
 		if d < d1:
-			d2 = d1
-			at2 = at1
 			d1 = d
-			at1 = lumps[k]["pos"]
-		elif d < d2:
-			d2 = d
-			at2 = lumps[k]["pos"]
-	if d2 > 999999.0:
+			k1 = k
+	var best: float = 0.0
+	var toward: Vector3 = Vector3.ZERO
+	if k1 >= 0:
+		for k in near:
+			if k == k1 or float(lumps[k]["mass"]) <= 0.0:
+				continue
+			var r: float = float(lumps[k]["r"])
+			var d: float = p.distance_to(lumps[k]["pos"])
+			if d > r * LUMP_FADE:
+				continue
+			var s: float = (1.0 - smoothstep(0.0, SEAM_WIDE, (d - d1) * 0.5)) \
+				* (1.0 - smoothstep(r * LUMP_CORE, r * LUMP_FADE, d))
+			if s > best:
+				best = s
+				toward = Vector3(lumps[k]["pos"]) - Vector3(lumps[k1]["pos"])
+	if best <= 0.0:
 		seam[index] = 0.0
 		seam_dir[index] = Vector3.ZERO
 		return
-	seam[index] = 1.0 - smoothstep(0.0, SEAM_WIDE, (d2 - d1) * 0.5)
+	var r1: float = float(lumps[k1]["r"])
+	seam[index] = best * (1.0 - smoothstep(r1 * LUMP_CORE, r1 * LUMP_FADE, d1))
 	# Плоскость шва стоит поперёк отрезка между глыбами — вот его направление.
-	var span: Vector3 = at2 - at1
-	if span.length_squared() > 0.000001:
-		seam_dir[index] = span.normalized()
+	if toward.length_squared() > 0.000001:
+		seam_dir[index] = toward.normalized()
 	else:
 		seam_dir[index] = Vector3.ZERO
 

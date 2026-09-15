@@ -258,7 +258,7 @@ func _ready() -> void:
 	var bench: bool = false
 	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
 			"--meetbench", "--rockbench", "--scenebench", "--showbench",
-			"--dabbench", "--poppybench", "--printbench"]:
+			"--dabbench", "--poppybench", "--printbench", "--towerbench", "--liftcheck"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	if not bench and FileAccess.file_exists(SEED_PATH):
@@ -359,6 +359,16 @@ func _ready() -> void:
 		await _fill_world()
 		await _scene_bench(args)
 		get_tree().quit()
+	elif "--towerbench" in args:
+		# Докуда дорастает скала кистью. См. `_tower_bench`.
+		await _fill_world()
+		_tower_bench(args)
+		get_tree().quit()
+	elif "--liftcheck" in args:
+		# Не меняет ли перевод правок в поднятый предел формы. См. `_lift_check`.
+		await _fill_world()
+		_lift_check()
+		get_tree().quit()
 	elif "--rockbench" in args:
 		# Только камень, без растений: подбор облика идёт десятками прогонов.
 		await _fill_world()
@@ -429,7 +439,9 @@ func _save_garden() -> void:
 	if f == null:
 		return
 	f.store_var({
-		"v": 1,
+		# ВТОРОЙ ВЫПУСК (14.09.2026): правки поля записаны по поднятому пределу
+		# (`grid.lift_edits`). Снимок первого переводится при загрузке.
+		"v": 2,
 		"seed": world_seed,
 		"edits": grid.edits_saved(),
 		"stone": grid.stone,
@@ -448,10 +460,16 @@ func _load_garden() -> bool:
 		return false
 	var data = f.get_var()
 	f.close()
-	if not (data is Dictionary) or int(data.get("v", 0)) != 1 \
-			or int(data.get("seed", 0)) != world_seed:
+	if not (data is Dictionary):
 		return false
+	var version: int = int(data.get("v", 0))
+	if version < 1 or version > 2 or int(data.get("seed", 0)) != world_seed:
+		return false
+	# САД ДО 14.09.2026 ЛЕПИЛСЯ ПО ПРЕЖНЕМУ ПРЕДЕЛУ ПРАВКИ — восстанавливаем по нему и
+	# переводим: иначе всё, что вылеплено удержанием, при загрузке выросло бы само.
+	grid.edit_lift = version >= 2
 	grid.restore_state(data["edits"], data["stone"], data["lumps"])
+	grid.lift_edits()
 	paint = data["paint"]
 	# Порода пересобирается по восстановленному полю: у ячейки выше половины
 	# заполнения — краска из снимка, у прочих ничего.
@@ -685,9 +703,10 @@ func _setup_light() -> void:
 func _fit_shadow() -> void:
 	if sun == null or camera == null:
 		return
-	# Остров стоит в начале координат, камера — где угодно вокруг. Запас в
-	# четыре метра на то, что торчит выше земли: скалы, лоза, свисающие плети.
-	var far: float = camera.global_position.length() + island_radius + 4.0
+	# Остров стоит в начале координат, камера — где угодно вокруг. Запас на то, что
+	# торчит выше земли: скалы, лоза, свисающие плети. Двенадцать метров, а не
+	# четыре, — скалы растут втрое выше (её слово 14.09.2026).
+	var far: float = camera.global_position.length() + island_radius + 12.0
 	# ПОТОЛОК ИДЁТ ОТ ПРОСТОРА КАМЕРЫ, а не от круглого числа: камера отъезжает
 	# на `ZOOM_FAR`, поворотная точка ездит куда угодно, и упрись потолок ниже —
 	# тени пропадали бы ровно там, куда её и отпустили.
@@ -745,6 +764,8 @@ func _process(delta: float) -> void:
 		if not _dirty_chunks.is_empty():
 			_flush_chunks_some()
 	_dabbed_now = false
+	# Дописанную породу и впадину — на видеокарту, не чаще раза в кадр.
+	grid.look_upload()
 	# САМ ПО СЕБЕ САД БОЛЬШЕ НЕ ПИШЕТСЯ. Здесь стоял таймер на полминуты; убран
 	# 2026-09-01 по её решению — «если кнопка не нажата, не сохраняй».
 
@@ -780,6 +801,14 @@ func _build_world() -> void:
 
 	for i in solid:
 		_touch_chunks(i, false)
+	# ПОРОДА И ВПАДИНА ДЛЯ ШЕЙДЕРА — объёмной картинкой (см. «ПОЛЕ ОБЛИКА» в
+	# `SpaceGrid.gd`): у каждого мира своя, и материал смотрит на неё с постройки.
+	if rock_mat != null and grid.look_texture() != null:
+		rock_mat.set_shader_parameter("look_field", grid.look_texture())
+		rock_mat.set_shader_parameter("look_min", grid.look_min())
+		rock_mat.set_shader_parameter("look_size", grid.look_dims())
+		rock_mat.set_shader_parameter("look_step", CELL_SPACING)
+		rock_mat.set_shader_parameter("look_on", 1.0)
 	print("Объёмная сетка: семян — ", grid.seeds.size(), ", породы — ", solid.size(),
 		", кусков — ", chunk_list.size())
 	var parts := ""
@@ -1012,6 +1041,7 @@ func _flush_chunks() -> void:
 	# расстановка сцены, отмена и все стенды: меш собирается тут же, и собрать его
 	# по недосчитанной впадине значило бы запечь в него вчерашнюю тень.
 	grid.flush_look()
+	grid.look_upload(true)
 	for ch in _dirty_chunks:
 		_rebuild_chunk(ch)
 	_dirty_chunks.clear()
@@ -1412,27 +1442,19 @@ func _pick(screen_pos: Vector2) -> Dictionary:
 	var dir := camera.project_ray_normal(screen_pos)
 	var query := PhysicsRayQueryParameters3D.create(from, from + dir * 2000.0)
 	var result := get_world_3d().direct_space_state.intersect_ray(query)
+	# Луч ни во что не попал — целиться не во что. Прежде тут целились в плоскость
+	# земли, чтобы поставить первый блок на пустую карту; нынешняя кисть кладёт
+	# мазок по точке попадания и без неё не делает ничего.
 	if result.is_empty():
-		# Опереться не на что — целимся в плоскость земли. Так можно начать
-		# заново, если на карте не осталось ни одной глыбы.
-		if absf(dir.y) < 0.001:
-			return {}
-		var t := -from.y / dir.y
-		if t <= 0.0:
-			return {}
-		var ground: int = grid.cell_at(from + dir * t)
-		if ground < 0 or not grid.in_play(ground):
-			return {}
-		return {"hit": -1, "target": ground}
+		return {}
 
 	# Луч попал в саму видимую поверхность, а не в подложенное тело ячейки.
-	# Отступив от точки попадания по нормали в обе стороны, находим ближайшие
-	# семена: снаружи — куда ставить, внутри — что убирать.
+	# Отступив от точки попадания по нормали внутрь, находим семя под
+	# поверхностью: от него подсветка ведёт накладку.
 	var pos: Vector3 = result.position
 	var nrm: Vector3 = result.normal
 	var step: float = CELL_SPACING * 0.55
-	return {"hit": grid.cell_at(pos - nrm * step), "target": grid.cell_at(pos + nrm * step),
-		"pos": pos, "normal": nrm}
+	return {"hit": grid.cell_at(pos - nrm * step), "pos": pos}
 
 
 # --- Подсветка грани ---------------------------------------------------------
@@ -1469,8 +1491,8 @@ func _update_frame() -> void:
 	# оказывалась породой: это осталось от прежнего инструмента, который ставил
 	# блок в ячейку, и с нынешней кистью не связано ничем.
 	#
-	# Наружу шагают на полшага решётки (`_pick`), и в узкой щели или под
-	# нависшим краем этот шаг упирается в камень напротив. Выходило хуже всего
+	# Наружу шагали на полшага решётки, и в узкой щели или под
+	# нависшим краем этот шаг упирался в камень напротив. Выходило хуже всего
 	# там, где игрок как раз и хочет подровнять: кисть работает, а курсор
 	# погас — и место выглядит неприкасаемым.
 	var pick := _pick(get_viewport().get_mouse_position())
@@ -1934,6 +1956,11 @@ func _setup_toolbar() -> void:
 		var tiers: Array = group["tiers"]
 		var single: bool = tiers.size() == 1
 		for t in tiers:
+			# ПУСТОЙ ЯРУС НЕ ПОКАЗЫВАЕМ (её слово 14.09.2026: «скрой верхний и
+			# средний ярус, так как там пока пусто»). Правило, а не вычеркнутые
+			# номера: заведётся первое дерево или кустарник — ярус появится сам.
+			if not single and PlantsData.of_tier(t).is_empty():
+				continue
 			if not single:
 				# Внутри «Растений» ярусы остаются отдельными подпунктами.
 				var sub := _list_button(UI_FONT_SMALL)
@@ -2342,6 +2369,8 @@ func _refresh_toolbar() -> void:
 		group_headers[g].text = "%s %d %s" % ["-" if open else "+", g, group["name"]]
 		group_boxes[g].visible = open
 		for t in group["tiers"]:
+			if not branch_boxes.has(t):
+				continue             # пустой ярус в панель не заводился
 			var info := PlantsData.tier_info(t)
 			if branch_headers.has(t):
 				branch_headers[t].text = "  %s %s" % [
@@ -3144,9 +3173,8 @@ func _selftest() -> void:
 	print("Растения: треугольников всего — ", tris, ", на растение — ",
 		snappedf(float(tris) / maxf(1.0, float(plants.patches.size())), 0.1),
 		", кусков меша — ", plants.cell_nodes.size())
-	var sheet: Vector2i = plants.see_through()
-	print("Разметка тела: просвечивающих точек — ", sheet.x,
-		", самая тесная клетка — ", sheet.y, " точек")
+	print("Сплошные столбцы листа (тело мха и лиамоха, кора): просвечивающих",
+		" точек — ", plants.see_through(), " — норма ноль, клетка берётся целиком")
 	var vine: Dictionary = plants.vine_stats()
 	if int(vine["links"]) > 0:
 		var links: float = maxf(1.0, float(vine["links"]))
@@ -3716,6 +3744,86 @@ func _bodies_report(at: Vector3, reach: float) -> void:
 		" — одно тело значит, что массив не раскололся вовсе")
 
 
+# ПЕРЕВОД ПРАВОК В ПОДНЯТЫЙ ПРЕДЕЛ НЕ МЕНЯЕТ ФОРМЫ (14.09.2026). Так читается сад,
+# сохранённый до этого дня, и так же переводится стартовая сцена. Стенд берёт правки
+# настоящей сцены, восстанавливает поле по ПРЕЖНЕМУ пределу, переводит правки
+# (`grid.lift_edits`), восстанавливает поле уже по поднятому — и печатает, насколько
+# разошлись два поля и у скольких ячеек сменилась порода. Норма — нули.
+func _lift_check() -> void:
+	scene_id = "rocks"
+	_seed_scene()
+	var edits: Dictionary = grid.edits_saved()
+	var stone_kept: Dictionary = grid.stone.duplicate()
+	var lumps_kept: Array = grid.lumps.duplicate(true)
+	grid.edit_lift = false
+	grid.restore_state(edits, stone_kept, lumps_kept)
+	var old_fill: PackedFloat32Array = grid.fill.duplicate()
+	grid.lift_edits()
+	grid.restore_state(grid.edits_saved(), stone_kept, lumps_kept)
+	var drift: float = 0.0
+	var flipped := 0
+	for j in range(old_fill.size()):
+		drift = maxf(drift, absf(grid.fill[j] - old_fill[j]))
+		if (old_fill[j] > 0.5) != (grid.fill[j] > 0.5):
+			flipped += 1
+	print("Перевод правок в поднятый предел: правленых ячеек ", edits.size(),
+		", наибольшее расхождение поля ", snappedf(drift, 0.000001),
+		", сменили породу ячеек — ", flipped, " (норма — нули: форма та же)")
+
+
+# ДОКУДА ДОРАСТАЕТ СКАЛА — стенд к её слову 14.09.2026: «увеличь максимальную высоту
+# строительства, роста и всего в 3 раза». Кладёт мазки камня в макушку одного
+# места — так игрок держит кнопку и ведёт курсор вверх — и печатает, насколько
+# макушка поднялась над исходной землёй и где перестала расти. `--nolift` —
+# прежний предел правки (`grid.edit_lift`), чтобы сравнить в одном и том же коде.
+func _tower_bench(args: PackedStringArray) -> void:
+	if "--nolift" in args:
+		grid.edit_lift = false
+	var spot: Vector3 = _test_spot()
+	var ground: Vector3 = _ground_at(spot.x, spot.z)
+	var top: Vector3 = ground
+	var strokes: int = int(_arg_num(args, "--strokes", 300.0))
+	# `--wide` — не столб в одну точку, а скала: каждый заход мажет середину и четыре
+	# точки вокруг неё, каждую по её собственной макушке. Столб упирается раньше:
+	# растушёвка (`_dab_relax`) снимает с узкой макушки больше, чем с широкой.
+	var feet: Array = [Vector2.ZERO]
+	if "--wide" in args:
+		var off: float = _brush_radius() * 0.6
+		feet = [Vector2.ZERO, Vector2(off, 0.0), Vector2(-off, 0.0),
+			Vector2(0.0, off), Vector2(0.0, -off)]
+	var still: int = 0
+	var used: int = 0
+	var t0 := Time.get_ticks_msec()
+	while used < strokes:
+		for foot in feet:
+			var at: Vector3 = _ground_at(spot.x + foot.x, spot.z + foot.y)
+			if at == Vector3.ZERO:
+				continue
+			var amount: float = _stroke_amount()
+			_stroke(at, _brush_radius(), amount, "cliff", _stone_push(amount, "cliff"))
+			used += 1
+		var now: Vector3 = _ground_at(spot.x, spot.z)
+		if now.y > top.y + 0.01:
+			still = 0
+			top = now
+		else:
+			still += 1
+		# Двадцать заходов подряд без прибавки — предел достигнут.
+		if still >= 20:
+			break
+	grid.flush_look()
+	_flush_chunks()
+	print("Высота скалы", "" if grid.edit_lift else " (прежний предел правки)",
+		" — ", "широкая" if feet.size() > 1 else "столб в одну точку",
+		": ", used, " мазков камня за ", Time.get_ticks_msec() - t0,
+		" мс — поднялась на ", snappedf(top.y - ground.y, 0.1),
+		" м над исходной землёй (макушка на ", snappedf(top.y, 0.1),
+		" м, верх мира на ", snappedf(ISLAND_TOP + HEADROOM, 0.1), " м)",
+		" — дальше не росла" if still >= 20 else " — и ещё растёт")
+	_stone_surface_check(Vector3(spot.x, (ground.y + top.y) * 0.5, spot.z),
+		maxf(4.5, (top.y - ground.y) * 0.75))
+
+
 func _rock_bench(args: PackedStringArray) -> void:
 	grid.facet_amp = _arg_num(args, "--facet", grid.facet_amp)
 	grid.bed_pull = _arg_num(args, "--bed", grid.bed_pull)
@@ -3787,6 +3895,10 @@ func _seed_scene() -> void:
 		print("Сцена: чистое поле")
 		return
 	var started := Time.get_ticks_msec()
+	# СКАЛЫ СЦЕНЫ ЛЕПЯТСЯ ПО ПРЕЖНЕМУ ПРЕДЕЛУ ПРАВКИ и переводятся в поднятый (её
+	# слово 14.09.2026 «выше в три раза» — про то, докуда можно дорасти, а не про
+	# обстановку острова): иначе скалы, собранные удержанием, выросли бы сами.
+	grid.edit_lift = false
 	# МАЗКИ ОБСТАНОВКИ ИДУТ ПАЧКОЙ: последствия считаются один раз в конце.
 	# Между ними на мир никто не смотрит, а ложатся они друг на друга десятками.
 	grid.begin_batch()
@@ -3796,6 +3908,7 @@ func _seed_scene() -> void:
 	# даёт не форму, а тонкий клин — см. `solo_spikes`. Её кадр 02.09.2026.
 	var spikes: int = grid.solo_spikes(true)
 	grid.end_batch()
+	grid.lift_edits()
 	var dabbed := Time.get_ticks_msec() - started
 	var flushed := Time.get_ticks_msec()
 	_flush_chunks()
@@ -5967,12 +6080,12 @@ func _poppy_check() -> void:
 	for i in range(10000):
 		if plants.head_is_pod(i * 7919 + (i % 37) * 131, card):
 			lots += 1
-	print("Мак: доля коробочек среди доросших — ",
+	print("Мак: доля коробочек среди доросших на полутора минутах — ",
 		snappedf(float(pods) / maxf(1.0, float(grown)), 0.01), " на ", grown,
 		" стеблях, а на десяти тысячах жребиев — ",
 		snappedf(float(lots) / 10000.0, 0.001),
 		" при заказанной ", snappedf(float(card["pod_share"]), 0.01),
-		" (её решение: две трети цветов, треть коробочек)")
+		" (её решение — про взрослый куст; при полной зрелости — последняя строка мака)")
 	# ЛЕПЕСТКИ РАСТУТ СТРОГО ПОД СЕРДЦЕВИНОЙ И ПОД ТЫЧИНКАМИ — её требование
 	# 07.09.2026. Требование про взаимное расположение трёх частей головки, и
 	# на глаз тут верить нечему: донце-то лежало ниже тёмного тела и раньше, а
@@ -6658,6 +6771,42 @@ func _poppy_check() -> void:
 	_poppy_cross_report(card)
 	_poppy_flower_report(card)
 	_poppy_petal_look(card, sheet_img)
+	_poppy_ripe_report(card)
+
+
+# ДОЛЯ КОРОБОЧЕК ПРИ ПОЛНОЙ ЗРЕЛОСТИ. Её решение «две трети цветов, треть
+# коробочек» — про взрослый куст, а весь стенд снят на полутора минутах. С тех пор
+# как мак растёт втрое медленнее (09.09.2026), к концу расползания молодые кусты
+# едва зацвели, и строка «на полутора минутах» печатала 0.09 при заказанной 0.29.
+# Дозревание после срока идёт само (`GROW_SPAN` снимает только расползание),
+# поэтому доводим куртину до конца — пока в живых никого — и считаем тем же
+# правилом сборки. Идёт ПОСЛЕДНИМ: все прочие числа стенда сняты до него.
+func _poppy_ripe_report(card: Dictionary) -> void:
+	var ticks := 0
+	while plants.live_count() > 0 and ticks < 4000:
+		plants._tick(0.15)
+		ticks += 1
+	var buds := 0
+	var flowers := 0
+	var pods := 0
+	for pid in plants.patches:
+		var p: Dictionary = plants.patches[pid]
+		if String(p["id"]) != "poppy":
+			continue
+		var many: int = plants.poppy_stems(p, card)
+		for s in range(many):
+			if plants.poppy_stem_m(p, card, s, many) < float(card["open_at"]):
+				buds += 1
+			elif plants.poppy_stem_pod(p, card, s, many):
+				pods += 1
+			else:
+				flowers += 1
+	print("Мак при полной зрелости (ещё ", snappedf(float(ticks) * 0.15, 0.1),
+		" с после полутора минут, в живых осталось ", plants.live_count(),
+		"): бутонов ", buds, ", цветов ", flowers, ", коробочек ", pods,
+		"; доля коробочек ", snappedf(float(pods) / maxf(1.0, float(flowers + pods)), 0.01),
+		" при заказанной ", snappedf(float(card["pod_share"]), 0.01),
+		" — её решение: две трети цветов, треть коробочек")
 
 
 # ЦВЕТОК С ЧУЖИМИ ЧАСТЯМИ ВНУТРИ — её кадры 13.09.2026: «ещё не решена
@@ -7255,7 +7404,26 @@ func _show_bench(args: PackedStringArray) -> void:
 	_flush_chunks()
 	plants.flush_now()
 	plants.built_reset()
+	# `--switch` — ВРЕМЯ ПЕРЕКЛЮЧАЕТСЯ ПО РАСПИСАНИЮ, как его переключает игрок: 1×,
+	# 2×, ½×, стоп и снова 1×. Её слово 14.09.2026: «время поломано. Рост скачет
+	# только при переключении скоростей течения времени и стопа». Стенд смотрит на
+	# каждое растение глазами экрана — каким его ВИДНО (память догона) и какое оно
+	# ЕСТЬ (зрелость) — и по каждому отрезку печатает, поспевает ли видимое за
+	# настоящим (`_switch_leg_report`).
+	var plan: Array = []
+	if "--switch" in args:
+		plan = [[1.0, 12.0], [2.0, 12.0], [0.5, 12.0], [0.0, 8.0], [1.0, 12.0]]
+		secs = 0.0
+		for leg in plan:
+			secs += float(leg[1])
 	var frames: int = int(secs * 60.0)
+	var leg_i: int = -1
+	var leg_start: int = 0
+	var leg_end: int = 0
+	var probe: Dictionary = {}
+	var win: Dictionary = {}
+	var leg: Dictionary = {}
+	var prev_vis: float = 0.0
 	var t0 := Time.get_ticks_usec()
 	# ОЧЕРЕДЬ МЕРЯЕМ ТОЖЕ, И ОНА ВАЖНЕЕ СЧЁТА. Запас на кадр (`REBUILD_MS`)
 	# держит цену сверху сам: набралась очередь — и кусков в секунду собирается
@@ -7272,7 +7440,18 @@ func _show_bench(args: PackedStringArray) -> void:
 	var frame_top: float = 0.0
 	var frames_half: int = 0
 	var frames_full: int = 0
-	for _i in range(frames):
+	for i in range(frames):
+		if not plan.is_empty() and i >= leg_end:
+			if leg_i >= 0:
+				_switch_leg_report(plan[leg_i], leg, probe, prev_vis)
+				prev_vis = float(leg["vis"])
+			leg_i += 1
+			plants.time_scale = float(plan[leg_i][0])
+			leg_start = i
+			leg_end = i + int(float(plan[leg_i][1]) * 60.0)
+			leg = {"vis": 0.0, "tru": 0.0, "windows": 0, "rush": 0, "stall": 0,
+				"moved_at": -1, "start": i}
+			win.clear()
 		var tf: int = Time.get_ticks_usec()
 		plants._process(1.0 / 60.0)
 		var spent: float = float(Time.get_ticks_usec() - tf) / 1000.0
@@ -7284,6 +7463,42 @@ func _show_bench(args: PackedStringArray) -> void:
 		var q: int = plants.dirty_count()
 		queue_top = maxi(queue_top, q)
 		queue_sum += float(q)
+		if plan.is_empty():
+			continue
+		# ГЛАЗАМИ ЭКРАНА: насколько каждое растение подросло на вид и на деле за
+		# этот кадр. Окно в секунду — чтобы настоящий рост, идущий ударами по 0.15 с,
+		# успел набраться и отношение видимого к настоящему что-то значило.
+		var moved: bool = false
+		for pid in plants.patches:
+			var pv: Vector2 = plants.show_probe(plants.patches[pid])
+			if pv.x < 0.0:
+				continue
+			if probe.has(pid):
+				var was: Vector2 = probe[pid]
+				var dv: float = maxf(pv.x - was.x, 0.0)
+				var dtru: float = maxf(pv.y - was.y, 0.0)
+				leg["vis"] = float(leg["vis"]) + dv / maxf(pv.y, 0.000001)
+				leg["tru"] = float(leg["tru"]) + dtru / maxf(pv.y, 0.000001)
+				if dv > pv.y * 0.00002:
+					moved = true
+				win[pid] = Vector2(win.get(pid, Vector2.ZERO)) + Vector2(dv, dtru) \
+					/ maxf(pv.y, 0.000001)
+			probe[pid] = pv
+		if moved:
+			leg["moved_at"] = i
+		if (i - leg_start) % 60 == 59:
+			for pid in win:
+				var w: Vector2 = win[pid]
+				if w.y > 0.002:
+					leg["windows"] = int(leg["windows"]) + 1
+					if w.x > 2.0 * w.y:
+						leg["rush"] = int(leg["rush"]) + 1
+					elif w.x < 0.25 * w.y:
+						leg["stall"] = int(leg["stall"]) + 1
+			win.clear()
+	if not plan.is_empty():
+		_switch_leg_report(plan[leg_i], leg, probe, prev_vis)
+		plants.time_scale = 1.0
 	plants.flush_now()
 	var whole: float = float(Time.get_ticks_usec() - t0) / 1000.0
 	var live: int = plants.patches.size()
@@ -7341,6 +7556,47 @@ func _show_bench(args: PackedStringArray) -> void:
 		"ЗАМЕРАМ ВЫШЕ НЕ ВЕРИТЬ" if busy_end > LOAD_ALARM else "замерам можно верить")
 
 
+# ОДИН ОТРЕЗОК РАСПИСАНИЯ `--switch`. Рост меряется в долях размера растения и
+# складывается по всем растениям: «видимый к настоящему» — единица, когда экран
+# поспевает; окна по секунде считают рывки (видимое быстрее настоящего вдвое) и
+# стоянки (видимое четверти настоящего не набирает, а растение растёт). На стопе
+# настоящего роста нет, и мерка другая: сколько сад ещё рос на вид и как долго.
+func _switch_leg_report(plan_leg: Array, leg: Dictionary, probe: Dictionary,
+		prev_vis: float) -> void:
+	var speed: float = float(plan_leg[0])
+	var leg_name: String = "стоп" if is_zero_approx(speed) else "%s×" % str(speed)
+	var lag_sum := 0.0
+	var lag_n := 0
+	for pid in probe:
+		var pv: Vector2 = probe[pid]
+		if plants.patches.has(pid) and pv.y > 0.000001:
+			lag_sum += (pv.y - pv.x) / pv.y
+			lag_n += 1
+	var moved_at: int = int(leg["moved_at"])
+	var last_move: float = -1.0 if moved_at < 0 \
+		else float(moved_at - int(leg["start"]) + 1) / 60.0
+	if is_zero_approx(speed):
+		print("Переключение времени, отрезок «стоп» (", plan_leg[1], " с): на вид сад",
+			" ещё вырос на ", snappedf(float(leg["vis"]), 0.01),
+			" размера растения в сумме — это ",
+			snappedf(100.0 * float(leg["vis"]) / maxf(prev_vis, 0.000001), 0.1),
+			"% видимого роста прошлого отрезка; последнее движение через ",
+			snappedf(last_move, 0.01), " с после стопа (норма — ни одного движения)",
+			"; отставание видимого от настоящего к концу — ",
+			snappedf(100.0 * lag_sum / maxf(float(lag_n), 1.0), 0.1), "% размера")
+		return
+	var windows: int = maxi(int(leg["windows"]), 1)
+	print("Переключение времени, отрезок «", leg_name, "» (", plan_leg[1],
+		" с): видимый рост к настоящему ",
+		snappedf(float(leg["vis"]) / maxf(float(leg["tru"]), 0.000001), 0.01),
+		"; растение-секунд ", leg["windows"], ", из них рывков (видимое вдвое быстрее",
+		" настоящего) ", snappedf(100.0 * float(leg["rush"]) / float(windows), 0.1),
+		"%, стоянок (растёт, а на вид стоит) ",
+		snappedf(100.0 * float(leg["stall"]) / float(windows), 0.1),
+		"%; отставание видимого к концу отрезка ",
+		snappedf(100.0 * lag_sum / maxf(float(lag_n), 1.0), 0.1), "% размера")
+
+
 # =============================================================================
 #  ОТПЕЧАТОК РОСТА  (`--printbench`)
 # =============================================================================
@@ -7380,6 +7636,7 @@ func _print_bench(args: PackedStringArray) -> void:
 	# этот раз. Догон пишет их в меш, и без обнуления меши у одного и того же
 	# сада выходили разными от прогона к прогону.
 	plants._grow_clock = 0.0
+	plants._world_clock = 0.0
 	plants._rng.seed = 20260904
 	if kind == "vine":
 		_seed_structures()
@@ -7430,6 +7687,12 @@ func _print_bench(args: PackedStringArray) -> void:
 		if (i + 1) % 20 == 0 or i == ticks - 1:
 			plants.flush_now()
 			garden = hash([garden, _garden_print()])
+	# КОРОБОЧКИ ВИДА — тем же счётом, что у самопроверки (`spore_stats`): сад в
+	# отпечатке один и тот же до знака, и число их сравнимо между прогонами кода —
+	# а в самопроверке сад двигается от всякой правки рельефа.
+	var spores: Vector2i = plants.spore_stats(kind)
+	print("Отпечаток роста: коробочек у вида ", kind, " — ", spores.y, " на ",
+		spores.x, " растениях")
 	# ОТПЕЧАТОК ФОРМЫ СНИМАЕТСЯ ОДНОЙ ПОЛНОЙ ПЕРЕСБОРКОЙ В КОНЦЕ, а не копится
 	# по ходу прогона. Копить его нельзя: с делением куста на доли соседняя
 	# пометка пересобирает заодно и чужую долю, и накопленная сумма зависела бы
