@@ -16,6 +16,7 @@ const SpacePropsScript = preload("res://SpaceProps.gd")
 const SurfaceScript = preload("res://Surface.gd")
 const PlantsData = preload("res://Plants.gd")
 const VersionData = preload("res://Version.gd")
+const WeatherScript = preload("res://Weather.gd")
 
 # --- Параметры мира ---
 # Радиус острова ОБЫЧНЫЙ; настоящий живёт в `island_radius` и меняется ключом
@@ -107,6 +108,9 @@ var camera: Camera3D
 # Солнце и то, на какую даль у него сейчас растянуты тени (см. `_fit_shadow`).
 var sun: DirectionalLight3D
 var _shadow_far: float = -1.0
+var sky_env: Environment
+var sky_look: ProceduralSkyMaterial
+var weather                          # `Weather.gd`: небо, солнце, дымка, дождь, облака
 # Звеньев у лозы на шестидесятой секунде — только для проверки предела роста.
 var _vine_at_60: int = 0
 
@@ -157,6 +161,9 @@ var group_headers: Dictionary = {}
 var group_boxes: Dictionary = {}
 var tool_buttons: Dictionary = {}
 var speed_buttons: Array = []
+var weather_buttons: Array = []
+var hour_slider: HSlider              # час суток: ползунок и подпись рядом с ним
+var hour_label: Label
 var brush_buttons: Array = []
 var erase_buttons: Array = []
 var grow_buttons: Array = []
@@ -244,6 +251,14 @@ func _ready() -> void:
 	_setup_materials()
 	_setup_environment()
 	_setup_light()
+	# ПОГОДА — сразу за небом и солнцем: она их и настраивает. Ключ `--weather=`
+	# — разовая проба, как `--seed`: кадр в прежний пасмурный свет снимается с
+	# `--weather=overcast`.
+	weather = WeatherScript.new()
+	add_child(weather)
+	weather.setup(self, sky_env, sky_look, sun, rock_mat,
+		weather.pick(OS.get_cmdline_user_args(), WeatherScript.DEFAULT_ID),
+		weather.pick_hour(OS.get_cmdline_user_args(), WeatherScript.NOON))
 	_setup_camera()
 	_setup_frame()
 	_setup_hint()
@@ -258,7 +273,8 @@ func _ready() -> void:
 	var bench: bool = false
 	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
 			"--meetbench", "--rockbench", "--scenebench", "--showbench",
-			"--dabbench", "--poppybench", "--printbench", "--towerbench", "--liftcheck"]:
+			"--dabbench", "--poppybench", "--printbench", "--towerbench", "--liftcheck",
+			"--weatherbench"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	if not bench and FileAccess.file_exists(SEED_PATH):
@@ -297,6 +313,7 @@ func _ready() -> void:
 	plants = SpacePlantsScript.new()
 	add_child(plants)
 	plants.setup(self)
+	weather.attach_plants(plants.blade_material())
 
 	props = SpacePropsScript.new()
 	add_child(props)
@@ -368,6 +385,13 @@ func _ready() -> void:
 		# Не меняет ли перевод правок в поднятый предел формы. См. `_lift_check`.
 		await _fill_world()
 		_lift_check()
+		get_tree().quit()
+	elif "--weatherbench" in args:
+		# Погода: точно ли ложатся наборы, ровно ли идёт смена, в свой ли срок
+		# намокает и сохнет земля, какую долю земли закрывают облака и чего это
+		# стоит кадру. Достройки мира погода не ждёт — ей нужны небо и материалы.
+		for line in weather.check():
+			print(line)
 		get_tree().quit()
 	elif "--rockbench" in args:
 		# Только камень, без растений: подбор облика идёт десятками прогонов.
@@ -448,6 +472,10 @@ func _save_garden() -> void:
 		"lumps": grid.lumps,
 		"paint": paint,
 		"garden": plants.export_garden(),
+		# Погода и час, при которых сад сохранили (15 и 30.09.2026). Прежние
+		# снимки их не знают и открываются при нынешних.
+		"weather": weather.weather_id,
+		"hour": weather.hour,
 	})
 	f.close()
 
@@ -483,6 +511,14 @@ func _load_garden() -> bool:
 		_touch_chunks(j)
 	_flush_chunks()
 	plants.import_garden(data["garden"])
+	# Сад возвращается при той погоде, при которой его сохранили — сразу, без смены.
+	# Снимок до 15.09.2026 погоды не знает и остаётся при нынешней.
+	if data.has("hour"):
+		weather.set_hour(float(data["hour"]))
+	if data.has("weather"):
+		weather.set_now(String(data["weather"]))
+	if data.has("weather") or data.has("hour"):
+		_refresh_toolbar()
 	return true
 
 
@@ -588,53 +624,45 @@ func _setup_materials() -> void:
 
 
 func _setup_environment() -> void:
-	# Свет северный, пасмурный: солнце приглушено, зато небо светит со всех
-	# сторон. Именно так выглядят мокрые мшистые склоны — без резких теней,
-	# но с глубоким затемнением в щелях.
-	var env := Environment.new()
-	env.background_mode = Environment.BG_SKY
+	# ЦВЕТ НЕБА, РАССЕЯННЫЙ СВЕТ, ДЫМКУ И ТОНИРОВКУ ЗАДАЁТ ПОГОДА (`Weather.gd`) —
+	# у каждой свой набор чисел. Здесь только то, что от погоды не зависит.
+	#
+	# Прежний свет игры — северный пасмурный: солнце приглушено, зато небо светит
+	# со всех сторон, как на мокрых мшистых склонах, без резких теней, но с
+	# глубоким затемнением в щелях. Он стал погодой «пасмурно» с теми же числами;
+	# по умолчанию небо ясное (её решение 15.09.2026).
+	sky_env = Environment.new()
+	sky_env.background_mode = Environment.BG_SKY
 	var sky := Sky.new()
-	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = Color(0.60, 0.66, 0.72)
-	sky_mat.sky_horizon_color = Color(0.82, 0.85, 0.86)
-	sky_mat.ground_horizon_color = Color(0.62, 0.64, 0.62)
-	sky_mat.ground_bottom_color = Color(0.32, 0.36, 0.34)
-	sky.sky_material = sky_mat
-	env.sky = sky
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
-	env.ambient_light_energy = 0.50
+	sky_look = ProceduralSkyMaterial.new()
+	sky.sky_material = sky_look
+	sky_env.sky = sky
+	sky_env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 
 	# Затенение щелей: то, что на снимках даёт почти чёрные провалы между
 	# валунами. Это расход на кадр, а не на действие игрока — отклик не страдает.
-	env.ssao_enabled = true
-	env.ssao_radius = 0.65
-	env.ssao_intensity = 1.3
-	env.ssao_power = 1.8
-	env.ssao_detail = 0.6
-	env.ssao_light_affect = 0.15
+	sky_env.ssao_enabled = true
+	sky_env.ssao_radius = 0.65
+	sky_env.ssao_intensity = 1.3
+	sky_env.ssao_power = 1.8
+	sky_env.ssao_detail = 0.6
+	sky_env.ssao_light_affect = 0.15
 
-	# Лёгкая дымка: дальние обрывы бледнеют, глубина читается.
-	env.fog_enabled = true
-	env.fog_light_color = Color(0.74, 0.78, 0.80)
-	env.fog_density = 0.0025
-	env.fog_aerial_perspective = 0.25
-	env.fog_sky_affect = 0.0
+	# Дымка: дальние обрывы бледнеют, глубина читается. Густота и цвет — погоды.
+	sky_env.fog_enabled = true
 
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	env.adjustment_enabled = true
-	env.adjustment_contrast = 1.16
-	env.adjustment_saturation = 0.98
+	sky_env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	sky_env.adjustment_enabled = true
 
 	var world_env := WorldEnvironment.new()
-	world_env.environment = env
+	world_env.environment = sky_env
 	add_child(world_env)
 
 
 func _setup_light() -> void:
 	sun = DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-48, -38, 0)
-	sun.light_color = Color(1.0, 0.97, 0.91)
-	sun.light_energy = 1.20
+	# Цвет, силу и размер светила задаёт погода (`Weather.gd`).
 	sun.shadow_enabled = true
 
 	# ОДНА СТУПЕНЬ ТЕНИ, А НЕ ЧЕТЫРЕ. Движок по умолчанию делит карту теней на
@@ -661,15 +689,14 @@ func _setup_light() -> void:
 	sun.shadow_normal_bias = 1.0
 	sun.shadow_bias = 0.05
 
-	# КРАЙ ТЕНИ РАЗМЫТ, И ЭТО НЕ УКРАШЕНИЕ. Свет здесь северный пасмурный —
-	# у такого солнца край тени мягкий, а не бритвенный. Число — угловой размер
-	# светила: у настоящего солнца полградуса, у затянутого облаками неба
-	# больше. Взят градус: тень мягчает с удалением от предмета, как в жизни,
-	# и не рассыпается в шум.
+	# КРАЙ ТЕНИ РАЗМЫТ, И ЭТО НЕ УКРАШЕНИЕ. Число — угловой размер светила
+	# (`light_angular_distance`): у настоящего солнца полградуса, у затянутого
+	# облаками неба больше, и тень мягчает с удалением от предмета, как в жизни.
+	# Задаёт его погода: в ясный день полградуса, в пасмурный градус, в туман и
+	# дождь три.
 	#
 	# ЭТОГО НЕ БУДЕТ В БРАУЗЕРНОЙ ДЕМКЕ: там рисует упрощённый движок, мягких
 	# теней он не умеет вовсе — как не умеет и затенения щелей (`ssao`).
-	sun.light_angular_distance = 1.0
 
 	# ГАШЕНИЕ ТЕНИ У ДАЛЬНЕГО КРАЯ — СНЯТО, и без этого вся подгонка вышла бы
 	# боком. Движок по умолчанию плавно гасит тени на последней пятой части
@@ -1724,6 +1751,9 @@ func _clear_toolbar() -> void:
 	branch_open.clear()
 	tool_buttons.clear()
 	speed_buttons.clear()
+	weather_buttons.clear()
+	hour_slider = null
+	hour_label = null
 	brush_buttons.clear()
 	erase_buttons.clear()
 	grow_buttons.clear()
@@ -2244,6 +2274,50 @@ func _setup_time_panel(layer: CanvasLayer) -> void:
 				nb.set_text.bind(" новый остров ")))
 	row.add_child(nb)
 
+	# ПОГОДА — СВОЕЙ СТРОКОЙ (её решение 15.09.2026: «выбирает игрок»). Выбранная
+	# держится, пока её не сменят; смена идёт сама, за четыре секунды.
+	var weather_row := HBoxContainer.new()
+	weather_row.add_theme_constant_override("separation", _chip_gap())
+	column.add_child(weather_row)
+	var weather_title := Label.new()
+	weather_title.text = "погода "
+	weather_title.modulate = Color(1, 1, 1, 0.5)
+	weather_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
+	weather_row.add_child(weather_title)
+	for i in range(WeatherScript.WEATHERS.size()):
+		var wb := _list_button(UI_FONT_SMALL, true)
+		wb.pressed.connect(_set_weather.bind(i))
+		weather_row.add_child(wb)
+		weather_buttons.append(wb)
+
+	# ЧАС СУТОК — ПОЛЗУНКОМ (её решение 15.09.2026: «только ползунок»). Солнце
+	# стоит там, куда его поставили, и само не идёт: свет обязан слушаться руки, а
+	# не бежать своим чередом, пока она лепит.
+	var day_row := HBoxContainer.new()
+	day_row.add_theme_constant_override("separation", _chip_gap())
+	column.add_child(day_row)
+	var day_title := Label.new()
+	day_title.text = "час "
+	day_title.modulate = Color(1, 1, 1, 0.5)
+	day_title.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
+	day_row.add_child(day_title)
+	hour_slider = HSlider.new()
+	hour_slider.min_value = 0.0
+	# До 23:45, а не до 24:00: полночь у ползунка уже есть слева, и правый её
+	# двойник только мешал бы — подпись прыгала бы с 24:00 на 00:00.
+	hour_slider.max_value = 23.75
+	hour_slider.step = 0.25
+	hour_slider.value = weather.hour
+	hour_slider.custom_minimum_size = Vector2(110 * ui_scale, 0)
+	hour_slider.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	hour_slider.focus_mode = Control.FOCUS_NONE
+	hour_slider.value_changed.connect(_set_hour)
+	day_row.add_child(hour_slider)
+	hour_label = Label.new()
+	hour_label.text = _hour_text(weather.hour)
+	hour_label.add_theme_font_size_override("font_size", UI_FONT_SMALL * ui_scale)
+	day_row.add_child(hour_label)
+
 	# С ПАЛЬЦА НЕТ НИ ОТМЕНЫ, НИ НАКЛОНА: Ctrl+Z на стекле не нажать, а тангаж
 	# живёт на вертикали ПКМ. Свободных жестов не осталось (см. README,
 	# «Управление с пальца») — поэтому кнопки, и только на сенсорном стекле:
@@ -2306,6 +2380,25 @@ func _set_time_scale(index: int) -> void:
 	_refresh_toolbar()
 
 
+func _set_weather(index: int) -> void:
+	weather.change(String(WeatherScript.WEATHERS[index]["id"]))
+	_refresh_toolbar()
+
+
+# Ползунок ведут рукой, и подпись обязана идти за ним кадрами. Всю панель на
+# каждую подвижку не пересобираем — меняется одна строка.
+func _set_hour(at: float) -> void:
+	weather.set_hour(at)
+	if hour_label != null:
+		hour_label.text = _hour_text(weather.hour)
+
+
+func _hour_text(at: float) -> String:
+	var mins: int = int(round(at * 60.0)) % 1440
+	@warning_ignore("integer_division")
+	return "%02d:%02d" % [mins / 60, mins % 60]
+
+
 func _set_brush(width: int) -> void:
 	brush = width
 	frame_id = ""            # контур показывает мазок целиком — пересобрать
@@ -2341,6 +2434,16 @@ func _refresh_toolbar() -> void:
 		var chosen: bool = is_equal_approx(time_scale, SPEEDS[i]["value"])
 		speed_buttons[i].text = "[%s]" % SPEEDS[i]["label"] if chosen else " %s " % SPEEDS[i]["label"]
 		speed_buttons[i].modulate = Color(1, 1, 1, 1.0 if chosen else 0.5)
+	if hour_label != null:
+		hour_label.text = _hour_text(weather.hour)
+	# Без сигнала: иначе загрузка сада и пересборка панели дёргали бы сам час.
+	if hour_slider != null and not is_equal_approx(hour_slider.value, weather.hour):
+		hour_slider.set_value_no_signal(weather.hour)
+	for i in range(weather_buttons.size()):
+		var sky_now: bool = String(WeatherScript.WEATHERS[i]["id"]) == weather.weather_id
+		var sky_word: String = String(WeatherScript.WEATHERS[i]["label"])
+		weather_buttons[i].text = "[%s]" % sky_word if sky_now else " %s " % sky_word
+		weather_buttons[i].modulate = Color(1, 1, 1, 1.0 if sky_now else 0.5)
 	for i in range(BRUSHES.size()):
 		var picked: bool = brush == int(BRUSHES[i]["width"])
 		brush_buttons[i].text = "[%s]" % BRUSHES[i]["label"] if picked else " %s " % BRUSHES[i]["label"]
@@ -2979,6 +3082,11 @@ func _selftest() -> void:
 		" дальний край острова начинал терять тень (движок гасил её с 80 м),",
 		" а за 113 м её не оставалось нигде")
 
+	# ПОГОДА (`Weather.gd`): наборы ложатся точно, смена идёт ровно, мокрость
+	# набегает и сходит в свой срок, облака закрывают заказанную долю земли.
+	for line in weather.check():
+		print(line)
+
 	var start: int = grid.cell_at(_test_spot())
 	# Меряем полный отклик на клик: изменение мира плюс пересборка кусков.
 	var t0 := Time.get_ticks_usec()
@@ -3412,6 +3520,54 @@ func _stone_surface_check(at: Vector3, reach: float) -> void:
 		snappedf(float(e["rock_reach"]) / rock_n, 0.001), ", у шипов ВНЕ швов ",
 		snappedf(float(e["off_reach"]) / off_n, 0.001), " (", int(e["off_n"]),
 		" шт.) — единица значит, что шип сидит ровно на кромке положенного кистью")
+	# НАКЛОН ПОЛЯ — третья мерка (27.09.2026). Облик (огранка, трещины, швы)
+	# прибавляется к ПОЛЮ, а видно его смещением ПОВЕРХНОСТИ, и переводит одно в
+	# другое наклон поля. Где наклон слаб, поверхность «плавает»: та же прибавка
+	# двигает срез во много раз дальше и выворачивает его складкой. Если у шипов
+	# наклон заметно ниже среднего по камню — причина была бы найдена. ЗАМЕР
+	# 27.09.2026 ЭТОГО НЕ ПОДТВЕРДИЛ: у шипов наклон такой же, как по всему камню
+	# (2.2–3.8 против 2.2–2.5), и потолок смещения, написанный по этой догадке,
+	# убрал один шип из шестнадцати. Догадка отвергнута, мерка оставлена.
+	var grad_n: float = maxf(1.0, float(e["grad_n"]))
+	var gspike_n: float = maxf(1.0, float(e["grad_spike_n"]))
+	print("Наклон поля: по всему камню ",
+		snappedf(float(e["grad_all"]) / grad_n, 0.001), " на метр, у шипов ",
+		snappedf(float(e["grad_spike"]) / gspike_n, 0.001), " (",
+		int(e["grad_spike_n"]), " шт.) — чем слабее наклон, тем дальше та же",
+		" прибавка к полю двигает поверхность")
+	# КАК ВЫГЛЯДИТ ПОЛЕ В МЕСТЕ ШИПА. По этим числам пишется сторож складок:
+	# сколько соседей по ту сторону среза, насколько врозь смотрят наклоны
+	# соседних семян (единица — в одну сторону, минус единица — навстречу).
+	var spots: Array = e["spots"]
+	if not spots.is_empty():
+		var off := 0.0
+		var across := 0.0
+		var dots := 0.0
+		var seamy := 0.0
+		var seen := 0
+		for p in spots:
+			var look: Dictionary = grid.fold_look(p)
+			if look.is_empty():
+				continue
+			seen += 1
+			off += float(look["off"])
+			across += float(look["across"])
+			dots += float(look["dot"])
+			seamy += float(look["seam"])
+		if seen > 0:
+			print("Треугольники у шипа: меньший ",
+				snappedf(float(e["area_spike"]) / float(spots.size()) * 10000.0, 0.01),
+				" см², больший ",
+				snappedf(float(e["area_spike_big"]) / float(spots.size()) * 10000.0, 0.01),
+				" см²; по всему камню меньший в паре ",
+				snappedf(float(e["area_all"]) / grad_n * 10000.0, 0.01),
+				" см² — лоскуток в доли сантиметра глазу не виден, сколько бы",
+				" градусов в нём ни было")
+			print("Поле у шипа: до половины ", snappedf(off / float(seen), 0.001),
+				", соседей по ту сторону среза ", snappedf(across / float(seen), 0.01),
+				" из шести, наклоны соседей врозь на ",
+				snappedf(rad_to_deg(acos(clampf(dots / float(seen), -1.0, 1.0))), 0.1),
+				"°, шва ", snappedf(seamy / float(seen), 0.01), " (", seen, " шт.)")
 	# ГДЕ СИДЯТ РЕЗКИЕ РЁБРА: на нависании или на том, что смотрит вверх. Общая
 	# доля их прячет: одна и та же сотая доля на кровле незаметна, а на кромке
 	# нависания читается пилой.
@@ -3545,6 +3701,10 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 							lie = absf(seam_way.normalized().dot(n))
 						# И НА КРОМКЕ ЛИ МАЗКА он сидит: 1 — ровно на кромке.
 						var reach: float = grid.lump_reach(mid)
+						# НАКЛОН ПОЛЯ ЗДЕСЬ, единиц поля на метр. Где он слаб,
+						# поверхность «плавает»: та же прибавка к полю двигает
+						# срез во много раз дальше (27.09.2026).
+						var grad: float = grid.field_slope_at(idx[0]).length()
 						for pair in [[0, 1], [1, 2], [2, 0]]:
 							var a: int = mini(ca[tri[pair[0]]], cb[tri[pair[0]]])
 							var b: int = maxi(ca[tri[pair[0]]], cb[tri[pair[0]]])
@@ -3553,14 +3713,16 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 							var key := "%d.%d|%d.%d" % [mini(a, c2), mini(b, d),
 								maxi(a, c2), maxi(b, d)]
 							if faces.has(key):
-								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie, "e": reach})
+								faces[key].append({"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie, "e": reach, "g": grad})
 							else:
-								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie, "e": reach}]
+								faces[key] = [{"n": n, "c": mid, "s": on_seam, "t": tid, "l": lie, "e": reach, "g": grad}]
 	var out := {"edges": 0, "flat": 0, "cave_worst": 0.0, "ridge_worst": 0.0,
 		"cave_sharp": 0, "ridge_sharp": 0, "cave_bend": 0, "ridge_bend": 0,
 		"sharp": 0, "sharp_seam": 0, "spike": 0, "spike_seam": 0,
 		"seam_lie": 0.0, "seam_n": 0, "spike_lie": 0.0, "spike_n": 0,
 		"rock_reach": 0.0, "rock_n": 0, "off_reach": 0.0, "off_n": 0,
+		"grad_all": 0.0, "grad_n": 0, "grad_spike": 0.0, "grad_spike_n": 0,
+		"spots": [], "area_all": 0.0, "area_spike": 0.0, "area_spike_big": 0.0,
 		"over_edges": 0, "over_sharp": 0, "over_worst": 0.0,
 		"up_edges": 0, "up_sharp": 0}
 	# СЛИПАНИЕ ПЛОСКИХ ТРЕУГОЛЬНИКОВ В ПЛИТЫ. Каждый сам себе плита, гладкое
@@ -3608,6 +3770,13 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 		if reach_here < 8.0:
 			out["rock_reach"] = float(out["rock_reach"]) + reach_here
 			out["rock_n"] = int(out["rock_n"]) + 1
+		# НАКЛОН ПОЛЯ — берём меньший из двух треугольников: складку делает то
+		# место, где поверхность держится слабее.
+		var grad_here: float = minf(float(list[0]["g"]), float(list[1]["g"]))
+		out["grad_all"] = float(out["grad_all"]) + grad_here
+		out["grad_n"] = int(out["grad_n"]) + 1
+		out["area_all"] = float(out["area_all"]) \
+			+ minf(tri_area[int(list[0]["t"])], tri_area[int(list[1]["t"])])
 		if on_seam_edge:
 			# СРЕДНЕЕ ПО ВСЕМ ШВАМ — с чем сравнивать шипы.
 			out["seam_lie"] = float(out["seam_lie"]) + maxf(float(list[0]["l"]),
@@ -3620,6 +3789,20 @@ func _edge_stats(lo: Vector3i, hi: Vector3i) -> Dictionary:
 				out["sharp_seam"] = int(out["sharp_seam"]) + 1
 			if bend > 90.0:
 				out["spike"] = int(out["spike"]) + 1
+				out["grad_spike"] = float(out["grad_spike"]) + grad_here
+				out["grad_spike_n"] = int(out["grad_spike_n"]) + 1
+				# МЕСТО ШИПА — списком: по нему стенд расспрашивает поле (см.
+				# `fold_look`), а сторож складок проверяется на настоящих
+				# складках, а не на догадке о них.
+				out["spots"].append(Vector3(list[0]["c"]))
+				# И ВЕЛИЧИНА САМИХ ТРЕУГОЛЬНИКОВ. Ребро между двумя ЛОСКУТКАМИ
+				# в доли квадратного сантиметра глазу не видно вовсе, сколько бы
+				# градусов в нём ни было, — а в счёт шипов оно идёт наравне с
+				# настоящим зубцом. Без этой мерки не отличить одно от другого.
+				var a0: float = tri_area[int(list[0]["t"])]
+				var a1: float = tri_area[int(list[1]["t"])]
+				out["area_spike"] = float(out["area_spike"]) + minf(a0, a1)
+				out["area_spike_big"] = float(out["area_spike_big"]) + maxf(a0, a1)
 				if seamy:
 					out["spike_seam"] = int(out["spike_seam"]) + 1
 					out["spike_lie"] = float(out["spike_lie"]) + maxf(
@@ -3841,6 +4024,9 @@ func _rock_bench(args: PackedStringArray) -> void:
 	stroke_gain = _arg_num(args, "--gain", stroke_gain)
 	grid.use_blocks = not "--noblock" in args
 	grid.block_round = _arg_num(args, "--round", grid.block_round)
+	grid.seam_wide = _arg_num(args, "--seamwide", grid.seam_wide)
+	grid.rock_smooth = _arg_num(args, "--smooth", grid.rock_smooth)
+	grid.rock_smooth_rounds = _arg_num(args, "--smoothn", grid.rock_smooth_rounds)
 	grid.block_faces = int(_arg_num(args, "--faces", float(grid.block_faces)))
 	grid.block_tall = _arg_num(args, "--tall", grid.block_tall)
 	print("Стенд камня: огранка ", grid.facet_amp, ", тяга пластов ",
@@ -3859,6 +4045,11 @@ func _rock_bench(args: PackedStringArray) -> void:
 		_seed_massif(_test_spot(), 3, 5)
 	else:
 		_seed_structures()
+	# ПРИГЛАЖИВАЕМ ПОЛЕ И ЗДЕСЬ, как в обстановке острова: подбор идёт десятками
+	# прогонов, а остров считается минутами против пяти секунд у этого стенда.
+	var folded: int = grid.smooth_rock(grid.rock_smooth, grid.rock_smooth_rounds)
+	if folded > 0:
+		print("Поле камня поправлено в ", folded, " местах")
 	_flush_chunks()
 	_stone_surface_check(_cliff_focus, reach)
 	_rock_cavity_report(reach)
@@ -3909,6 +4100,10 @@ func _seed_scene() -> void:
 	var spikes: int = grid.solo_spikes(true)
 	grid.end_batch()
 	grid.lift_edits()
+	# ПОЛЕ КАМНЯ ПРИГЛАЖИВАЕТСЯ ПОСЛЕДНИМ, по готовому: до `end_batch` оно ещё
+	# досчитывается, а после `_flush_chunks` меши собраны и правка поля в них уже
+	# не попадёт. По умолчанию выключено — см. `smooth_rock`.
+	var folded: int = grid.smooth_rock(grid.rock_smooth, grid.rock_smooth_rounds)
 	var dabbed := Time.get_ticks_msec() - started
 	var flushed := Time.get_ticks_msec()
 	_flush_chunks()
@@ -3935,7 +4130,8 @@ func _seed_scene() -> void:
 		print("Сцена: ", scene_id, " — породы не встало вовсе")
 		return
 	print("Сцена: снято одиночных семян (тонких клиньев) — ", spikes,
-		", осталось ", grid.solo_spikes(false), " — норма ноль")
+		", осталось ", grid.solo_spikes(false), " — норма ноль; поле камня",
+		" поправлено в ", folded, " местах")
 	print("Сцена: ", scene_id, ", ячеек с породой — ", stony, ", высота скал ",
 		snappedf(top - foot, 0.1), " м, отвесных мест ",
 		snappedf(100.0 * float(steep) / float(stony), 0.1),
@@ -4020,9 +4216,27 @@ func _scene_bench(args: PackedStringArray) -> void:
 		print("Нагрузка машины: ", snappedf(busy, 0.01), "× — замерам можно верить")
 	var many: int = int(_arg_num(args, "--islands", 3.0))
 	var seed0: int = int(_arg_num(args, "--seed", float(WORLD_SEED + 1)))
-	# МЯГКОСТЬ СРЕЗА ГЛЫБЫ КРУГОМ КИСТИ — ключом, как и у стенда камня: перебор
-	# значений иначе требует правки кода между прогонами, а их десяток.
-	grid.block_clip = _arg_num(args, "--clip", grid.block_clip)
+	# КЛЮЧИ СТЕНДА — СЛОВАРЁМ, И НАКЛАДЫВАЮТСЯ ПЕРЕД КАЖДЫМ ОСТРОВОМ.
+	#
+	# ГРАБЛЯ 27.09.2026, и она стоила двух прогонов. `_build_world` заводит НОВУЮ
+	# сетку, а ключи выставлялись один раз в начале — до второго острова они не
+	# доживали, и четыре острова из пяти шли с умолчаниями. Выдало это то же, что
+	# и всегда: числа вышли теми же до последней цифры, что и без ключа.
+	#
+	# Здесь: мягкость среза глыбы кругом кисти, потолок смещения от облика,
+	# полуширина шва, как складываются две выемки, и сила самих частей облика —
+	# шва, трещин и огранки, чтобы разобрать камень по слагаемым.
+	var knobs: Dictionary = {
+		"block_clip": _arg_num(args, "--clip", grid.block_clip),
+		"seam_wide": _arg_num(args, "--seamwide", grid.seam_wide),
+		"seam_deep": _arg_num(args, "--seam", grid.seam_deep),
+		"crack_deep": _arg_num(args, "--deep", grid.crack_deep),
+		"facet_amp": _arg_num(args, "--facet", grid.facet_amp),
+		"rock_smooth": _arg_num(args, "--smooth", grid.rock_smooth),
+		"rock_smooth_rounds": _arg_num(args, "--smoothn", grid.rock_smooth_rounds),
+	}
+	for k in knobs:
+		grid.set(k, knobs[k])
 	scene_id = "rocks"
 	var total := 0
 	for n in range(many):
@@ -4036,6 +4250,9 @@ func _scene_bench(args: PackedStringArray) -> void:
 			chunk_list.clear()
 			_dirty_chunks.clear()
 			_build_world()
+			# Сетка новая — ключи на неё заново (см. грабли выше).
+			for k in knobs:
+				grid.set(k, knobs[k])
 			await _fill_world()
 		var t0 := Time.get_ticks_msec()
 		_seed_scene()
@@ -8139,6 +8356,8 @@ func _shot_mode() -> void:
 	plants.time_scale = 0.0
 	plants.flush_now()
 	plants.settle_show()
+	# И погода: смена доведена, облака и капли стоят в одном и том же миге.
+	weather.freeze(WeatherScript.SHOT_CLOCK)
 	for _i in range(12):
 		await get_tree().process_frame
 	await RenderingServer.frame_post_draw

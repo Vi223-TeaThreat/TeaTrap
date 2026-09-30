@@ -50,6 +50,9 @@ uniform float wrap : hint_range(0.0, 1.0) = 0.55;
 uniform vec3 glow : source_color = vec3(0.20, 0.30, 0.13);
 // Тень у зелени не серая, а холодная и зеленоватая.
 uniform vec3 shade_tint : source_color = vec3(0.42, 0.52, 0.44);
+// Просвет, тень и мокрость ведёт погода (`Weather.gd`); числа выше — пасмурные,
+// прежние. Мокрая зелень темнее: вода на листе гасит рассеяние.
+uniform float wet = 0.0;
 
 // ДОГОН РОСТА. Меш сада собирается редко — несколько раз за жизнь растения, — и
 // собирается на тот размер, какой у растения В МИГ СБОРКИ. Дальше его ведёт
@@ -118,7 +121,11 @@ void fragment() {
 	if (c.a < cutoff) {
 		discard;
 	}
-	ALBEDO = c.rgb * vertex_tint(COLOR.rgb);
+	vec3 paint = c.rgb * vertex_tint(COLOR.rgb);
+	if (wet > 0.0) {
+		paint *= 1.0 - 0.18 * wet;
+	}
+	ALBEDO = paint;
 	vec3 n = normalize(v_nrm);       // одна и та же с обеих сторон
 	if (bump > 0.0) {
 		// Рама поперёк поверхности: куда по ней идёт «вправо» и «вниз» по

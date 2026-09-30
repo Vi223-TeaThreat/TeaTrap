@@ -598,6 +598,11 @@ func settle_show() -> void:
 		_blade_mat.set_shader_parameter("grow_settle", true)
 
 
+# Материал зелени — погоде (`Weather.gd`): тень, просвет и мокрость у зелени свои.
+func blade_material() -> ShaderMaterial:
+	return _blade_mat
+
+
 func setup(main_ref: Node3D) -> void:
 	main = main_ref
 	_rng.seed = 20260811

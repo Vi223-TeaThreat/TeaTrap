@@ -1508,6 +1508,103 @@ func begin_batch() -> void:
 # месту.
 const SOLO_KEEP: int = 1
 
+# Наклон ГОТОВОГО поля — вместе с огранкой, трещинами и швом. `_field_slope`
+# смотрит только массу (её и надо знать огранке, чтобы не считать себя саму), а
+# складку делает именно готовое поле.
+func _full_slope(index: int) -> Vector3:
+	var here: Vector3 = seeds[index]
+	var f0: float = fill[index]
+	var g := Vector3.ZERO
+	var at := index * 6
+	for k in range(6):
+		var s: int = nb_table[at + k]
+		if s < 0:
+			continue
+		var d: Vector3 = seeds[s] - here
+		var len2: float = d.length_squared()
+		if len2 > 0.000001:
+			g += d * ((fill[s] - f0) / len2)
+	return straighten(index, g)
+
+
+# =============================================================================
+#  ПОЛЕ КАМНЯ ПРИГЛАЖИВАЕТСЯ НА ВОЛОС (27.09.2026)
+# =============================================================================
+#
+# Шипы не принадлежат ни одной части облика: выключи шов — их вдвое больше,
+# выключи трещины — тоже больше (замер на пяти островах). И по семенам складку
+# не поймать: у шипа наклоны соседних семян расходятся всего на 40–50°, а
+# выворачивает поверхность уже сама решётка внутри ячейки.
+#
+# Значит, лечить надо не место и не причину, а КРУТИЗНУ ПЕРЕГИБА вообще —
+# общим приглаживанием поля там, где стоит порода. Плоскость от усреднения по
+# соседям не меняется вовсе (у линейного поля среднее равно середине), грань
+# остаётся гранью, а страдает ровно то, что решётка и не держит: самый резкий
+# перегиб.
+#
+# Читаем старое, пишем новое — иначе поправка зависела бы от порядка обхода.
+func smooth_rock(mix: float, rounds: float = 1.0, near: float = 1.2) -> int:
+	if mix <= 0.0:
+		return 0
+	var done := 0
+	for _r in range(maxi(1, int(rounds))):
+		done += _smooth_round(mix, near)
+	return done
+
+
+func _smooth_round(mix: float, near: float) -> int:
+	var who := PackedInt32Array()
+	var soft := PackedFloat32Array()
+	for j in range(fill.size()):
+		# Только порода и только у самой поверхности: глубину тела и чистую
+		# землю трогать незачем, а дешевле — не обходить их вовсе.
+		if stone_soft[j] < 0.02 or absf(fill[j] - 0.5) > near:
+			continue
+		var at: int = j * 6
+		var sum: float = 0.0
+		var kin := 0
+		for k in range(6):
+			var s: int = nb_table[at + k]
+			if s < 0:
+				continue
+			sum += fill[s]
+			kin += 1
+		if kin == 0:
+			continue
+		who.append(j)
+		soft.append(lerpf(fill[j], sum / float(kin), mix))
+	for i in range(who.size()):
+		fill[who[i]] = soft[i]
+	return who.size()
+
+
+# ЧТО ЗА ПОЛЕ В МЕСТЕ ШИПА — стенду (`_stone_surface_check`). Сторож складок
+# ищет их по наклонам соседних семян, и прежде чем ему верить, надо увидеть, как
+# складка выглядит числами: далеко ли поле от половины, сколько соседей по ту
+# сторону среза, насколько врозь смотрят наклоны, много ли тут породы и шва.
+func fold_look(p: Vector3) -> Dictionary:
+	var j: int = cell_at(p)
+	if j < 0:
+		return {}
+	var g0: Vector3 = _full_slope(j)
+	var across := 0
+	var kin := 0
+	var worst: float = 1.0
+	var at: int = j * 6
+	for k in range(6):
+		var s: int = nb_table[at + k]
+		if s < 0:
+			continue
+		kin += 1
+		if (fill[s] - 0.5) * (fill[j] - 0.5) < 0.0:
+			across += 1
+		var gs: Vector3 = _full_slope(s)
+		if g0.length_squared() > 0.000000001 and gs.length_squared() > 0.000000001:
+			worst = minf(worst, g0.normalized().dot(gs.normalized()))
+	return {"off": absf(fill[j] - 0.5), "across": across, "kin": kin,
+		"dot": worst, "stone": stone_soft[j], "seam": seam[j]}
+
+
 func solo_spikes(fix: bool) -> int:
 	var many := 0
 	for j in range(fill.size()):
@@ -3082,6 +3179,11 @@ func _facet(index: int) -> float:
 		crack_cut[index] = _cut_here
 	# ШОВ МЕЖДУ ГЛЫБАМИ, положенными разными мазками. Вычитание, а не прибавка:
 	# выемка в пустоте ничего не создаёт, и её не нужно сторожить.
+	# ДВЕ ВЫЕМКИ В ОДНОМ МЕСТЕ СКЛАДЫВАЮТСЯ, и это проверено, а не принято на
+	# веру: 27.09.2026 пробовал брать наибольшую из них мягко (трещина и шов по
+	# смыслу говорят одно, «здесь порода расколота»). На трёх островах шипов
+	# вышло столько же — 9, только переехали с острова на остров. Разбор — README,
+	# «Шипы: разбор без виноватого».
 	out -= seam[index] * seam_deep * s * s
 	if out > 0.0:
 		# ПРИБАВЛЯТЬ ПОРОДУ МОЖНО ТОЛЬКО ТАМ, ГДЕ ОНА УЖЕ ЕСТЬ. Огранка — это
@@ -3256,6 +3358,10 @@ var side_pull: float = 0.0
 # Глубина шва МЕЖДУ ГЛЫБАМИ РАЗНЫХ МАЗКОВ — см. `_refresh_seam`. Это другой шов,
 # не тот, что по трещинам: этот делит массив по руке, а не по природной сетке.
 var seam_deep: float = 0.28
+# НАСКОЛЬКО ПРИГЛАЖИВАЕТСЯ ПОЛЕ КАМНЯ у самой поверхности — доля пути к среднему
+# по соседям (см. `smooth_rock`). Ноль — не трогать.
+var rock_smooth: float = 0.0
+var rock_smooth_rounds: float = 1.0
 # ДОКУДА МАЗОК ДОТЯГИВАЕТСЯ, долей своего радиуса. Единица — как было: масса
 # сходит на нет ровно на краю кисти. Меньше — мазок держится в своих границах
 # туже, но и стык с нетронутой землёй укладывается в меньшее расстояние, а это
@@ -3398,8 +3504,9 @@ const LUMP_CORE: float = 0.8
 # ... и гаснет к этой доле радиуса: там кончается сырая краска мазка.
 const LUMP_FADE: float = 0.92
 # Полуширина шва между глыбами. Шире ячейки решётки — иначе вместо ложбины
-# выйдет дрожь; см. тот же расчёт у швов по трещинам.
-const SEAM_WIDE: float = 1.4
+# выйдет дрожь; см. тот же расчёт у швов по трещинам. Переменная, а не
+# постоянная: заход против шипов перебирает её ключом стенда (`--seamwide=`).
+var seam_wide: float = 1.4
 
 func _lump_key(p: Vector3) -> Vector3i:
 	return Vector3i(int(floor(p.x / LUMP_CELL)), int(floor(p.y / LUMP_CELL)),
@@ -3631,7 +3738,7 @@ func _refresh_seam(index: int) -> void:
 			var d: float = p.distance_to(lumps[k]["pos"])
 			if d > r * LUMP_FADE:
 				continue
-			var s: float = (1.0 - smoothstep(0.0, SEAM_WIDE, (d - d1) * 0.5)) \
+			var s: float = (1.0 - smoothstep(0.0, seam_wide, (d - d1) * 0.5)) \
 				* (1.0 - smoothstep(r * LUMP_CORE, r * LUMP_FADE, d))
 			if s > best:
 				best = s
@@ -3852,6 +3959,12 @@ func _slope_steep(g: Vector3) -> float:
 
 func _steepness(index: int) -> float:
 	return _slope_steep(_field_slope(index))
+
+
+# Наклон поля у семени — СТЕНДУ (`_edge_stats`). По нему видно, где поверхность
+# «плавает»: чем наклон слабее, тем дальше та же прибавка к полю двигает срез.
+func field_slope_at(index: int) -> Vector3:
+	return _field_slope(index)
 
 
 # Семя по узлу решётки — по этому строится разбиение на тетраэдры.
