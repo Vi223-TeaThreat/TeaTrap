@@ -81,7 +81,20 @@ uniform float world_now = 0.0;
 // КАДРУ — САД КАК ЕСТЬ: снимок (`settle_show`) показывает собранное, без доводки.
 uniform bool grow_settle = false;
 
+// СОСТОЯНИЕ ПО УСЛОВИЯМ (её решения 02.10.2026). `CUSTOM2` — ступень была, ступень
+// стала (−4 — умершее), миг смены по часам мира и как сминать умершее: 0 — никак
+// (лоза: её колено держит соседей), 1 — мельчает к середине (кочка: так она
+// остаётся на склоне), 2 — ещё и оседает с наклоном (куст мака, он стоит на
+// ровном). Сроки кладёт код.
+uniform float state_ease = 3.0;
+uniform float dying_secs = 15.0;
+uniform float dry_secs = 4.0;
+uniform float dead_shrink = 0.25;
+uniform float dead_sag = 0.45;
+uniform float dead_lean = 0.35;
+
 varying vec3 v_nrm;
+varying vec3 v_state;
 
 void vertex() {
 	if (!grow_settle) {
@@ -93,7 +106,54 @@ void vertex() {
 		float grown = max(1.0 - CUSTOM1.y, ahead - owe);
 		VERTEX = CUSTOM0.xyz + (VERTEX - CUSTOM0.xyz) * grown;
 	}
+	v_state = vec3(0.0);
+	if (CUSTOM2.x != 0.0 || CUSTOM2.y != 0.0) {
+		float age = max(world_now - CUSTOM2.z, 0.0);
+		float ease = grow_settle ? 1.0 : smoothstep(0.0, 1.0, age / state_ease);
+		float lv = mix(clamp(CUSTOM2.x, -3.0, 3.0), clamp(CUSTOM2.y, -3.0, 3.0), ease);
+		float dying = 0.0;
+		float dry = 0.0;
+		if (CUSTOM2.y < -3.5) {
+			dying = 1.0;
+			dry = grow_settle ? 1.0 : clamp(age / dry_secs, 0.0, 1.0);
+		} else if (CUSTOM2.y < -2.5) {
+			dying = clamp(age / dying_secs, 0.0, 1.0);
+		}
+		v_state = vec3(lv, dying, dry);
+		if (CUSTOM2.w > 0.5 && dry > 0.0) {
+			vec3 c = CUSTOM0.xyz;
+			vec3 off = (VERTEX - c) * (1.0 - dead_shrink * dry);
+			if (CUSTOM2.w > 1.5) {
+				float h = max(off.y, 0.0);
+				off.y -= dead_sag * dry * h;
+				vec2 way = vec2(sin(dot(c.xz, vec2(12.9898, 78.233))),
+					cos(dot(c.xz, vec2(39.3468, 11.135))));
+				off.xz += normalize(way + vec2(0.0001)) * (h * h * dead_lean * dry);
+			}
+			VERTEX = c + off;
+		}
+	}
 	v_nrm = normalize((MODELVIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+}
+
+// Угнетение — в оранжево-красное, стимуляция — в сочный зелёный; трогаем только
+// зелёную ткань, иначе алый мак и белая метёлка перекрасились бы вместе с листвой.
+// Засыхание — всему растению.
+vec3 state_paint(vec3 paint, vec3 st) {
+	float luma = dot(paint, vec3(0.299, 0.587, 0.114));
+	float green = clamp((paint.g - max(paint.r, paint.b)) / max(paint.g, 0.0001) * 2.5,
+		0.0, 1.0);
+	if (st.x < 0.0) {
+		float sev = clamp(-st.x / 3.0, 0.0, 1.0);
+		vec3 hue = mix(vec3(1.75, 0.95, 0.32), vec3(2.3, 0.48, 0.24), sev);
+		paint = mix(paint, luma * hue, 0.85 * sev * green);
+	} else if (st.x > 0.0) {
+		float lush = clamp(st.x / 3.0, 0.0, 1.0) * 0.6;
+		paint = mix(paint, paint * vec3(0.78, 1.28, 0.7), lush * green);
+	}
+	paint *= 1.0 - 0.25 * st.y;
+	vec3 straw = vec3(luma * 0.85 + 0.05) * vec3(1.0, 0.82, 0.55);
+	return mix(paint, straw, st.z);
 }
 
 // ЦВЕТ ВЕРШИН И ВЕБ-СБОРКА. Цвет кладётся в меш переведённым в линейное
@@ -122,6 +182,9 @@ void fragment() {
 		discard;
 	}
 	vec3 paint = c.rgb * vertex_tint(COLOR.rgb);
+	if (v_state.x != 0.0 || v_state.y > 0.0 || v_state.z > 0.0) {
+		paint = state_paint(paint, v_state);
+	}
 	if (wet > 0.0) {
 		paint *= 1.0 - 0.18 * wet;
 	}

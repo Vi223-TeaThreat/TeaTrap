@@ -67,6 +67,27 @@ const BLOOM_GRACE: float = 20.0
 
 const GEN_MAX: int = 7
 
+# СОСТОЯНИЕ ПО УСЛОВИЯМ — семь ступеней, её решения 02.10.2026 (README, «Состояние
+# растения зависит от условий»). Ступень живёт у кочки, у ветви лианы, у куста мака.
+const STATE_MIN: int = -3
+const STATE_MAX: int = 3
+const STATE_DEAD: int = -4                  # только для облика: умершее
+# Скорость, обилие цветения и на сколько ступеней жизни раньше оно идёт — по
+# ступеням от −3 до +3. Вид может завести свои таблицы в карточке (`state_pace`,
+# `state_bloom`): у лианы прибавка мягче (её слово 02.10.2026).
+const STATE_PACE := [0.0, 0.5, 0.75, 1.0, 1.25, 1.5, 1.5]
+const STATE_BLOOM := [0.0, 0.0, 0.5, 1.0, 1.25, 1.5, 2.0]
+const STATE_EARLY := [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.5]
+const STATE_BLOOM_SIZE: float = 0.75        # немного угнетённое цветёт мельче
+const DYING_SECS: float = 15.0
+const DRY_SECS: float = 4.0
+const STATE_EASE: float = 3.0
+const OVER_GROW: float = 1.3
+const OVER_SECS: float = 30.0
+const DEAD_LEAF: float = 0.6
+const DEAD_LEAF_SAG: float = 2.5
+const MEET_STATE_MIN: int = 0
+
 # Ступеней роста, на которых растение живёт своей жизнью: по ним считаются
 # возраст картинки и события вроде встречи видов.
 #
@@ -255,6 +276,9 @@ var _stub_sectors: int = 0
 var _met_touch: int = 0                 # касаний, прошедших мерку зазора
 var _met_born: int = 0                  # и сколько из них дали третий вид
 var _met_deny: int = 0                  # ... а сколько сорвалось после броска
+# ПРОБА СОСТОЯНИЙ, пока условия не прописаны: ключ `--state=` — ступень от −3 до 3,
+# `dead` или `bands` (семь полос по острову с запада на восток). Пусто — всё нейтрально.
+var state_test: String = ""
 # Отпечаток собранных мешей — см. `_print_bench` в `SpaceMain.gd`.
 var print_meshes: bool = false
 var mesh_print: int = 0
@@ -565,6 +589,7 @@ func _cost_pace(p: Dictionary, def: Dictionary) -> float:
 	var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) \
 		* (1.0 + def["shade_love"] * _shade(p))
 	rate *= 1.0 + def["joint_love"] * maxf(0.0, main.grid.cavity_of(int(p["cell"])))
+	rate *= _state_pace(p, def)
 	if def.has("flat_slow"):
 		rate *= lerpf(float(def["flat_slow"]), 1.0,
 			clampf(float(p.get("prop", 0.0)), 0.0, 1.0))
@@ -586,7 +611,7 @@ func _cost_way_to_m(way: float) -> float:
 # кочек — ширина. Той же меркой, какой их собирает сборка.
 func _show_size(p: Dictionary, def: Dictionary, m: float) -> float:
 	if _is_poppy(def):
-		return poppy_grow(def, m)
+		return poppy_grow(def, m) * _size_k(p)
 	return tuft_span_at(p, m)
 
 
@@ -624,6 +649,12 @@ func setup(main_ref: Node3D) -> void:
 	_measure_petal_tone(sheet)
 	_blade_mat.set_shader_parameter("blades", sheet)
 	_blade_mat.set_shader_parameter("bumps", _make_bumps(sheet))
+	_blade_mat.set_shader_parameter("state_ease", STATE_EASE)
+	_blade_mat.set_shader_parameter("dying_secs", DYING_SECS)
+	_blade_mat.set_shader_parameter("dry_secs", DRY_SECS)
+	for a in OS.get_cmdline_user_args():
+		if a.begins_with("--state="):
+			state_test = a.substr(8)
 	_blade_mat.set_shader_parameter("body_cell",
 		Vector2(1.0 / float(COLS), 1.0 / float(STAGES)))
 	# ГОЛОЕ ТЕЛО, БЕЗ РЕЛЬЕФА — для сравнения двух кадров одного места, как с
@@ -1707,6 +1738,26 @@ func vine_stats() -> Dictionary:
 	# спустя дни.
 	var buried := 0
 	var sprays := 0            # метёлок (цветоносов)
+	# ... и порознь: на ровном месте и на склоне, вместе со звеньями под ними —
+	# на сотню звеньев своего места (её решение 2026-10-01, см. `bloom_slope`).
+	var sprays_flat := 0
+	var sprays_slope := 0
+	var links_flat := 0
+	var links_slope := 0
+	# ОТЧЕГО ЛОЗА НЕ ЦВЕТЁТ — ЦЕПОЧКОЙ, А НЕ ОДНИМ ЧИСЛОМ. Метёлок на стенде
+	# выходит одна на всю лозу, и по этой единице не понять, где теряются
+	# остальные: годных узлов мало (поколение), доля их режет, или кисти негде
+	# висеть. Считаем все три ступени — лечить надо ту, на которой теряется.
+	var bloom_able := 0        # узлов годного поколения (`bloom_from`)
+	var bloom_picked := 0      # ... из них выбранных долей (`bloom_share`)
+	var bloom_gave := 0        # ... из них отступившихся: негде висеть
+	# МЕТЁЛКА-ОГРЫЗОК — та, что встала на первом же звене. Первое звено это
+	# ГОЛАЯ НОЖКА без цветков (см. `_bloom_plan`), и такая метёлка на кадре не
+	# кисть, а торчащая палочка. Место ей меряют вперёд (`bloom_room`, отвесом),
+	# а идёт она конусом (`_bloom_clear`) — на склоне эти две мерки могут и
+	# разойтись, и тогда ножка выходит, а кисти за ней нет.
+	var spray_heads: Dictionary = {}
+	var spray_grew: Dictionary = {}
 	var spray_at: Array = []   # где начинается каждая — для мерки кучности
 	var spray_gap := 1e9       # и на сколько сошлись две самые близкие
 	var flowers := 0           # цветков на них
@@ -1740,6 +1791,26 @@ func vine_stats() -> Dictionary:
 		if not _is_stem(PlantsData.ITEMS[p["id"]]):
 			continue
 		links += 1
+		# ЗВЕНЬЯ ПОРОЗНЬ ПО МЕСТУ — знаменатель к метёлкам на ровном и на склоне.
+		# Звенья самой метёлки в счёт не идут: они не зацветают, они и есть
+		# цветение, и попади они сюда — густо цветущее место само себе и
+		# разбавило бы долю.
+		if int(p.get("bloom", 0)) <= 0:
+			if _tilt_of(p) >= TILT_SLOPE:
+				links_slope += 1
+			else:
+				links_flat += 1
+			# ... и три ступени отбора на цветение, по тем же меркам, что в
+			# `_bloom_ready`: поколение, доля, отступившиеся.
+			var vine_def: Dictionary = PlantsData.ITEMS[p["id"]]
+			if vine_def.has("bloom_from") \
+					and int(p.get("order", 0)) >= _bloom_from(p, vine_def):
+				bloom_able += 1
+				if _hash01(int(p["salt"]) + 6607) < _bloom_share_at(p, vine_def):
+					bloom_picked += 1
+					if int(p.get("bloom_try", 0)) \
+							>= int(vine_def.get("bloom_tries", 3)):
+						bloom_gave += 1
 		if _buried(Vector3(p["pos"])):
 			buried += 1
 		# КЛУБОК ИЩЕМ ПО СТЕБЛЮ, А НЕ ПО МЕТЁЛКАМ. Кисти висят рядом и плотно —
@@ -1886,8 +1957,19 @@ func vine_stats() -> Dictionary:
 		# и в породу ей войти проще, чем листу: лист хоть отходит от опоры, а
 		# кисть просто падает вниз, куда бы там ни было.
 		if int(p.get("bloom", 0)) > 0:
+			if int(p["bloom"]) > 1:
+				spray_grew[int(p.get("from", -1))] = true
 			if int(p["bloom"]) == 1:
 				sprays += 1
+				spray_heads[pid] = true
+				# И ПОРОЗНЬ — НА РОВНОМ И НА СКЛОНЕ (её решение 2026-10-01).
+				# Одним числом метёлок эта просьба не мерится вовсе: лоза на
+				# пробном поле стоит и на ровном, и на камне, и общая сотня
+				# ничего не говорит о том, где именно она зацвела.
+				if _tilt_of(p) >= TILT_SLOPE:
+					sprays_slope += 1
+				else:
+					sprays_flat += 1
 				# КУЧНОСТЬ МЕТЁЛОК — правило пользователя «не ближе 5–7 см».
 				# Числом метёлок оно не мерится: десять поодаль и десять в кучу
 				# дают одну и ту же десятку, а на кадре это разные вещи.
@@ -2140,6 +2222,11 @@ func vine_stats() -> Dictionary:
 		"rode": riding, "leaves": leaves, "leaf_in": leaf_in,
 		"buried": buried,
 		"sprays": sprays, "flowers": flowers, "flower_in": flower_in,
+		"sprays_flat": sprays_flat, "sprays_slope": sprays_slope,
+		"links_flat": links_flat, "links_slope": links_slope,
+		"bloom_able": bloom_able, "bloom_picked": bloom_picked,
+		"bloom_gave": bloom_gave, "spray_stub": _spray_stubs(spray_heads,
+			spray_grew),
 		"spray_len": spray_len, "spray_drop": spray_drop,
 		"coil": rad_to_deg(coil), "coiled": coiled,
 		"hangs": hangs, "plaits": plaits, "plait": plait, "drop": drop,
@@ -2184,10 +2271,10 @@ func _emit_poppy(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var m: float = float(p["m"])
 	var base: Vector3 = p["pos"]
 	var nrm: Vector3 = p["nrm"]
-	var bulk: float = float(p["bulk"])
+	var bulk: float = float(p["bulk"]) * _size_k(p)
 	var stage: int = clampi(int(m * float(STAGES)), 0, STAGES - 1)
 	var shade: float = float(p["body"]["shade"])
-	var grow: float = poppy_grow(def, m)
+	var grow: float = poppy_grow(def, m) * _size_k(p)
 
 	# ДОГОН: КУСТ ЕДЕТ К НОВОМУ РАЗМЕРУ ОТ ПРЕЖНЕГО, а не подскакивает на ступени.
 	#
@@ -2288,8 +2375,8 @@ func _poppy_lay(p: Dictionary, def: Dictionary, pid: int) -> void:
 	var m: float = float(p["m"])
 	var base: Vector3 = p["pos"]
 	var nrm: Vector3 = p["nrm"]
-	var bulk: float = float(p["bulk"])
-	_morph_track(null, p, def, base, poppy_grow(def, m), m)
+	var bulk: float = float(p["bulk"]) * _size_k(p)
+	_morph_track(null, p, def, base, poppy_grow(def, m) * _size_k(p), m)
 	var up: Vector3 = (Vector3.UP * 3.0 + nrm).normalized()
 	var side: Vector3 = up.cross(Vector3.RIGHT)
 	if side.length_squared() < 0.001:
@@ -2306,7 +2393,7 @@ func _poppy_lay(p: Dictionary, def: Dictionary, pid: int) -> void:
 	bush_lay_top = maxf(bush_lay_top, lay_ms)
 	_bush_slice[pid] = {"m": m, "pos": base, "nrm": nrm, "paths": paths,
 		"blocks": [], "c0": _morph_c0, "c1": _morph_c1, "done": false,
-		"up": up, "side": side, "fore": fore}
+		"up": up, "side": side, "fore": fore, "look": _poppy_look(p)}
 
 
 # СОСЕДИ КУСТА, ПОСАЖЕННЫЕ РАНЬШЕ НЕГО, — в размахе двух кустов. Ищем по грубой
@@ -2357,7 +2444,7 @@ func _poppy_waits_for(p: Dictionary, pid: int) -> int:
 # ни стебель, ни венчик соседа ему не помеха.
 func _poppy_neighbor_stems(p: Dictionary, def: Dictionary, pid: int) -> Array:
 	var out: Array = []
-	var bulk: float = float(p["bulk"])
+	var bulk: float = float(p["bulk"]) * _size_k(p)
 	var high: float = float(def.get("stem_high", 0.4)) * bulk
 	var centre: Vector3 = Vector3(p["pos"]) + Vector3.UP * (high * 0.5)
 	var room: float = high * POPPY_NEAR_K + float(def.get("head_long", 0.05)) * bulk
@@ -2411,7 +2498,12 @@ func _poppy_ready(p: Dictionary, pid: int) -> bool:
 func _poppy_kept_fits(kept: Dictionary, p: Dictionary) -> bool:
 	return absf(float(kept.get("m", -1.0)) - float(p["m"])) <= 0.000001 \
 		and Vector3(kept.get("pos", Vector3.INF)) == Vector3(p["pos"]) \
-		and Vector3(kept.get("nrm", Vector3.INF)) == Vector3(p["nrm"])
+		and Vector3(kept.get("nrm", Vector3.INF)) == Vector3(p["nrm"]) \
+		and kept.get("look", Vector2(0.0, 1.0)) == _poppy_look(p)
+
+
+func _poppy_look(p: Dictionary) -> Vector2:
+	return Vector2(float(state_of(p)), _size_k(p))
 
 
 # ПОДГОТОВКА КУСТА — ПО ШАГУ ЗА РАЗ (13.09.2026).
@@ -2450,7 +2542,7 @@ func _poppy_step(p: Dictionary, def: Dictionary, pid: int) -> void:
 		var t_blk: int = Time.get_ticks_usec()
 		if float(def.get("petal_room", 0.0)) > 0.0:
 			kept["blocks"] = _poppy_blocks(p, def, kept["paths"], kept["side"],
-				kept["fore"], kept["up"], float(p["bulk"]))
+				kept["fore"], kept["up"], float(p["bulk"]) * _size_k(p))
 		var blk_ms: float = float(Time.get_ticks_usec() - t_blk) / 1000.0
 		bush_block_ms += blk_ms
 		bush_block_top = maxf(bush_block_top, blk_ms)
@@ -2702,9 +2794,10 @@ func _poppy_head_ball(def: Dictionary, plan: Dictionary, bulk: float) -> Diction
 			"r": pod_r}
 	var open_at: float = float(def.get("open_at", 0.6))
 	var full_at: float = float(def.get("open_full", 1.0))
-	var open_k: float = clampf((float(plan["mine"]) - open_at)
+	var open_k: float = clampf((float(plan.get("head_m", plan["mine"])) - open_at)
 		/ maxf(full_at - open_at, 0.001), 0.0, 1.0)
-	var head: float = float(poppy_head_plan(def, bulk, open_k)["head"])
+	var head: float = float(poppy_head_plan(def, bulk * float(plan.get("flower_k", 1.0)),
+		open_k)["head"])
 	var level: int = poppy_open_level(int(plan["salt"]), def)
 	return {"at": top + tip * (head * 0.3),
 		"r": poppy_corolla_reach(def, level) * head * POPPY_FLOWER_CORE}
@@ -3075,10 +3168,18 @@ func poppy_stem_shape(p: Dictionary, def: Dictionary, s: int, many: int,
 
 	var open_at: float = float(def.get("open_at", 0.6))
 
-	var is_bud: bool = mine < open_at
+	var bloom_k: float = _bloom_k(p, def)
+	var shut: bool = bloom_k <= 0.0 or (bloom_k < 1.0 and _mix01(salt + 9029) >= bloom_k)
+	var head_m: float = mine
+	var early: float = _bloom_early(p)
+	if shut:
+		head_m = minf(mine, float(def.get("bud_split_from", 2.0 / 9.0)) - 0.001)
+	elif early > 0.0:
+		head_m = minf(mine + early, 1.0)
+	var is_bud: bool = head_m < open_at
 	# ЖРЕБИЙ НА КОРОБОЧКУ — У КАЖДОГО СТЕБЛЯ СВОЙ, а не у куста целиком: иначе
 	# весь куст разом становился бы коробочками, а на снимках они вперемешку.
-	var is_pod: bool = poppy_stem_pod(p, def, s, many)
+	var is_pod: bool = not shut and poppy_stem_pod(p, def, s, many)
 
 	# =========================================================================
 	#  СТЕБЕЛЬ — ИЗГИБАЮЩАЯСЯ ТРУБКА
@@ -3103,7 +3204,7 @@ func poppy_stem_shape(p: Dictionary, def: Dictionary, s: int, many: int,
 		hook = deg_to_rad(float(def.get("stem_nod", 0.0))) * (0.5
 			+ _mix01(salt + 881))
 	if is_bud:
-		var ripe: float = clampf(mine / maxf(open_at, 0.001), 0.0, 1.0)
+		var ripe: float = clampf(head_m / maxf(open_at, 0.001), 0.0, 1.0)
 		hook = deg_to_rad(float(def.get("bud_hook", 95.0))) * (1.0 - ripe * ripe)
 	var links: int = maxi(int(def.get("stem_links", 6)), 2)
 	# ДВЕ ВОЛНЫ, А НЕ ОДНА, И ПО РАЗНЫМ ОСЯМ — её слово 09.09.2026: «мак гибкий и
@@ -3174,7 +3275,8 @@ func poppy_stem_shape(p: Dictionary, def: Dictionary, s: int, many: int,
 		drops.append(high * 0.30 * curl * curl)
 		rises.append(high * t)
 	return {"salt": salt, "mine": mine, "mgrow": mgrow, "gen": gen, "high": high,
-		"is_bud": is_bud, "is_pod": is_pod, "ts": ts,
+		"is_bud": is_bud, "is_pod": is_pod, "ts": ts, "head_m": head_m,
+		"flower_k": STATE_BLOOM_SIZE if bloom_k < 1.0 else 1.0,
 		"hook_sin": sin(hook), "hook_cos": 1.0 - cos(hook),
 		"bend_a": bend_a, "wave_c": wave_c, "wave_a": wave_a, "tip_c": tip_c,
 		"tip_a": tip_a, "drops": drops, "rises": rises}
@@ -3262,7 +3364,8 @@ func poppy_stem_lay(shape: Dictionary, def: Dictionary, s: int, many: int,
 		"mine": shape["mine"], "mgrow": mgrow, "high": high, "away": away,
 		"cross": cross, "foot": foot, "is_bud": shape["is_bud"],
 		"is_pod": shape["is_pod"], "links": path.size() - 1, "gen": shape["gen"],
-		"r_foot": r_foot, "r_head": r_head}
+		"r_foot": r_foot, "r_head": r_head, "head_m": shape["head_m"],
+		"flower_k": shape["flower_k"]}
 
 
 # КАКОЕ ЗВЕНО ПУТИ ОТВЕЧАЕТ ЭТОЙ ДОЛЕ. Узлы стебля идут неравномерно (у головки
@@ -3406,8 +3509,8 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var top: Vector3 = path[links]
 	var tip_dir: Vector3 = (path[links] - path[links - 1]).normalized()
 	if is_bud:
-		_emit_poppy_bud(st, p, def, top, tip_dir, side, bulk, mgrow, mine,
-			salt, shade, stage, stem_c)
+		_emit_poppy_bud(st, p, def, top, tip_dir, side, bulk, mgrow,
+			float(plan_of.get("head_m", mine)), salt, shade, stage, stem_c)
 	elif is_pod:
 		# КОРОБОЧКА — СЛЕГКА ПРИПЛЮСНУТЫЙ ШАР с подставкой и звёздочкой сверху
 		# (её слово 09.09.2026). Прежде это была пилюля из двух четырёхгранных
@@ -3455,7 +3558,8 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		f_side = f_side.normalized()
 		var f_fore: Vector3 = tip_dir.cross(f_side).normalized()
 		_emit_poppy_flower(st, p, def, top, tip_dir, f_side, f_fore, salt,
-			bulk, mine, open_at, shade, stage, blocks, s)
+			bulk * float(plan_of.get("flower_k", 1.0)),
+			float(plan_of.get("head_m", mine)), open_at, shade, stage, blocks, s)
 
 
 # ЦВЕТОК МАКА: два ряда лепестков, тёмное тело в середине и бублик тычинок.
@@ -3795,8 +3899,12 @@ func poppy_open_shape_at(level: int, def: Dictionary) -> Dictionary:
 # сам — когда до него дорастёт куст (`poppy_stems`).
 func poppy_stem_full(p: Dictionary, def: Dictionary) -> int:
 	var salt: int = int(p["salt"])
-	return maxi(1, int(lerpf(float(def.get("stems_low", 3)),
+	var full: int = maxi(1, int(lerpf(float(def.get("stems_low", 3)),
 		float(def.get("stems_high", 6)), _mix01(salt + 61))))
+	var more: float = _bloom_k(p, def)
+	if more > 1.0:
+		full = int(round(float(full) * more))
+	return full
 
 
 # СКОЛЬКО СТЕБЛЕЙ УЖЕ ВЫШЛО. Стебель выходит тогда, когда куст дорос до его
@@ -3962,7 +4070,11 @@ func poppy_stem_pod(p: Dictionary, def: Dictionary, s: int, many: int) -> bool:
 	var top: float = 1.0 - poppy_stem_lag(p, def, s, many)
 	var gate: float = open_at + (maxf(top, open_at) - open_at) \
 		* float(def.get("pod_after", 0.55))
-	return poppy_stem_m(p, def, s, many) >= gate
+	var head_m: float = poppy_stem_m(p, def, s, many)
+	var early: float = _bloom_early(p)
+	if early > 0.0:
+		head_m = minf(head_m + early, 1.0)
+	return head_m >= gate
 
 
 # КАКОГО ЦВЕТА ЭТОТ МАК.
@@ -4937,6 +5049,25 @@ func remove_at(pid: int) -> void:
 	flush_now()
 
 
+func remove_organism(root: int) -> int:
+	beat_settle()
+	var gone: Array = []
+	for pid in patches:
+		if int(patches[pid].get("root", pid)) == root:
+			gone.append(pid)
+	for pid in gone:
+		_bush_slice.erase(pid)
+		var cell: int = int(patches[pid]["cell"])
+		_coarse_drop(pid, patches[pid])
+		_live.erase(pid)
+		patches.erase(pid)
+		if by_cell.has(cell):
+			by_cell[cell].erase(pid)
+		_mark_plant(pid, cell)
+	flush_now()
+	return gone.size()
+
+
 # Что растёт ближе всего к точке — по нему работает снятие под курсором.
 # СНЕСТИ ВЕСЬ САД РАЗОМ. Проверкам случается расчищать место целиком, и
 # поштучный снос для этого не годится: каждая гибель зовёт `_flush`, а тот
@@ -5137,8 +5268,21 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 	# (`_morph_world`): кочка, отросшая под кистью роста, иначе ждала бы пуска.
 	if _in_beat and _beat_gift > 0.0:
 		patches[pid][GIFT_SEEN] = true
+	# ОТРОСТОК РАЗВОРАЧИВАЮЩЕГОСЯ ПЯТНА ПОЛУЧАЕТ ОСТАТОК ЕГО ЖИЗНИ (её решение
+	# 01.10.2026, разбор у `BORN_UNFOLD`). Иначе всё было бы впустую: часы у
+	# организма общие, а запас всплеска лежит у кочки, и новорождённая кочка
+	# осталась бы ни с чем — при стоящем времени пятно так и не выросло бы.
+	#
+	# Остаток считается от СВОЕГО прожитого, а оно только что унаследовано от
+	# родителя, — значит, сколько бы колен пятно ни дало, общего срока оно не
+	# перерастёт.
+	if patches.has(from) and bool(patches[from].get(UNFOLD, false)):
+		unfold_at(pid)
 	if _is_stem(def):
 		patches[pid].merge(_stem_traits(from, def))
+		patches[pid]["branch"] = int(patches[from].get("branch", from)) \
+			if patches.has(from) and int(patches[from].get("order", -1)) \
+				== int(patches[pid]["order"]) else pid
 		# ВИСИТ ЛИ ЗВЕНО В ВОЗДУХЕ и сколько таких подряд. Вольная ветвь отлипает
 		# от камня, но не может лететь бесконечно: счёт подряд идущих висящих
 		# звеньев её и останавливает.
@@ -5181,6 +5325,7 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		# см. `surface_changed`.
 		patches[pid]["prop"] = support_around(Vector3(spot["pos"]),
 			main.CELL_SPACING * float(def.get("support_reach", 3.0)))
+	_state_init(pid)
 	if from >= 0 and patches.has(from):
 		# ЦВЕТОНОС ОТРОСТКОМ НЕ СЧИТАЕТСЯ (решение пользователя 2026-08-28: «не
 		# заменяют обычные побеги, а дополняют их»). Прибавь его к `kids` — и
@@ -5397,6 +5542,8 @@ func _meet_wake(p: Dictionary) -> bool:
 
 
 func _meet_ripe(p: Dictionary, rule: Dictionary) -> bool:
+	if is_dead(p) or state_of(p) < int(rule.get("state_min", MEET_STATE_MIN)):
+		return false
 	if _is_stem(PlantsData.ITEMS[String(p["id"])]):
 		return true
 	return float(p["m"]) >= float(rule.get("ripe", 0.0))
@@ -5476,7 +5623,17 @@ func _meet_born(a: Dictionary, b: Dictionary, rule: Dictionary) -> bool:
 	#
 	# Толчок НЕ ЗАВИСИТ ОТ ВРЕМЕНИ: он тратится собственным насосом всплеска,
 	# который идёт и при остановленных часах. Тем же подарком, что раздаёт рука.
-	gift_to(pid)
+	#
+	# И ТОЛЧОК ЭТОТ ТЕПЕРЬ НЕ В ДЕВЯТЬ СЕКУНД, А ВО ВСЮ ЖИЗНЬ (её решение
+	# 01.10.2026: «он должен разворачиваться сам, не спрашивая кисть») — разбор у
+	# `BORN_UNFOLD`. Правило по-прежнему живёт В ОДНОМ МЕСТЕ: заведётся вторая
+	# реакция — развернётся и она, не спрашивая.
+	unfold_at(pid)
+	# И МЕСТО ОТМЕЧАЕТСЯ НА САМОМ ОСТРОВЕ (её решение 2026-10-02: «когда
+	# выполняются условия задания, нужно на местности показать, где конкретно это
+	# произошло»). Метка живёт в `SpaceMain` — см. `mark_find`; здесь только
+	# точка, потому что рождение на стыке идёт через одно это место.
+	main.mark_find(Vector3(spot["pos"]))
 	_met_born += 1
 	return true
 
@@ -5547,6 +5704,257 @@ func _bloom_near(at: Vector3, gap: float) -> bool:
 # Встречи: касаний, рождений и сорвавшихся попыток. Только для проверок.
 func meet_stats() -> Vector3i:
 	return Vector3i(_met_touch, _met_born, _met_deny)
+
+
+# =============================================================================
+#  Состояние по условиям
+# =============================================================================
+var _state_clock: float = 0.0
+
+func state_of(p: Dictionary) -> int:
+	return int(p.get("state", 0))
+
+
+func is_dead(p: Dictionary) -> bool:
+	return bool(p.get("dead", false))
+
+
+func _state_test_mode() -> String:
+	return state_test.get_slice("@", 0)
+
+
+func _state_test_from() -> float:
+	return state_test.get_slice("@", 1).to_float() if state_test.contains("@") else 0.0
+
+
+func _state_want_at(pos: Vector3) -> int:
+	var mode: String = _state_test_mode()
+	if mode == "" or _state_clock < _state_test_from():
+		return 0
+	if mode == "dead":
+		return STATE_MIN
+	if mode == "bands":
+		var r: float = maxf(float(main.island_radius), 1.0)
+		return clampi(int(floor((pos.x + r) / (2.0 * r) * 7.0)), 0, 6) + STATE_MIN
+	return clampi(mode.to_int(), STATE_MIN, STATE_MAX)
+
+
+func _state_want(p: Dictionary) -> int:
+	var head: int = int(p.get("branch", -1))
+	return _state_want_at(Vector3(patches[head]["pos"]) if patches.has(head)
+		else Vector3(p["pos"]))
+
+
+func _state_init(pid: int) -> void:
+	var p: Dictionary = patches[pid]
+	var lv: int = _state_want(p)
+	if lv == 0:
+		return
+	p["state"] = lv
+	p["state_was"] = lv
+	p["state_at"] = _world_clock
+	if lv >= STATE_MAX:
+		_over_bake(p)
+	if lv <= STATE_MIN and _state_test_mode() == "dead":
+		_die(pid, p)
+
+
+func _state_set(pid: int, lv: int) -> void:
+	var p: Dictionary = patches[pid]
+	if is_dead(p):
+		return
+	var was: int = state_of(p)
+	if lv != was:
+		p["state_was"] = was
+		p["state_at"] = _world_clock
+		if lv == 0:
+			p.erase("state")
+		else:
+			p["state"] = lv
+		if was <= STATE_MIN:
+			p.erase("dying")
+		if lv >= STATE_MAX:
+			_over_bake(p)
+		p.erase("lags")
+		_live[pid] = true
+		_mark_plant(pid, int(p["cell"]))
+	if lv <= STATE_MIN and _state_test_mode() == "dead":
+		_die(pid, p)
+
+
+func restate_all() -> void:
+	for pid in patches.keys():
+		if patches.has(pid):
+			_state_set(int(pid), _state_want(patches[pid]))
+
+
+func _die(pid: int, p: Dictionary) -> void:
+	p["dead"] = true
+	p["state"] = STATE_MIN
+	p["state_was"] = STATE_MIN
+	p["state_at"] = _world_clock
+	p.erase("dying")
+	p.erase("burst")
+	_live.erase(pid)
+	_mark_plant(pid, int(p["cell"]))
+	for nb in p.get("near", []):
+		if patches.has(nb):
+			_mark_plant(int(nb), int(patches[nb]["cell"]))
+
+
+func _state_pace(p: Dictionary, def: Dictionary) -> float:
+	return float(def.get("state_pace", STATE_PACE)[state_of(p) - STATE_MIN])
+
+
+# СРОК РОСТА: высшая фаза живёт дольше — на 30% (`OVER_GROW`), а у вида может
+# быть свой запас (`over_span` в карточке): лоза ветвится, и лишние 30% срока
+# растили её вчетверо, а не на 30%.
+func _state_span(p: Dictionary, def: Dictionary) -> float:
+	if state_of(p) >= STATE_MAX:
+		return GROW_SPAN * float(def.get("over_span", OVER_GROW))
+	return GROW_SPAN
+
+
+# ОБИЛИЕ ЦВЕТЕНИЯ: ноль — не цветёт, единица — как обычно, больше — гуще. Сколько
+# цветёт — доля узлов у лианы, число коробочек у мхов, стеблей у куста мака.
+func _bloom_k(p: Dictionary, def: Dictionary) -> float:
+	return float(def.get("state_bloom", STATE_BLOOM)[state_of(p) - STATE_MIN])
+
+
+# НАСКОЛЬКО РАНЬШЕ ЦВЕТЁТ — в долях жизни (ступень из девяти — одна девятая).
+func _bloom_early(p: Dictionary) -> float:
+	return float(STATE_EARLY[state_of(p) - STATE_MIN]) / float(STAGES)
+
+
+func _spore_at(p: Dictionary, def: Dictionary) -> float:
+	var at: float = float(def.get("spore_at", 2.0))
+	var early: float = _bloom_early(p)
+	return at - early if early > 0.0 else at
+
+
+func _bloom_at(p: Dictionary, def: Dictionary) -> float:
+	var at: float = float(def.get("bloom_at", 0.35))
+	var early: float = _bloom_early(p)
+	return at - early if early > 0.0 else at
+
+
+# С КАКОГО ПОКОЛЕНИЯ ЛОЗА ЦВЕТЁТ: стимулированная — на поколение раньше, но не
+# со ствола.
+func _bloom_from(p: Dictionary, def: Dictionary) -> int:
+	var from: int = int(def["bloom_from"])
+	if state_of(p) >= 2 and from > 1:
+		return from - 1
+	return from
+
+
+func _size_k(p: Dictionary) -> float:
+	return float(p.get("over", 1.0))
+
+
+func _leaf_k(p: Dictionary) -> float:
+	return _size_k(p) * (DEAD_LEAF if is_dead(p) else 1.0)
+
+
+func _organ_k(p: Dictionary) -> float:
+	return _leaf_k(p) * (STATE_BLOOM_SIZE if state_of(p) == -1 else 1.0)
+
+
+func _over_bake(p: Dictionary) -> void:
+	var def: Dictionary = PlantsData.ITEMS[String(p["id"])]
+	if not _needs_cushion(def) or float(p["body"].get("baked", 1.0)) >= OVER_GROW:
+		return
+	var body: Dictionary = _make_cushion({"pos": p["pos"], "nrm": p["nrm"]}, def,
+		int(p["salt"]), float(p["bulk"]) * OVER_GROW)
+	if body.is_empty():
+		p["over_cap"] = 1.0
+		return
+	body["baked"] = OVER_GROW
+	p["body"] = body
+
+
+func _over_left(p: Dictionary) -> bool:
+	return state_of(p) >= STATE_MAX \
+		and _size_k(p) < float(p.get("over_cap", OVER_GROW))
+
+
+func _over_grow(pid: int, p: Dictionary, span: float) -> void:
+	if not _over_left(p):
+		return
+	var cap: float = float(p.get("over_cap", OVER_GROW))
+	var now: float = minf(cap, _size_k(p) + (OVER_GROW - 1.0) * span / OVER_SECS)
+	p["over"] = now
+	if now >= cap or now - float(p.get("over_shown", 1.0)) >= 0.05:
+		p["over_shown"] = now
+		_mark_plant(pid, int(p["cell"]))
+
+
+func _state_look(p: Dictionary, def: Dictionary) -> Color:
+	var lv: int = state_of(p)
+	var was: int = int(p.get("state_was", lv))
+	if lv == 0 and was == 0:
+		return Color(0.0, 0.0, 0.0, 0.0)
+	var mode: float = 0.0 if _is_stem(def) else (2.0 if _is_poppy(def) else 1.0)
+	var at: float = float(p.get("state_at", _world_clock))
+	if is_dead(p):
+		return Color(float(STATE_MIN), float(STATE_DEAD), at, mode)
+	if lv <= STATE_MIN:
+		at = _world_clock - float(p.get("dying", 0.0))
+	return Color(float(was), float(lv), at, mode)
+
+
+func _state_rebase(p: Dictionary) -> void:
+	if not p.has("state_at"):
+		return
+	if is_dead(p):
+		p["state_at"] = _world_clock - DRY_SECS
+	else:
+		p["state_was"] = state_of(p)
+		p["state_at"] = _world_clock - STATE_EASE
+
+
+# ЧТО ВЫРОСЛО У ВИДА — стенду состояний: растений (у лианы звеньев без метёлок),
+# органов цветения (коробочки; метёлки; раскрытые цветки и коробочки мака),
+# средняя длина метёлки, наибольшее перерастание, наибольший прожитый срок,
+# умерших и умирающих.
+func state_stats(kind: String) -> Dictionary:
+	var out := {"plants": 0, "organs": 0, "plume": 0.0, "over": 1.0,
+		"lived": 0.0, "dead": 0, "dying": 0, "able": 0, "picked": 0}
+	var plumes: int = 0
+	for pid in patches:
+		var p: Dictionary = patches[pid]
+		if String(p["id"]) != kind:
+			continue
+		var def: Dictionary = PlantsData.ITEMS[kind]
+		if is_dead(p):
+			out["dead"] += 1
+		elif state_of(p) <= STATE_MIN:
+			out["dying"] += 1
+		out["over"] = maxf(float(out["over"]), _size_k(p))
+		out["lived"] = maxf(float(out["lived"]), float(p.get("lived", 0.0)))
+		if int(p.get("bloom", 0)) > 0:
+			if int(p["bloom"]) == 1 and _bloom_k(p, def) > 0.0:
+				out["organs"] += 1
+				out["plume"] += float(p.get("bloom_max", 0))
+				plumes += 1
+			continue
+		out["plants"] += 1
+		if def.has("bloom_from") and int(p.get("order", 0)) >= _bloom_from(p, def):
+			out["able"] += 1
+			if _hash01(int(p["salt"]) + 6607) < _bloom_share_at(p, def):
+				out["picked"] += 1
+		if _is_poppy(def):
+			var many: int = poppy_stems(p, def)
+			for s in range(many):
+				var shape: Dictionary = poppy_stem_shape(p, def, s, many,
+					float(p["bulk"]))
+				if not bool(shape["is_bud"]):
+					out["organs"] += 1
+		elif not _is_stem(def):
+			out["organs"] += _spore_count(p, def) \
+				* maxi(1, int(def.get("pod_row", 1)) - 1)
+	if plumes > 0:
+		out["plume"] = float(out["plume"]) / float(plumes)
+	return out
 
 
 # =============================================================================
@@ -5639,6 +6047,11 @@ var beat_ms: float = BEAT_MS
 
 
 func _beat_begin(dt: float, gift: float) -> void:
+	var was_clock: float = _state_clock
+	_state_clock += dt
+	var from: float = _state_test_from()
+	if from > 0.0 and was_clock < from and _state_clock >= from:
+		restate_all()
 	_beat_on = true
 	_beat_dt = dt
 	_beat_gift = gift
@@ -5745,6 +6158,15 @@ func _beat_plant(pid: int) -> void:
 	if bool(p.get("air", false)) and not patches.has(int(p.get("from", -1))):
 		_beat_fallen.append(pid)
 		return
+	if is_dead(p):
+		_live.erase(pid)
+		return
+	var lv: int = state_of(p)
+	if lv <= STATE_MIN:
+		p["dying"] = float(p.get("dying", 0.0)) + dt
+		if float(p["dying"]) >= DYING_SECS:
+			_die(pid, p)
+		return
 	# СКОЛЬКО РОСТА ДОСТАЛОСЬ ЭТОМУ РАСТЕНИЮ ЗА УДАР. Слагаемых два: время
 	# мира и своя доля подаренного рукой игрока. Дальше по коду разницы между
 	# ними нет — подарок проливается через тот же самый рост, поэтому и
@@ -5757,7 +6179,8 @@ func _beat_plant(pid: int) -> void:
 	# каждой плети. Поэтому предел снимает только РАСПОЛЗАНИЕ: новых звеньев
 	# и кочек больше нет, а начатое доходит до своего вида.
 	var lived: float = float(p.get("lived", 0.0))
-	var done: bool = lived >= GROW_SPAN
+	var grow_span: float = _state_span(p, def)
+	var done: bool = lived >= grow_span
 	# ДОЗРЕЛО — ЭТО ДО СВОЕГО ПОТОЛКА, А НЕ ДО ЕДИНИЦЫ. У концов веток он ниже
 	# (см. `_ripe_cap`), и по единице они не выбыли бы из живых НИКОГДА: сад
 	# перестал бы расти, а сердце обходило бы его до скончания века — ровно то,
@@ -5776,9 +6199,9 @@ func _beat_plant(pid: int) -> void:
 	# запасом: её длина конечна и мала.
 	var in_bloom: bool = int(p.get("bloom", 0)) > 0 \
 		and int(p["bloom"]) < int(p.get("bloom_max", 1)) \
-		and lived < GROW_SPAN + BLOOM_GRACE
+		and lived < grow_span + BLOOM_GRACE
 	var ripe: float = _ripe_cap(p, def)
-	if done and not in_bloom and float(p["m"]) >= ripe:
+	if done and not in_bloom and float(p["m"]) >= ripe and not _over_left(p):
 		# Отросло и дозрело — из живых вон, больше его не спрашиваем.
 		_live.erase(pid)
 		return
@@ -5794,11 +6217,14 @@ func _beat_plant(pid: int) -> void:
 	# после предела единицы: недоросшие кисти. По этим же часам им и отмеряется
 	# срок дорастания (`BLOOM_GRACE`), иначе отмерять было бы нечем.
 	p["lived"] = lived + span
+	_over_grow(pid, p, span)
+	var pace: float = _state_pace(p, def)
 	var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) * (1.0 + def["shade_love"] * _shade(p))
 	# В складке растению вольготнее: туда наносит землю и дольше держится
 	# сырость. Величину складки считает сама сетка.
 	var fold: float = maxf(0.0, main.grid.cavity_of(int(p["cell"])))
 	rate *= 1.0 + def["joint_love"] * fold
+	rate *= pace
 	# Ступень тем длиннее, чем растение взрослее.
 	rate /= STAGE_COST[clampi(int(p["m"] * float(STAGES)), 0, STAGES - 1)]
 	# НА РОВНОМ РОСТ МЕДЛЕННЕЕ — у тех, кому это записано. Лиане подпоркой
@@ -5850,6 +6276,8 @@ func _beat_plant(pid: int) -> void:
 	# предел не значил бы ничего — ровно те же грабли, что у часов роста
 	# (см. `GROW_SPAN`, «часы принадлежат организму»).
 	var wide: float = float(def.get("clump_wide", 0.0))
+	if lv >= STATE_MAX:
+		wide *= OVER_GROW
 	if wide > 0.0 and chance > 0.0:
 		var root: int = int(p.get("root", -1))
 		if patches.has(root) and Vector3(p["pos"]).distance_to(
@@ -5910,7 +6338,7 @@ func _beat_plant(pid: int) -> void:
 	if int(p.get("bloom", 0)) >= int(p.get("bloom_max", 1)) \
 			and int(p.get("bloom", 0)) > 0:
 		chance = 0.0
-	if p["m"] >= float(def.get("spread_at", PlantsData.SPREAD_AT_DEFAULT)) and _rng.randf() < chance * slow * span:
+	if p["m"] >= float(def.get("spread_at", PlantsData.SPREAD_AT_DEFAULT)) and _rng.randf() < chance * pace * slow * span:
 		# СЧИТАЕМ ПОПЫТКИ И УДАЧИ. «Лиана застряла» бывает по двум совершенно
 		# разным причинам: она не пробует расти (частота, зрелость, запрет на
 		# ветвление) или пробует и не находит куда (земля, наклон, шаг). По
@@ -5946,7 +6374,8 @@ func _beat_plant(pid: int) -> void:
 	# зачёт — и зацветшая ветвь росла бы медленнее нецветущей.
 	# Цветение — тоже расползание: доросшая лоза новых кистей не заводит.
 	if not done and _bloom_ready(p, def) \
-			and _rng.randf() < float(def["bloom_rate"]) * slow * span:
+			and _rng.randf() < float(def["bloom_rate"]) * pace \
+				* maxf(_bloom_k(p, def), 1.0) * slow * span:
 		var born: Dictionary = _bloom_start(p, def, int(p["salt"]))
 		if not born.is_empty():
 			# ОДИН УЗЕЛ — ОДНА МЕТЁЛКА.
@@ -6966,7 +7395,7 @@ func _bloom_ready(p: Dictionary, def: Dictionary) -> bool:
 		return false
 	if int(p.get("bloom", 0)) > 0:
 		return false
-	if int(p.get("order", 0)) < int(def["bloom_from"]):
+	if int(p.get("order", 0)) < _bloom_from(p, def):
 		return false
 	# ЦВЕТЁТ НЕ ВСЯКИЙ ГОДНЫЙ УЗЕЛ, А ДОЛЯ ИХ, И РЕШАЕТСЯ ЭТО РАЗ И НАВСЕГДА, ПО
 	# СОЛИ ЗВЕНА.
@@ -6980,9 +7409,60 @@ func _bloom_ready(p: Dictionary, def: Dictionary) -> bool:
 	#
 	# Доля же держит цветение редким и, главное, ПОСТОЯННЫМ: те же узлы зацветут
 	# и при следующей пересборке. Частота решает лишь, скоро ли метёлка тронется.
-	if _hash01(int(p["salt"]) + 6607) >= float(def.get("bloom_share", 1.0)):
+	if _hash01(int(p["salt"]) + 6607) >= _bloom_share_at(p, def):
 		return false
-	return float(p["m"]) >= float(def.get("bloom_at", 0.35))
+	return float(p["m"]) >= _bloom_at(p, def)
+
+
+# ГДЕ КОНЧАЕТСЯ РОВНОЕ И НАЧИНАЕТСЯ СКЛОН. Порог нужен ТОЛЬКО МЕРКАМ
+# (`vine_stats`): сам рост его не знает, доля цветения растёт плавно вместе с
+# крутизной. Четверть синуса — это 14°: пологая земля острова лежит ниже, бока
+# холмов, насыпи и камни — выше.
+const TILT_SLOPE: float = 0.25
+
+
+# СКОЛЬКО МЕТЁЛОК ВСТАЛО НА ПЕРВОМ ЖЕ ЗВЕНЕ — см. запись у `spray_heads`.
+func _spray_stubs(heads: Dictionary, grew: Dictionary) -> int:
+	var n: int = 0
+	for pid in heads:
+		if not grew.has(pid):
+			n += 1
+	return n
+
+
+# КРУТИЗНА МЕСТА, ГДЕ СИДИТ ЗВЕНО — синус наклона: это длина нормали, легшей на
+# землю. На ровном 0, на склоне в 45° — 0.71, на отвесной стене 1.
+#
+# МЕРИМ СВОЕЙ НОРМАЛЬЮ, А НЕ КРУТИЗНОЙ ПОЛЯ (`steepness_of`), и причин две.
+# Первая — цена: нормаль у звена уже лежит в карточке, а крутизна поля считается
+# по соседям, и спрашивают её тут на каждом ударе у каждого годного узла.
+# Вторая важнее: звену важно, НА ЧЁМ ОНО СИДИТ. Висящее в воздухе и перелезшее
+# через ветвь наследуют нормаль того места, откуда ушли, — и плеть, свесившаяся
+# со склона, остаётся склонной, как оно и читается на кадре.
+func _tilt_of(p: Dictionary) -> float:
+	var n: Vector3 = p["nrm"]
+	return clampf(Vector2(n.x, n.z).length(), 0.0, 1.0)
+
+
+# ДОЛЯ ЦВЕТУЩИХ УЗЛОВ РАСТЁТ НА СКЛОНЕ (решение пользователя 2026-10-01: «пусть
+# у лиан, растущих на склоне, будет больше цветущих плетей»).
+#
+# ПРИБАВЛЯЕМ ИМЕННО К ДОЛЕ, А НЕ К ЧАСТОТЕ (`bloom_rate`): частота решает лишь,
+# скоро ли тронется тот, кому цвести положено, и подняв её, мы получили бы те же
+# метёлки, только пораньше. Число метёлок держит доля — см. запись над ней.
+#
+# Доля решается по соли звена РАЗ И НАВСЕГДА, и крутизна места тоже не меняется
+# сама: звено сидит там, где родилось, и правит землю только рука игрока. Значит
+# и отбор остаётся постоянным — зацветут те же узлы, что и до пересборки.
+func _bloom_share_at(p: Dictionary, def: Dictionary) -> float:
+	var share: float = float(def.get("bloom_share", 1.0))
+	var gain: float = float(def.get("bloom_slope", 0.0))
+	var k: float = _bloom_k(p, def)
+	if k != 1.0:
+		share = minf(share * k, 1.0)
+	if gain <= 0.0:
+		return share
+	return minf(share * (1.0 + gain * _tilt_of(p)), 1.0)
 
 
 # ЗАСЫПАНО ЛИ ЭТО МЕСТО ЗЕМЛЁЙ. Спрашиваем ту же поверхность, что и всё прочее, и
@@ -7017,6 +7497,8 @@ func _bloom_start(p: Dictionary, def: Dictionary, salt: int) -> Dictionary:
 	# поэтому ниже, когда место первого звена уже найдено.
 	var most: int = maxi(2, int(round(float(def.get("bloom_len", 9))
 		* _rng.randf_range(0.8, 1.2))))
+	if state_of(p) == -1:
+		most = maxi(2, int(round(float(most) * STATE_BLOOM_SIZE)))
 	var nrm: Vector3 = p["nrm"]
 	# Сторона — своя у каждого узла (по соли), иначе все метёлки на ветви
 	# смотрят в одну сторону и висят занавесом.
@@ -7131,7 +7613,22 @@ func _bloom_place(p: Dictionary, def: Dictionary, way: Vector3, n: int,
 		float(def.get("bloom_step_near", 0.13)),
 		float(def.get("bloom_step_far", 0.17)))
 	if n == 1:
-		step *= float(def.get("bloom_stalk", 1.0))
+		# НА СКЛОНЕ НОЖКА ДЛИННЕЕ, и без этого просьба «цветения на склоне гуще»
+		# не исполнима никакой долей (её решение 2026-10-01, разбор — в README,
+		# «Цветение гуще на склоне»).
+		#
+		# ДЕЛО В МЕСТЕ ДЛЯ СВЕСА. Кисть заводится только там, где под ней есть
+		# куда висеть (`bloom_room`, три звена отвесом), а на склоне мешает сам
+		# склон: ножка уходит ПО НОРМАЛИ, то есть вбок-вверх, и земля под кистью
+		# остаётся в ладони. Замерено: на крутизне около 45° мерка не проходила
+		# чуть-чуть, и цвели только отвесные стены.
+		#
+		# Живая кисть делает ровно это — выносит себя прочь от склона дугой, и
+		# только потом висит. Длиннее ножка — больше просвета под кистью, и
+		# правило «не ложиться на землю» остаётся нетронутым: мы не разрешаем
+		# кисти лечь, мы даём ей место не ложиться.
+		step *= float(def.get("bloom_stalk", 1.0)) \
+			* (1.0 + float(def.get("bloom_stalk_slope", 0.0)) * _tilt_of(p))
 	var to: Vector3 = Vector3(p["pos"]) + dir * step
 	var c: int = main.grid.cell_at(to)
 	if c < 0 or not main.grid.in_play(c):
@@ -7555,6 +8052,37 @@ const BURST_MAX: float = 9.0
 # РАСПОЛЗАНИЮ ЭТОГО НЕ ДАЁТСЯ. Отросток — не посадка: он идёт сам, десятками, и
 # толчок каждому был бы просто общим ускорением роста втрое.
 const PLANT_GIFT: float = BURST_MAX
+# =============================================================================
+#  РОДИВШЕЕСЯ НА СТЫКЕ РАЗВОРАЧИВАЕТСЯ САМО
+# =============================================================================
+# Решение пользователя 2026-10-01, дословно: **«он должен разворачиваться сам, не
+# спрашивая кисть»**. До него гибрид получал тот же толчок, что и посаженный
+# рукой, — девять секунд роста из своих девяноста, — и при остановленном времени
+# на том и замирал: зрелость 0.56, ОДНА кочка. Её слово о том же: «лиамох при
+# появлении не развивается».
+#
+# ЗАМЕРЕНО, ОТЧЕГО ИМЕННО (01.10.2026): часы гибрида тут ни при чём. В миг
+# рождения у него прожито ровно 0.0 при родителях любого возраста, от шести
+# секунд до девяноста (её решение 05.09: «гибриды не наследуют время»). Не
+# хватало не часов, а ПОДАННОГО РОСТА: при стоящем времени в саду не идёт ничто,
+# кроме подаренного, а подарок был один и маленький.
+#
+# ТЕПЕРЬ ДАЁТСЯ ВСЯ ЕГО ЖИЗНЬ РАЗОМ (`GROW_SPAN`): пятно разворачивается само,
+# при стоящем времени и без единого мазка, и льётся этот запас тем же насосом и
+# с той же скоростью, что подарок кисти (`BURST_PACE`) — то есть полторы минуты
+# роста проходят за полминуты настоящих.
+#
+# ЗАПАС ПЕРЕДАЁТСЯ ОТРОСТКАМ, и без этого всё было бы впустую: часы принадлежат
+# организму, а запас всплеска лежит у КОЧКИ, и новорождённая кочка пятна осталась
+# бы ни с чем — при стоящем времени пятно так и не выросло бы. Поэтому дочерняя
+# кочка получает остаток жизни организма (см. `_create`).
+#
+# ПЛАТА, И ЕЁ НАДО ЗНАТЬ: развернувшись, гибрид свои полторы минуты ПРОЖИЛ, и
+# кистью его больше не растить — у организма их всего полторы минуты и есть
+# (`GROW_SPAN`, её правило). Это прямое следствие её решения, а не поломка.
+const BORN_UNFOLD: float = GROW_SPAN
+# Пометка «этот организм разворачивается сам» — по ней запас переходит отросткам.
+const UNFOLD: String = "unfold"
 # ТОЧКА РОСТА — НЕ РАСТЕНИЕ ЦЕЛИКОМ (решение пользователя 2026-08-28).
 #
 # У лианы это кончик побега и проснувшаяся почка: старое звено посреди плети
@@ -7595,6 +8123,8 @@ const PLANT_GIFT: float = BURST_MAX
 # развилки в одно и то же число раз, поэтому развилок на звено выходит столько
 # же, сколько при росте временем.
 func _growth_point(p: Dictionary, def: Dictionary) -> bool:
+	if is_dead(p):
+		return false
 	if not _is_stem(def):
 		return true
 	if bool(p.get("wake", false)):
@@ -7638,6 +8168,27 @@ func gift_to(pid: int, secs: float = PLANT_GIFT) -> void:
 	var p: Dictionary = patches[pid]
 	p["burst"] = minf(float(p.get("burst", 0.0)) + secs, BURST_MAX)
 	_burst_left = maxf(_burst_left, BURST_MAX / BURST_PACE + TICK)
+
+
+# РАЗВЕРНУТЬСЯ САМО, НЕ СПРАШИВАЯ КИСТЬ (её решение 2026-10-01) — см. длинную
+# запись у `BORN_UNFOLD`.
+#
+# Запас кладём НЕ ПРИБАВКОЙ, А ПО БОЛЬШЕМУ, и потолок кисти ему не указ: это не
+# мазок, а вся оставшаяся жизнь организма. Положи мы его прибавкой — два мазка
+# кистью по разворачивающемуся пятну выдали бы ему больше жизни, чем у него есть.
+#
+# И СВОЁ СЕРДЦЕ ВСПЛЕСКА ЗАВОДИМ НА ВЕСЬ СРОК: без этого насос встал бы через
+# три секунды, на которые его заводит обычный подарок, и пятно замерло бы снова.
+func unfold_at(pid: int) -> void:
+	if not patches.has(pid):
+		return
+	var p: Dictionary = patches[pid]
+	var left: float = BORN_UNFOLD - float(p.get("lived", 0.0))
+	if left <= 0.0:
+		return
+	p[UNFOLD] = true
+	p["burst"] = maxf(float(p.get("burst", 0.0)), left)
+	_burst_left = maxf(_burst_left, left / BURST_PACE + TICK)
 
 
 # ИЩЕМ ПО МЕСТУ, А НЕ ПЕРЕБОРОМ ВСЕГО САДА. Прежде кисть обходила КАЖДОЕ
@@ -7768,18 +8319,29 @@ func import_garden(d: Dictionary) -> void:
 				q.erase(key)
 			q["seen_calm"] = true
 		q.erase(GIFT_SEEN)
+		_state_rebase(q)
 		var cell: int = int(patches[pid]["cell"])
 		if not by_cell.has(cell):
 			by_cell[cell] = {}
 		by_cell[cell][pid] = true
 		# В живые — все, кому есть куда меняться: доросшие и дозревшие выбудут
 		# на первом же ударе сами.
-		if float(patches[pid].get("lived", 0.0)) < GROW_SPAN \
-				or float(patches[pid]["m"]) < _ripe_cap(patches[pid],
-					PlantsData.ITEMS[String(patches[pid]["id"])]):
+		var q_def: Dictionary = PlantsData.ITEMS[String(q["id"])]
+		if float(patches[pid].get("lived", 0.0)) < _state_span(q, q_def) \
+				or float(patches[pid]["m"]) < _ripe_cap(patches[pid], q_def) \
+				or (state_of(q) <= STATE_MIN and not is_dead(q)) or _over_left(q):
 			_live[pid] = true
+		# И СЕРДЦЕ ВСПЛЕСКА ЗАВОДИМ ЗАНОВО, если в снимке остался неизрасходованный
+		# запас. Сам запас лежит в карточке и сохраняется, а срок насоса — нет:
+		# без этого сад, сохранённый посреди разворачивающегося гибрида
+		# (`BORN_UNFOLD`), после загрузки стоял бы до первого мазка кистью.
+		var kept: float = float(patches[pid].get("burst", 0.0))
+		if kept > 0.0:
+			_burst_left = maxf(_burst_left, kept / BURST_PACE + TICK)
 		_coarse_add(pid, patches[pid])
 		_mark_cell(cell)
+	if state_test != "":
+		restate_all()
 
 
 func surface_changed(cells: Array = []) -> void:
@@ -7828,11 +8390,14 @@ func surface_changed(cells: Array = []) -> void:
 		var stem: bool = not _needs_cushion(PlantsData.ITEMS[p["id"]])
 		var again: Dictionary = p["body"]
 		if not stem:
+			var baked: float = float(p["body"].get("baked", 1.0))
 			again = _make_cushion(spot, PlantsData.ITEMS[p["id"]],
-				int(p["salt"]), float(p["bulk"]))
+				int(p["salt"]), float(p["bulk"]) * baked)
 			if again.is_empty():
 				doomed.append(pid)
 				continue
+			if baked != 1.0:
+				again["baked"] = baked
 		var was: int = int(p["cell"])
 		p["pos"] = spot["pos"]
 		p["nrm"] = spot["nrm"]
@@ -7868,6 +8433,7 @@ func surface_changed(cells: Array = []) -> void:
 			p["cell"] = now
 			_mark_plant(pid, was)
 		_mark_plant(pid, now)
+		_state_set(int(pid), _state_want(p))
 	for pid in doomed:
 		remove_at(pid)
 	# И РВЁМ ЦЕПЬ, ЕСЛИ ЕЁ РАСТЯНУЛО. Правка рельефа пересаживает каждое звено
@@ -8319,6 +8885,7 @@ func _rebuild_part(cell: int, part: int, parts: int) -> int:
 	# спрашивает он его с уже начатой.
 	tufts.set_custom_format(0, SurfaceTool.CUSTOM_RGBA_FLOAT)
 	tufts.set_custom_format(1, SurfaceTool.CUSTOM_RGBA_FLOAT)
+	tufts.set_custom_format(2, SurfaceTool.CUSTOM_RGBA_FLOAT)
 	_morph_none(tufts)
 	var any_tuft := false
 	var mine: int = 0
@@ -8339,6 +8906,8 @@ func _rebuild_part(cell: int, part: int, parts: int) -> int:
 		if j >= slices:
 			continue
 		mine += 1
+		tufts.set_custom(2, _state_look(patches[pid],
+			PlantsData.ITEMS[String(patches[pid]["id"])]))
 		if _emit_tuft(tufts, patches[pid], j, slices, int(pid)):
 			any_tuft = true
 	if not any_tuft:
@@ -8639,7 +9208,9 @@ func _neighbours(p: Dictionary, centre: Vector3, up: Vector3, span: float) -> Ar
 		if not patches.has(nb):
 			continue                     # сосед погиб; список нарочно не чистится
 		var q: Dictionary = patches[nb]
-		var qs: float = _patch_span(float(q["m"]), float(q["bulk"]))
+		if is_dead(q) or is_dead(p):
+			continue
+		var qs: float = _patch_span(float(q["m"]), float(q["bulk"]) * _size_k(q))
 		var off: Vector3 = Vector3(q["pos"]) - centre
 		var flat: Vector3 = off - up * off.dot(up)
 		var side_len: float = flat.length()
@@ -9449,6 +10020,8 @@ func _bloom_foot(p: Dictionary, up: Dictionary, def: Dictionary) -> Dictionary:
 const BLOOM_FOOT: float = 1.35
 
 func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
+	if int(p.get("bloom", 0)) > 0 and _bloom_k(p, def) <= 0.0:
+		return false
 	var from: int = int(p.get("from", -1))
 	var mine: Dictionary = _stem_ring(p, def)
 	var theirs: Dictionary
@@ -9816,6 +10389,9 @@ func _leaf_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 	var gen: int = maxi(0, int(p.get("kidorder", 0)) - int(p.get("order", 0)))
 	var long_at: float = float(def["leaf_long"]) * grown \
 		* (1.0 + float(def.get("leaf_gen", 0.0)) * float(gen))
+	var leaf_k: float = _leaf_k(p)
+	if leaf_k != 1.0:
+		long_at *= leaf_k
 	var wide_at: float = float(def.get("leaf_wide", 0.95))
 	# Молодой прирост светлее старого — на живой лозе это первое, что видно.
 	var tone: float = lerpf(1.10, 0.92, borne) * float(p["body"]["shade"])
@@ -9963,6 +10539,9 @@ func _bloom_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 	# сверху тугой бутон, ниже раскрытый лепесток.
 	var long_at: float = float(def["flower_long"]) \
 		* lerpf(float(def.get("flower_young", 0.85)), 1.0, grown)
+	var look_k: float = _organ_k(p)
+	if look_k != 1.0:
+		long_at *= look_k
 	var wide_at: float = float(def.get("flower_wide", 0.9))
 	var tone: float = float(p["body"]["shade"])
 	var root: Vector3 = back.get("at", ring["at"])
@@ -10024,7 +10603,8 @@ func _emit_leaves(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	_emit_stalks(st, plan, p, def, float(def.get("stalk_thick", 0.0015)),
 		float(def.get("stalk_thin", 0.0009)))
 	_emit_boards(st, plan, LEAF_COL, p, def["color"],
-		float(def.get("leaf_bow", 0.3)), float(def.get("leaf_sag", 0.22)))
+		float(def.get("leaf_bow", 0.3)), float(def.get("leaf_sag", 0.22))
+			* (DEAD_LEAF_SAG if is_dead(p) else 1.0))
 
 
 # Ножки — сперва все, потом уже пластинки: у них разная разметка, и переключать
@@ -10841,7 +11421,8 @@ func tuft_span_at(p: Dictionary, m: float) -> float:
 	var stage_no: float = clampf(m * float(STAGES) + 0.5, 1.0, float(STAGES))
 	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
 		(stage_no - 1.0) / float(STAGES - 1))
-	return main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at * float(p["bulk"])
+	return main.CELL_SPACING * ADULT_SIZE * BODY_WIDE * wide_at * float(p["bulk"]) \
+		* _size_k(p)
 
 
 func _emit_tuft(st: SurfaceTool, p: Dictionary, slice_i: int = 0,
@@ -10867,7 +11448,7 @@ func _emit_tuft(st: SurfaceTool, p: Dictionary, slice_i: int = 0,
 	# Раскладка испечена при самом широком возрасте, младшие сжимают её к середине.
 	var wide_at: float = lerpf(PATCH_YOUNG, PATCH_OLD,
 		(stage_no - 1.0) / float(STAGES - 1))
-	var k: float = wide_at / PATCH_OLD
+	var k: float = wide_at / PATCH_OLD * _size_k(p) / float(body.get("baked", 1.0))
 	var span: float = tuft_span(p)
 	var high: float = span * BODY_RISE * float(body["rise"]) * _flat_of(m)
 
@@ -11251,7 +11832,7 @@ const POD_WIDE := [0.0, 0.86, 1.0, 0.0]        # и толщина на них
 # Сколько коробочек у этой кочки. Считает и рисование, и проверка — одной
 # формулой, чтобы проверка не мерила своё.
 func _spore_count(p: Dictionary, def: Dictionary) -> int:
-	if not def.has("spore_at") or float(p["m"]) < float(def["spore_at"]):
+	if not def.has("spore_at") or float(p["m"]) < _spore_at(p, def):
 		return 0
 	var want: float = float(def.get("spore_many", 2.0)) * float(p.get("bulk", 1.0))
 	# КОРОБОЧКИ СИДЯТ КУЧКАМИ, А НЕ РОВНО ПО КОВРУ — решение пользователя: «пусть
@@ -11270,6 +11851,9 @@ func _spore_count(p: Dictionary, def: Dictionary) -> int:
 		var at: Vector3 = p["pos"]
 		var n: float = _pod_drift.get_noise_3d(at.x, at.y, at.z)
 		want *= POD_TOP * smoothstep(-0.32, 0.28, n)
+	var bloom_k: float = _bloom_k(p, def)
+	if bloom_k != 1.0:
+		want *= bloom_k
 	var many: int = int(floor(want))
 	# Дробный остаток — вероятность лишней, и берётся она от соли кочки: иначе
 	# число коробочек менялось бы при каждой пересборке.
@@ -11302,7 +11886,7 @@ func spore_stats(only: String = "") -> Vector2i:
 
 func _emit_spores(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		centre: Vector3, up: Vector3, span: float, high: float) -> void:
-	var at: float = float(def.get("spore_at", 2.0))
+	var at: float = _spore_at(p, def)
 	var m: float = float(p["m"])
 	if m < at:
 		return
@@ -11322,6 +11906,9 @@ func _emit_spores(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	grown = pow(grown, float(def.get("spore_slow", 1.9)))
 	if grown <= 0.001:
 		return
+	var organ_k: float = _organ_k(p)
+	if organ_k != 1.0:
+		grown *= organ_k
 	var salt: int = int(p["salt"])
 	var many: int = _spore_count(p, def)
 	if many <= 0:
