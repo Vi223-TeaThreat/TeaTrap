@@ -2393,10 +2393,10 @@ func _look_build() -> void:
 
 
 # Дописать в картинку породу и впадину у этих семян.
-func _look_put(cells) -> void:
+func _look_put(nodes) -> void:
 	if _look_bytes.is_empty():
 		return
-	for c in cells:
+	for c in nodes:
 		_look_put_one(int(c))
 
 

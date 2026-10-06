@@ -92,9 +92,12 @@ uniform float dry_secs = 4.0;
 uniform float dead_shrink = 0.25;
 uniform float dead_sag = 0.45;
 uniform float dead_lean = 0.35;
+uniform vec3 wax_tint = vec3(1.30, 1.45, 1.50);
+uniform vec3 wax_lift = vec3(0.035, 0.05, 0.06);
 
 varying vec3 v_nrm;
 varying vec3 v_state;
+varying float v_wax;
 
 void vertex() {
 	if (!grow_settle) {
@@ -107,6 +110,7 @@ void vertex() {
 		VERTEX = CUSTOM0.xyz + (VERTEX - CUSTOM0.xyz) * grown;
 	}
 	v_state = vec3(0.0);
+	v_wax = (CUSTOM2.w > 0.0 && CUSTOM2.w < 0.5) ? CUSTOM2.w * 2.0 : 0.0;
 	if (CUSTOM2.x != 0.0 || CUSTOM2.y != 0.0) {
 		float age = max(world_now - CUSTOM2.z, 0.0);
 		float ease = grow_settle ? 1.0 : smoothstep(0.0, 1.0, age / state_ease);
@@ -182,6 +186,12 @@ void fragment() {
 		discard;
 	}
 	vec3 paint = c.rgb * vertex_tint(COLOR.rgb);
+	if (v_wax > 0.0) {
+		float wax_luma = dot(paint, vec3(0.299, 0.587, 0.114));
+		float wax_green = clamp((paint.g - max(paint.r, paint.b))
+			/ max(paint.g, 0.0001) * 2.5, 0.0, 1.0);
+		paint = mix(paint, wax_lift + wax_luma * wax_tint, v_wax * wax_green);
+	}
 	if (v_state.x != 0.0 || v_state.y > 0.0 || v_state.z > 0.0) {
 		paint = state_paint(paint, v_state);
 	}

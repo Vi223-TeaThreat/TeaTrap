@@ -273,10 +273,11 @@ func _ready() -> void:
 	# уходит на другой мир — сад в ней падает вдвое, а причину ищешь в правках.
 	# Все записанные числа сняты на эталонном зерне, стенды обязаны идти по нему.
 	var bench: bool = false
-	for key in ["--selftest", "--shot", "--vinebench", "--growbench",
+	for key in ["--selftest", "--shot", "--liashot", "--vinebench", "--growbench",
 			"--meetbench", "--rockbench", "--scenebench", "--showbench",
 			"--dabbench", "--poppybench", "--printbench", "--towerbench", "--liftcheck",
-			"--weatherbench", "--storybench", "--uicheck", "--statebench", "--audit"]:
+			"--weatherbench", "--storybench", "--uicheck", "--statebench", "--audit",
+			"--joinbench"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	story = SpaceStoryScript.new()
@@ -343,12 +344,15 @@ func _ready() -> void:
 	if "--selftest" in args:
 		await _fill_world()
 		_selftest()
+	elif "--liashot" in args:
+		await _fill_world()
+		_lia_shot(args)
 	elif "--shot" in args:
 		await _fill_world()
 		_shot_mode()
 	elif "--vinebench" in args:
 		await _fill_world()
-		_vine_bench()
+		_vine_bench(args)
 	elif "--growbench" in args:
 		# Одна лоза двумя путями: временем и кистью. См. `_grow_bench`.
 		await _fill_world()
@@ -424,6 +428,10 @@ func _ready() -> void:
 	elif "--storybench" in args:
 		await _fill_world()
 		_story_bench(args)
+		get_tree().quit()
+	elif "--joinbench" in args:
+		await _fill_world()
+		_join_bench(args)
 		get_tree().quit()
 	elif "--statebench" in args:
 		await _fill_world()
@@ -1600,7 +1608,7 @@ func _setup_find() -> void:
 
 # ОТМЕТИТЬ МЕСТО. Зовут при рождении на стыке (`_meet_born` в растениях).
 func mark_find(at: Vector3) -> void:
-	if find_mark == null:
+	if find_mark == null or story == null or not story.active():
 		return
 	_find_left = FIND_HOLD + FIND_FADE
 	find_mark.global_position = at + Vector3(0.0, FIND_LIFT, 0.0)
@@ -5893,21 +5901,51 @@ func _seed_props() -> void:
 # СРАВНИВАТЬ НАДО СЕРЕДИНЫ, а не лучшее и не худшее.
 const BENCH_SEEDS := [20260811, 7, 1234, 99991, 424242, 31337, 8080]
 
-func _vine_bench() -> void:
+func _vine_bench(args: PackedStringArray = PackedStringArray()) -> void:
+	var kind: String = "vine"
+	for a in args:
+		if a.begins_with("--kind="):
+			kind = a.substr(7)
 	_seed_structures()
 	_flush_chunks()
-	print("Стенд лианы: посевов ", BENCH_SEEDS.size(), ", по полторы минуты роста")
+	print("Стенд лианы (", kind, "): посевов ", BENCH_SEEDS.size(),
+		", по полторы минуты роста")
 	var got: Array = []
+	var wides: Array = []
+	var reaches: Array = []
+	var tall_all: Array = []
+	var tris_all: Array = []
 	for s in BENCH_SEEDS:
 		plants.clear_all()
 		plants._rng.seed = int(s)
 		plants._sprout_why = PackedInt32Array()
 		plants._sprout_why.resize(SpacePlantsScript.WHY_NAMES.size())
-		_seed_vine()
+		_seed_vine(kind)
 		for _i in range(600):
 			plants._tick(0.15)
-		var out: Dictionary = plants.vine_stats()
+		var out: Dictionary = plants.vine_stats(kind)
 		got.append(int(out["links"]))
+		wides.append(float(out["wide"]))
+		reaches.append(float(out["reach90"]))
+		tall_all.append(float(out["tall"]))
+		plants.flush_now()
+		var tris := 0
+		for cell in plants.cell_nodes:
+			var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
+			for si in range(mesh.get_surface_count()):
+				var indexed: int = mesh.surface_get_array_index_len(si)
+				@warning_ignore("integer_division")
+				tris += (indexed if indexed > 0 else mesh.surface_get_array_len(si)) / 3
+		tris_all.append(tris)
+		print("  посев ", s, ": ширина заросли ", snappedf(float(out["wide"]), 0.01),
+			" м, даль от корня ", snappedf(float(out["reach"]), 0.01), " м (девять",
+			" десятых звеньев ближе ", snappedf(float(out["reach90"]), 0.01),
+			" м), выше корня на ", snappedf(float(out["tall"]), 0.01),
+			" м; закрутка до ", snappedf(float(out["coil"]), 1.0), "°, звеньев в",
+			" витке больше 300° — ", out["coiled"], "; прямизна плети ",
+			snappedf(float(out["straight"]), 0.01), "; треугольников ", tris,
+			"; цветков: бутонов ", out["f_bud"], ", раскрыто ", out["f_open"],
+			", коробочек ", out["f_pod"])
 		# ОТКАЗЫ — САМОЕ ВАЖНОЕ ЗДЕСЬ. Застрявшая лоза от бодрой отличается не
 		# числом звеньев, а тем, обо что она упёрлась: кончик пробует расти
 		# каждую секунду и получает отказ по одной и той же причине.
@@ -5953,7 +5991,7 @@ func _vine_bench() -> void:
 		if int(out["links"]) < 40:
 			for pid in plants.patches:
 				var p: Dictionary = plants.patches[pid]
-				if String(p["id"]) != "vine" or int(p.get("kids", 0)) != 0:
+				if String(p["id"]) != kind or int(p.get("kids", 0)) != 0:
 					continue
 				var was: int = int(p.get("from", -1))
 				var came := Vector3.ZERO
@@ -5970,9 +6008,17 @@ func _vine_bench() -> void:
 					snappedf(rad_to_deg(came.angle_to(Vector3(p["nrm"]))), 1.0),
 					"° к нормали земли — 90° это вдоль земли, 0° прямо от неё")
 	got.sort()
+	wides.sort()
+	reaches.sort()
+	tall_all.sort()
+	tris_all.sort()
 	@warning_ignore("integer_division")
-	print("Стенд лианы: середина ", got[got.size() / 2], ", от ", got[0],
-		" до ", got[got.size() - 1])
+	var mid: int = got.size() / 2
+	print("Стенд лианы (", kind, "): середина ", got[mid], ", от ", got[0],
+		" до ", got[got.size() - 1], "; ширина заросли — середина ",
+		snappedf(float(wides[mid]), 0.01), " м, даль девяти десятых звеньев — ",
+		snappedf(float(reaches[mid]), 0.01), " м, высота над корнем — ",
+		snappedf(float(tall_all[mid]), 0.01), " м, треугольников — ", tris_all[mid])
 	get_tree().quit()
 
 
@@ -6377,7 +6423,9 @@ func _meet_report() -> void:
 func _meet_stand() -> void:
 	# ПОСЕВ СЛУЧАЙНОСТИ ЗАДАЁМ, как и на стенде лианы: числа встречи надо
 	# сравнивать «до» и «после» правки, а на плавающем посеве читаешь шум.
-	plants._rng.seed = 20260829
+	var args := OS.get_cmdline_user_args()
+	plants._rng.seed = 20260829 + int(_arg_num(args, "--meet-sow", 0.0))
+	plants.unfold_pace = _arg_num(args, "--unfold-pace", plants.unfold_pace)
 	for pid in plants.patches.keys():
 		plants.remove_at(pid)
 	# ПЕРВЫМ ДЕЛОМ — ПОРОЗНЬ, ОТ ОДНОГО СЕМЕНИ КАЖДЫЙ. «Хаотичнее» не должно
@@ -6441,7 +6489,7 @@ func _meet_stand() -> void:
 	# значит запас растекается не туда.
 	var self_lia: int = _plant_count("liamoss")
 	var self_moss: int = _plant_count("moss")
-	for _i in range(int(plants.BORN_UNFOLD / plants.BURST_PACE / 0.15) + 40):
+	for _i in range(int(plants.BORN_UNFOLD / plants.unfold_pace / 0.15) + 40):
 		plants._tick(0.0, plants.TICK)
 	print("Стенд встречи: при стоящем времени и без единого мазка лиамох сам",
 		" развернулся ", self_lia, " → ", _plant_count("liamoss"), " кочек; мха",
@@ -6544,6 +6592,9 @@ func _story_bench(args: PackedStringArray) -> void:
 	if not story.goal_exists(lv):
 		_story_draft_bench(args, Time.get_ticks_msec() - t_scene)
 		return
+	if lv.has("plan"):
+		_story_plan_bench(args, Time.get_ticks_msec() - t_scene)
+		return
 	var centre: Vector3 = story.focus
 	var top: float = centre.y
 	for c in solid:
@@ -6611,7 +6662,7 @@ func _story_bench(args: PackedStringArray) -> void:
 		story.unplant(mossed, "moss")
 	print("Стенд острова: отмена посадки — мха было ", grown, " кочек, после отмены ",
 		_plant_count("moss"), " (норма ноль), семян мха вернулось ", story.stock["moss"])
-	for play in [["moss", "vine", 2.0], ["vine", "moss", 10.0]]:
+	for play in [["moss", "vine", 2.0], ["vine", "moss", 5.0]]:
 		var far: float = play[2]
 		plants.clear_all()
 		plants._rng.seed = 20261001
@@ -6636,6 +6687,7 @@ func _story_bench(args: PackedStringArray) -> void:
 			if story.state == story.LOST else "не решился")
 		print("Стенд острова: игра целиком, у подножия ", play[0], ", ", play[1], " в ",
 			far, " м — посажено ", steps,
+			"" if steps.size() == 2 else " (ОШИБКА: семя не село, ходу верить нельзя)",
 			", до разговора сажать ", "можно (ОШИБКА)" if early else "нельзя",
 			", третье семя ", "дали (ОШИБКА)" if again else "не дали",
 			"; остров ", verdict, " на ", snappedf(secs, 0.1), "-й секунде")
@@ -6688,11 +6740,11 @@ func _ui_check() -> void:
 	menu_open["tools"] = true
 
 
-func _story_draft_bench(args: PackedStringArray, built_ms: int) -> void:
+func _story_draft_bench(args: PackedStringArray, set_ms: int) -> void:
 	var lv: Dictionary = story.level
 	var centre: Vector3 = story.focus
 	print("Стенд острова «", lv["name"], "»: заготовка — гибрида «", story.goal_name(),
-		"» в игре ещё нет; обстановка за ", built_ms, " мс")
+		"» в игре ещё нет; обстановка за ", set_ms, " мс")
 	_audit_surface()
 	var poppy: Dictionary = PlantsData.ITEMS["poppy"]
 	var seen := 0
@@ -6773,6 +6825,149 @@ func _story_draft_bench(args: PackedStringArray, built_ms: int) -> void:
 			"; по посевам: ", "; ".join(lines))
 
 
+func _story_plan_bench(args: PackedStringArray, set_ms: int) -> void:
+	var lv: Dictionary = story.level
+	var born: String = String(lv["goal"]["born"])
+	var need: int = int(lv["goal"].get("count", 1))
+	var centre: Vector3 = story.focus
+	var poppy: Dictionary = PlantsData.ITEMS["poppy"]
+	var tries: int = int(_arg_num(args, "--tries", 6.0))
+	print("Стенд острова «", lv["name"], "»: гибрид «", story.goal_name(),
+		"» в игре есть, ходы берутся из карточки; обстановка за ", set_ms, " мс")
+	_audit_surface()
+	var line_from: Array = lv["plan"]["right"][1]
+	var line_to: Array = lv["plan"]["right"][0]
+	var a2 := Vector2(float(line_from[1]), float(line_from[2]))
+	var b2 := Vector2(float(line_to[1]), float(line_to[2]))
+	var heights: Array = []
+	for k in range(int(ceil((a2.distance_to(b2) + 3.0) / 0.5)) + 1):
+		var at2: Vector2 = a2 + (b2 - a2).normalized() * (0.5 * float(k) - 1.0)
+		var g: Vector3 = _ground_at(at2.x, at2.y)
+		heights.append("%+.1f" % (g.y - centre.y) if g != Vector3.ZERO else "—")
+	print("Стенд острова: разрез по верному ходу, от второго семени к первому шагом 0.5 м",
+		" (начало за метр до второго): ", " ".join(heights))
+	var ways: Array = ["right", "wrong"]
+	for pick in lv["plan"]["right"]:
+		if pick.size() >= 4 and String(pick[3]) == "top":
+			ways.insert(1, "edge")
+	for way in ways:
+		var plan: Array = lv["plan"]["right" if way == "edge" else way]
+		var sown := 0
+		var won := 0
+		var won_at := 0.0
+		var froze := 0
+		var froze_at := 0.0
+		var luck := 0
+		var lines: Array = []
+		for t in range(tries):
+			plants.clear_all()
+			plants._next = 1
+			plants._rng.seed = 20261005 + t
+			var touch0: int = plants.meet_stats().x
+			var ok := true
+			for pick in plan:
+				var at: Vector3 = _story_spot(pick, poppy)
+				if way == "edge" and pick.size() >= 4 and String(pick[3]) == "top":
+					at = _story_edge_spot(pick, plan, poppy)
+				if at == Vector3.ZERO or plants.plant_at(at, String(pick[0])) < 0:
+					ok = false
+					break
+			if not ok:
+				continue
+			sown += 1
+			var secs: float = _story_run(born, need)
+			var touches: int = plants.meet_stats().x - touch0
+			if _plant_count(born) >= need:
+				won += 1
+				won_at += secs
+				var where: float = -INF
+				for pid in plants.patches:
+					var q: Dictionary = plants.patches[pid]
+					if String(q["id"]) == born and not plants.patches.has(int(q.get("from", -1))):
+						where = maxf(where, Vector3(q["pos"]).y - centre.y)
+				lines.append("на %.0f-й с, +%.1f м, касаний %d" % [secs, where, touches])
+			else:
+				froze += 1
+				froze_at += secs
+				if touches > 0:
+					luck += 1
+				var gap: float = INF
+				var a_id: String = String(plan[0][0])
+				var b_id: String = String(plan[1][0])
+				for pa in plants.patches:
+					if String(plants.patches[pa]["id"]) != a_id:
+						continue
+					for pb in plants.patches:
+						if String(plants.patches[pb]["id"]) == b_id:
+							gap = minf(gap, Vector3(plants.patches[pa]["pos"]).distance_to(
+								plants.patches[pb]["pos"]))
+				lines.append("нет, сад замер к %.0f-й с, касаний %d, ближе всего %.0f см"
+					% [secs, touches, gap * 100.0])
+		print("Стенд острова: ход «", {"right": "верный", "edge": "верный, мак у края",
+			"wrong": "неверный"}[way], "» ",
+			plan, " — посажено в ", sown, " из ", tries, ", ", born, " родился в ", won,
+			(", в среднем на %.0f-й секунде" % (won_at / won)) if won > 0 else "",
+			"; без него ", froze,
+			(" (сад замирал к %.0f-й секунде; касались, но не родилось — %d)"
+				% [froze_at / froze, luck]) if froze > 0 else "",
+			"; по посевам: ", "; ".join(lines))
+	for way in ["right", "wrong"]:
+		var verdicts: Array = []
+		for t in range(3):
+			plants.clear_all()
+			plants._next = 1
+			plants._rng.seed = 20261005 + t
+			story.begin()
+			story._play()
+			var steps: Array = []
+			for pick in lv["plan"][way]:
+				var at: Vector3 = _story_spot(pick, poppy)
+				if story.can_plant(String(pick[0])) and at != Vector3.ZERO \
+						and plants.plant_at(at, String(pick[0])) >= 0:
+					story.planted(String(pick[0]))
+					steps.append(String(pick[0]))
+			var secs := 0.0
+			while story.state == story.PLAY and secs < STORY_BENCH_SECS:
+				_story_step()
+				secs += plants.TICK
+				if fmod(secs, story.CHECK_EVERY) < plants.TICK:
+					story.check()
+			var verdict: String = "пройден" if story.state == story.WON else (
+				"проигран" + (" (не повезло)" if story.lost_by_luck() else " (не встретились)")
+				if story.state == story.LOST else "не решился")
+			verdicts.append("%s на %.1f-й с%s" % [verdict, secs,
+				"" if steps.size() == lv["plan"][way].size()
+					else " (ОШИБКА: семя не село, ходу верить нельзя)"])
+		print("Стенд острова: игра целиком, ход «", "верный" if way == "right"
+			else "неверный", "», посевы как у первых трёх выше — ", "; ".join(verdicts))
+
+
+func _story_edge_spot(pick: Array, plan: Array, poppy: Dictionary) -> Vector3:
+	var toward := Vector2.ZERO
+	for other in plan:
+		if other != pick:
+			toward = Vector2(float(other[1]), float(other[2]))
+	var centre_y: float = story.focus.y
+	var best := Vector3.ZERO
+	var best_d: float = INF
+	for ix in range(-5, 6):
+		for iz in range(-5, 6):
+			var g: Vector3 = _ground_at(float(pick[1]) + ix * 0.3, float(pick[2]) + iz * 0.3)
+			if g == Vector3.ZERO:
+				continue
+			var spot: Dictionary = grid.calm_surface_near(g)
+			if spot.is_empty() or not plants._fits_surface(spot["nrm"], poppy):
+				continue
+			var at: Vector3 = spot["pos"]
+			if at.y < centre_y + 1.5:
+				continue
+			var d: float = Vector2(at.x, at.z).distance_to(toward)
+			if d < best_d:
+				best_d = d
+				best = at
+	return best
+
+
 func _story_spot(pick: Array, poppy: Dictionary) -> Vector3:
 	var x: float = float(pick[1])
 	var z: float = float(pick[2])
@@ -6839,6 +7034,162 @@ func _story_step() -> void:
 		plants._burst_left -= plants.TICK
 		gift = plants.TICK
 	plants._tick(plants.TICK, gift)
+
+
+func _join_bench(args: PackedStringArray) -> void:
+	var busy: float = _load_factor()
+	print("Нагрузка машины: ", snappedf(busy, 0.01),
+		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if busy > LOAD_ALARM
+			else "замерам можно верить"))
+	var lv: Dictionary = story.level
+	if not lv.has("plan"):
+		print("Стенд стыков: у острова нет ходов в карточке — мерить нечего")
+		return
+	_seed_scene()
+	_flush_chunks()
+	var poppy: Dictionary = PlantsData.ITEMS["poppy"]
+	var sow: int = int(_arg_num(args, "--sow", 1.0))
+	plants.clear_all()
+	plants._next = 1
+	plants._rng.seed = 20261005 + sow
+	var plan: Array = lv["plan"]["right"]
+	for pick in plan:
+		var at: Vector3 = _story_spot(pick, poppy)
+		if "--edge" in args and pick.size() >= 4 and String(pick[3]) == "top":
+			at = _story_edge_spot(pick, plan, poppy)
+		if at == Vector3.ZERO or plants.plant_at(at, String(pick[0])) < 0:
+			print("Стенд стыков: семя ", pick[0], " не село — мерить нечего")
+			return
+	plants.joint_probe = true
+	plants.unfold_pace = _arg_num(args, "--unfold-pace", plants.unfold_pace)
+	plants.flush_now()
+	plants.built_reset()
+	plants.beats_lost = 0
+	var born: String = String(lv["goal"]["born"])
+	var secs: float = _arg_num(args, "--secs", 200.0)
+	var after: float = _arg_num(args, "--after", 70.0)
+	var born_at: float = -1.0
+	var frames: int = int(secs * 60.0)
+	var top: Dictionary = {}
+	var frame_top: float = 0.0
+	var frames_full: int = 0
+	var frames_run: int = 0
+	var unfold_built: int = 0
+	var unfold_ms: float = 0.0
+	var unfold_top: float = 0.0
+	var unfold_full: int = 0
+	var unfold_frames: int = 0
+	var queue_sum: float = 0.0
+	var long_drain: int = 0
+	var long_beat: int = 0
+	var beat_sum: float = 0.0
+	var done_at: float = -1.0
+	var buckets: Dictionary = {}
+	for i in range(frames):
+		var tf: int = Time.get_ticks_usec()
+		var built0: int = plants.built_all
+		var built_ms0: float = plants.built_ms
+		plants._process(1.0 / 60.0)
+		var spent: float = float(Time.get_ticks_usec() - tf) / 1000.0
+		frames_run += 1
+		frame_top = maxf(frame_top, spent)
+		if spent > 16.7:
+			frames_full += 1
+		if born_at >= 0.0:
+			unfold_frames += 1
+			unfold_built += plants.built_all - built0
+			unfold_ms += plants.built_ms - built_ms0
+			unfold_top = maxf(unfold_top, spent)
+			if spent > 16.7:
+				unfold_full += 1
+				var bucket: int = int((float(i + 1) / 60.0 - born_at) / 5.0)
+				buckets[bucket] = int(buckets.get(bucket, 0)) + 1
+				var drain_ms: float = plants.built_ms - built_ms0
+				if drain_ms > spent - drain_ms:
+					long_drain += 1
+				else:
+					long_beat += 1
+			beat_sum += spent - (plants.built_ms - built_ms0)
+			queue_sum += float(plants.dirty_count())
+		if (i + 1) % 60 != 0:
+			continue
+		var t: float = float(i + 1) / 60.0
+		if born_at < 0.0 and _plant_count(born) > 0:
+			born_at = t
+			plants.beat_cost = {}
+			for pid in plants.patches:
+				var q: Dictionary = plants.patches[pid]
+				if String(q["id"]) != born or plants.patches.has(int(q.get("from", -1))):
+					continue
+				var at: Vector3 = q["pos"]
+				var below: Vector3 = _ground_at(at.x, at.z)
+				print("Стенд стыков: ", born, " родился на ", snappedf(t, 0.1),
+					"-й секунде; корень на ", snappedf(at.y - story.focus.y, 0.01),
+					" м над серединой острова, нормаль вверх ", snappedf(Vector3(q["nrm"]).y, 0.01),
+					" (", "верх" if Vector3(q["nrm"]).y > 0.45 else "бок", "), над верхней землёй",
+					" под собой ", str(snappedf(at.y - below.y, 0.01)) if below != Vector3.ZERO
+						else "—", " м")
+		var kinds: Array = [born] if born_at >= 0.0 else ["vine"]
+		if born_at >= 0.0 and done_at < 0.0:
+			var oldest: float = 0.0
+			for pid in plants.patches:
+				if String(plants.patches[pid]["id"]) == born:
+					oldest = maxf(oldest, float(plants.patches[pid].get("lived", 0.0)))
+			if oldest >= plants.GROW_SPAN - 0.2:
+				done_at = t
+		var r: Dictionary = plants.joint_report(kinds)
+		for k in r:
+			top[k] = maxf(float(top.get(k, 0.0)), float(r[k]))
+		print("  ", snappedf(t, 1.0), " с [", kinds[0], "] очередь ", plants.dirty_count(),
+			", всплеск ", snappedf(maxf(plants._burst_left, 0.0), 0.1),
+			" с; звеньев ", r["alive"], ", видно ", r["shown"],
+			"; висит ", r["hang"], " (родитель снят ", r["hang_dead"], "), щель ", r["gap"],
+			", ступень ", r["step"], " (вдвое ", r["step_big"], ", худшая ×",
+			snappedf(float(r["worst"]), 0.01), "), торец ", r["open"],
+			" (за цветоносом ", r["open_bloom"], "); не видно: ждёт ", r["wait"],
+			", длинное ", r["long"], ", цветонос ", r["bloom_off"], ", потеряно ", r["lost"],
+			"; призраков ", r["ghost"])
+		if born_at >= 0.0 and t > born_at + after:
+			break
+	print("Стенд стыков: худшее за прогон — ", top)
+	print("Стенд стыков: цена — кадров ", frames_run, ", самый дорогой ",
+		snappedf(frame_top, 0.1), " мс, дороже целого (16.7 мс) ", frames_full,
+		"; с рождения гибрида ", unfold_frames, " кадров: пересборок ", unfold_built,
+		" на ", snappedf(unfold_ms, 0.1), " мс, очередь в среднем ",
+		snappedf(queue_sum / maxf(float(unfold_frames), 1.0), 0.1),
+		", самый дорогой кадр ", snappedf(unfold_top, 0.1), " мс, дороже целого ",
+		unfold_full, " (из них больше на росте ", long_beat, ", на пересборке ", long_drain,
+		"), рост в среднем ", snappedf(beat_sum / maxf(float(unfold_frames), 1.0), 0.01),
+		" мс на кадр; ударов роста отброшено ", plants.beats_lost,
+		"; нагрузка в конце ", snappedf(_load_factor(), 0.01), "×")
+	var spans: Array = []
+	for b in range(int(ceil(after / 5.0)) + 1):
+		spans.append(int(buckets.get(b, 0)))
+	var costs: Array = []
+	for k in plants.beat_cost:
+		costs.append("%s %.0f мс" % [k, float(plants.beat_cost[k]) / 1000.0])
+	print("Стенд стыков: кадров дороже целого по пятисекундкам после рождения — ", spans,
+		"; рост по видам (обход и рождения) — ", ", ".join(costs))
+	var lived_top: float = 0.0
+	var burst_top: float = 0.0
+	for pid in plants.patches:
+		var q: Dictionary = plants.patches[pid]
+		if String(q["id"]) == born:
+			lived_top = maxf(lived_top, float(q.get("lived", 0.0)))
+			burst_top = maxf(burst_top, float(q.get("burst", 0.0)))
+	print("Стенд стыков: ", born, " прожил ", snappedf(lived_top, 0.1), " с из ",
+		plants.GROW_SPAN, ", запаса осталось ", snappedf(burst_top, 0.1), " с; развернулся ",
+		("за %.0f с после рождения" % (done_at - born_at)) if done_at >= 0.0
+			else "не до конца", "; звеньев ", _plant_count(born))
+	plants.flush_now()
+	for kind in [born, "vine"]:
+		var r: Dictionary = plants.joint_report([kind])
+		print("Стенд стыков: собрано всё (очередь пуста), ", kind, " — звеньев ", r["alive"],
+			", видно ", r["shown"], "; висит ", r["hang"], ", щель ", r["gap"], ", ступень ",
+			r["step"], " (вдвое ", r["step_big"], ", худшая ×", snappedf(float(r["worst"]), 0.01),
+			"), торец ", r["open"], " (за цветоносом ", r["open_bloom"], "); не видно: длинное ",
+			r["long"], ", цветонос ", r["bloom_off"], ", потеряно ", r["lost"],
+			"; призраков ", r["ghost"])
 
 
 # ВЫРАСТИТЬ ОДИН ВИД НА ЧИСТОМ МЕСТЕ и вернуть, сколько его стало и во сколько
@@ -7874,7 +8225,7 @@ func _poppy_cross_report(card: Dictionary) -> void:
 	var deep_by := {}         # та же пара -> самое глубокое заступание, м
 	var seen_pairs := {}      # какие пары ЧАСТЕЙ уже сочтены
 	var bushes := 0
-	var hurt := 0
+	var hurt := 0             # кустов, у которых пересечение хоть одно
 	var leaves_all := 0
 	var leaves_hurt := {}
 	for pid in plants.patches:
@@ -7977,7 +8328,8 @@ func _poppy_cross_report(card: Dictionary) -> void:
 			float(deep_by[key]) * 1000.0]
 	print("Мак: части куста друг сквозь друга — пар ", total, " на ", bushes,
 		" кустах (", snappedf(float(total) / maxf(1.0, float(bushes)), 0.1),
-		" на куст), листьев задето ", leaves_hurt.size(), " из ", leaves_all,
+		" на куст), задето кустов ", hurt, " из ", bushes,
+		", листьев ", leaves_hurt.size(), " из ", leaves_all,
 		". По парам: ", line.strip_edges() if total > 0 else "ни одной",
 		". Считаются ЧАСТИ, а не звенья, и только от разных стеблей. Ноль",
 		" недостижим — у земли стебли растут из одной точки; следить надо за",
@@ -8532,10 +8884,10 @@ func _print_bench(args: PackedStringArray) -> void:
 	plants._grow_clock = 0.0
 	plants._world_clock = 0.0
 	plants._rng.seed = 20260904
-	if kind == "vine":
+	if kind == "vine" or kind == "liapoppy":
 		_seed_structures()
 		_flush_chunks()
-		_seed_vine()
+		_seed_vine(kind)
 	else:
 		_seed_moss(6, kind)
 	_flush_chunks()
@@ -8779,14 +9131,18 @@ func _state_vines(mode: String, secs: float) -> Dictionary:
 	var out: Dictionary = rows[0].duplicate()
 	# ПЕРВОЕ ЦВЕТЕНИЕ — середина по тем лозам, что зацвели вообще.
 	firsts.sort()
-	out["first"] = float(firsts[firsts.size() / 2]) if not firsts.is_empty() else -1.0
+	@warning_ignore("integer_division")
+	var mid_first: int = firsts.size() / 2
+	out["first"] = float(firsts[mid_first]) if not firsts.is_empty() else -1.0
 	out["bloomers"] = firsts.size()
 	for key in ["plants", "dead", "dying"]:
 		var vals: Array = []
 		for r in rows:
 			vals.append(float(r[key]))
 		vals.sort()
-		out[key] = int(vals[vals.size() / 2])
+		@warning_ignore("integer_division")
+		var mid: int = vals.size() / 2
+		out[key] = int(vals[mid])
 	# МЕТЁЛКИ — СУММОЙ ПО ВСЕМ СЕМИ, а не серединой: за полторы минуты у большинства
 	# лоз их ноль-две, и середина говорила бы «ноль» на любой ступени.
 	var heads: int = 0
@@ -9076,7 +9432,7 @@ func _grow_bench() -> void:
 	plants.flush_now()
 
 
-func _seed_vine() -> void:
+func _seed_vine(id: String = "vine") -> void:
 	if _cliff_focus == Vector3.ZERO:
 		return
 	# ИЩЕМ ПО ЯЧЕЙКАМ, А НЕ ПО КОЛЬЦУ ВОКРУГ. Кольцо на высоте самой глыбы висит
@@ -9123,7 +9479,7 @@ func _seed_vine() -> void:
 	near.sort_custom(func(a, b): return float(a[0]) < float(b[0]))
 	for item in near:
 		var root: Vector3 = grid.seeds[int(item[1])]
-		if plants.plant_at(root, "vine") >= 0:
+		if plants.plant_at(root, id) >= 0:
 			# ВИДИТ ЛИ ОНА ГЛЫБУ С ТОГО МЕСТА, КУДА СЕЛА. Без этого числа
 			# «на круче ноль звеньев» ни о чём не говорит: то ли лиана не умеет
 			# выбирать сторону, то ли ей и выбирать было не из чего.
@@ -9214,6 +9570,77 @@ func _shot_name(base: String) -> String:
 		+ ("_pix" if pixel_zoom > 0 else "") \
 		+ ("_state" + plants.state_test.replace("@", "at")
 			if plants != null and plants.state_test != "" else "") + ".png"
+
+
+func _lia_shot(args: PackedStringArray) -> void:
+	var kind: String = "liapoppy"
+	for a in args:
+		if a.begins_with("--kind="):
+			kind = a.substr(7)
+	frame_node.visible = false
+	_hide_cursor = true
+	for child in get_children():
+		if child is CanvasLayer:
+			child.visible = false
+	_seed_structures()
+	_flush_chunks()
+	plants._rng.seed = int(_arg_num(args, "--sow", 20260904.0))
+	_seed_vine(kind)
+	var secs: float = _arg_num(args, "--secs", 90.0)
+	for i in range(int(secs / plants.TICK)):
+		plants._tick(plants.TICK)
+		if i % 15 == 14:
+			await get_tree().process_frame
+	plants.time_scale = 0.0
+	plants.flush_now()
+	plants.settle_show()
+	weather.freeze(WeatherScript.SHOT_CLOCK)
+	var lo := Vector3(INF, INF, INF)
+	var hi := Vector3(-INF, -INF, -INF)
+	var heads: Array = []
+	for pid in plants.patches:
+		var q: Dictionary = plants.patches[pid]
+		if String(q["id"]) != kind:
+			continue
+		var at: Vector3 = q["pos"]
+		lo = Vector3(minf(lo.x, at.x), minf(lo.y, at.y), minf(lo.z, at.z))
+		hi = Vector3(maxf(hi.x, at.x), maxf(hi.y, at.y), maxf(hi.z, at.z))
+		if int(q.get("bloom", 0)) == 3:
+			heads.append(at)
+	if lo.x == INF:
+		print("Кадры: растения ", kind, " нет")
+		get_tree().quit()
+		return
+	var mid: Vector3 = (lo + hi) * 0.5
+	var span: float = maxf((hi - lo).length(), 2.0)
+	var views: Array = [[mid, span * 1.1, -24.0, 25.0, "wide_a"],
+		[mid, span * 1.1, -24.0, 145.0, "wide_b"],
+		[mid, span * 0.55, -14.0, 265.0, "near"]]
+	if not heads.is_empty():
+		var pick: Vector3 = heads[0]
+		for h in heads:
+			if Vector3(h).distance_to(mid) < pick.distance_to(mid):
+				pick = h
+		views.append([pick, 0.9, -10.0, 25.0, "flowers_a"])
+		views.append([pick, 0.9, -10.0, 205.0, "flowers_b"])
+	for v in views:
+		cur_pivot = v[0]
+		target_pivot = cur_pivot
+		cur_zoom = float(v[1])
+		target_zoom = cur_zoom
+		cur_pitch = float(v[2])
+		target_pitch = cur_pitch
+		cur_yaw = float(v[3])
+		target_yaw = cur_yaw
+		_apply_camera()
+		for _i in range(6):
+			await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(
+			"user://" + kind + "_" + String(v[4]) + ".png")
+	print("Кадры ", kind, ": ", views.size(), " снимков в user://, звеньев ",
+		plants.vine_stats(kind)["links"])
+	get_tree().quit()
 
 
 func _shot_mode() -> void:

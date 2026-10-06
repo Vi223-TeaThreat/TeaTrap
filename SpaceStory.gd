@@ -41,6 +41,9 @@ func setup(main_ref: Node3D, bench: bool, args: PackedStringArray) -> void:
 	if "--storybench" in args:
 		testing = true
 		id = _level_arg(args, String(LevelsData.LEVELS[0]["id"]))
+	elif "--joinbench" in args:
+		testing = true
+		id = _level_arg(args, "shelf")
 	elif not bench:
 		# ИГРА НАЧИНАЕТСЯ С СЮЖЕТНОГО УРОВНЯ, А НЕ С ПЕСОЧНИЦЫ (её решение
 		# 02.10.2026). Прежде по умолчанию стоял свободный остров, и в сюжет

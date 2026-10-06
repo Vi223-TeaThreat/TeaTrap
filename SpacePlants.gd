@@ -116,6 +116,12 @@ const STEPS: int = 24
 # придётся дальше, а он ведёт растение по прямой, тогда как растёт оно по дуге.
 const SHOW_EVERY: int = 2
 
+# Сколько ПОКАЗОВ выходит из ступеней роста — столько раз растение пересобирается
+# за жизнь, если вид не назвал своё `show_steps`. Делится нацело намеренно и без
+# остатка (24 на 2), но движок об остатке предупреждает всегда.
+@warning_ignore("integer_division")
+const SHOW_STEPS: int = STEPS / SHOW_EVERY
+
 # СКОЛЬКО ДЛИТСЯ КАЖДАЯ СТУПЕНЬ, в долях «Т» — времени одной ранней ступени.
 #
 # Молодая куртинка набирает вид быстро, а взрослая дозревает долго: первые пять
@@ -203,6 +209,7 @@ func _coarse_drop(pid: int, p: Dictionary) -> void:
 var cell_nodes: Dictionary = {}   # ячейка -> меш со всеми её растениями
 var time_scale: float = 1.0
 var _dirty: Dictionary = {}
+var _kids_of: Dictionary = {}
 var _accum: float = 0.0
 # ВСПЛЕСК ОТ РУКИ ИГРОКА — свой счёт времени, по настоящим секундам. `_burst_left`
 # — сколько их ещё лить; пока оно больше нуля, сад растёт и при остановленном
@@ -210,6 +217,7 @@ var _accum: float = 0.0
 # может погибнуть под мазком, и счётчик бы завис, а с ним и удары сердца.
 var _burst_left: float = 0.0
 var _burst_accum: float = 0.0
+var _hand_left: float = 0.0
 var _next: int = 1
 var _rng := RandomNumberGenerator.new()
 # Волна, которой коробочки сбиваются в кучки. См. `_spore_count`.
@@ -498,14 +506,14 @@ func _morph_track(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		var per_sec: float = _cost_pace(p, def)
 		var horizon: float = 0.0
 		if world:
-			var shots: int = maxi(int(def.get("show_steps", STEPS / SHOW_EVERY)), 1)
+			var shots: int = maxi(int(def.get("show_steps", SHOW_STEPS)), 1)
 			var m_far: float = minf(ripe, (floor(m * float(shots)) + 2.0) / float(shots))
 			horizon = (_cost_way(m_far) - _cost_way(m)) / maxf(per_sec, 0.000001)
 		elif p.has("burst"):
 			# Подарок льётся `BURST_PACE` секунд роста в настоящую секунду, и заодно
 			# идёт мир, если время не стоит.
-			horizon = float(p["burst"]) / BURST_PACE
-			per_sec *= BURST_PACE + time_scale
+			horizon = float(p["burst"]) / _burst_pace(p)
+			per_sec *= _burst_pace(p) + time_scale
 		if per_sec > 0.0 and horizon > 0.0:
 			var m_end: float = minf(ripe,
 				_cost_way_to_m(_cost_way(m) + per_sec * horizon))
@@ -1707,7 +1715,16 @@ func arch_stats() -> Dictionary:
 		"hang": by_hang, "fall_hang": fall_hang, "fall_hang_free": fall_free}
 
 
-func vine_stats() -> Dictionary:
+func _stem_in(p: Dictionary, only: String) -> bool:
+	return _is_stem(PlantsData.ITEMS[p["id"]]) \
+		and (only == "" or String(p["id"]) == only)
+
+
+func vine_stats(only: String = "") -> Dictionary:
+	var reaches: Array = []
+	var f_bud := 0
+	var f_open := 0
+	var f_pod := 0
 	var links := 0
 	var roots := 0
 	var steep := 0.0
@@ -1781,16 +1798,22 @@ func vine_stats() -> Dictionary:
 	# корень — первый найденный, на случай если своего уже нет.
 	var seed_at := Vector3.ZERO
 	for pid in patches:
-		if not _is_stem(PlantsData.ITEMS[patches[pid]["id"]]):
+		if not _stem_in(patches[pid], only):
 			continue
 		if not patches.has(int(patches[pid].get("from", -1))):
 			seed_at = Vector3(patches[pid]["pos"])
 			break
 	for pid in patches:
 		var p: Dictionary = patches[pid]
-		if not _is_stem(PlantsData.ITEMS[p["id"]]):
+		if not _stem_in(p, only):
 			continue
 		links += 1
+		if int(p.get("bloom", 0)) <= 0:
+			var own: int = int(p.get("root", -1))
+			var base_at: Vector3 = Vector3(patches[own]["pos"]) if patches.has(own) \
+				else seed_at
+			reaches.append(Vector2(float(p["pos"].x) - base_at.x,
+				float(p["pos"].z) - base_at.z).length())
 		# ЗВЕНЬЯ ПОРОЗНЬ ПО МЕСТУ — знаменатель к метёлкам на ровном и на склоне.
 		# Звенья самой метёлки в счёт не идут: они не зацветают, они и есть
 		# цветение, и попади они сюда — густо цветущее место само себе и
@@ -1902,7 +1925,7 @@ func vine_stats() -> Dictionary:
 		if int(depth.get(pid, 1)) > deep:
 			deep = int(depth.get(pid, 1))
 			end_of = pid
-		var ring: Dictionary = _stem_ring(p, PlantsData.ITEMS[p["id"]])
+		var ring: Dictionary = _stem_ring(p, PlantsData.ITEMS[p["id"]], true)
 		thin = minf(thin, float(ring["r"]))
 		fat = maxf(fat, float(ring["r"]))
 		# СВИСАЮЩИЕ ПЛЕТИ: сколько их всего и насколько длинной вышла самая
@@ -1934,7 +1957,7 @@ func vine_stats() -> Dictionary:
 		# тут такой же честный, как у колена.
 		var back: Dictionary = ring
 		if patches.has(from):
-			back = _stem_ring(patches[from], PlantsData.ITEMS[p["id"]])
+			back = _stem_ring(patches[from], PlantsData.ITEMS[p["id"]], true)
 		var here: Array = _leaf_plan(p, PlantsData.ITEMS[p["id"]], ring, back)
 		leaves += here.size()
 		for leaf in here:
@@ -1979,6 +2002,14 @@ func vine_stats() -> Dictionary:
 				spray_at.append(mine_at)
 			var buds: Array = _bloom_plan(p, PlantsData.ITEMS[p["id"]], ring, back)
 			flowers += buds.size()
+			if String(PlantsData.ITEMS[p["id"]].get("flower_look", "")) == "poppy":
+				var ph: Vector2 = lia_phase(p, PlantsData.ITEMS[p["id"]])
+				if ph.y > 0.0:
+					f_pod += buds.size()
+				elif ph.x > 0.0:
+					f_open += buds.size()
+				else:
+					f_bud += buds.size()
 			for bud in buds:
 				var btip: Vector3 = Vector3(bud["at"]) \
 					+ Vector3(bud["along"]) * float(bud["long"])
@@ -2029,7 +2060,7 @@ func vine_stats() -> Dictionary:
 			# сторож докладывал пять сантиметров «ныряния» на здоровой лозе —
 			# то есть переставал ловить настоящее.
 			var up_ring: Dictionary = _stem_ring(patches[from],
-				PlantsData.ITEMS[p["id"]])
+				PlantsData.ITEMS[p["id"]], true)
 			if patches.has(int(patches[from].get("from", -1))):
 				for k in [0.2, 0.4, 0.6, 0.8]:
 					var probe: Vector3 = Vector3(up_ring["at"]).lerp(
@@ -2048,7 +2079,7 @@ func vine_stats() -> Dictionary:
 	# друга, и у лианы, честно залезшей и спустившейся, выходит ровный ноль.
 	for pid in patches:
 		var p: Dictionary = patches[pid]
-		if _is_stem(PlantsData.ITEMS[p["id"]]):
+		if _stem_in(p, only):
 			tall = maxf(tall, Vector3(p["pos"]).y - root_y)
 	# ШИРИНА ЗАРОСЛИ — сторож тесноты. Побегам велено расходиться, и если они всё
 	# равно идут пучком, ширина будет чуть больше шага звена, сколько бы их ни
@@ -2081,7 +2112,7 @@ func vine_stats() -> Dictionary:
 	var sharp := 0.0
 	for pid in patches:
 		var p: Dictionary = patches[pid]
-		if not _is_stem(PlantsData.ITEMS[p["id"]]):
+		if not _stem_in(p, only):
 			continue
 		var up: int = int(p.get("from", -1))
 		if not patches.has(up):
@@ -2114,7 +2145,7 @@ func vine_stats() -> Dictionary:
 	var coil := 0.0
 	var coiled := 0
 	for pid in patches:
-		if not _is_stem(PlantsData.ITEMS[patches[pid]["id"]]):
+		if not _stem_in(patches[pid], only):
 			continue
 		var spin := 0.0
 		var at: int = pid
@@ -2164,7 +2195,7 @@ func vine_stats() -> Dictionary:
 	var starts: Array = []
 	for pid in patches:
 		var q: Dictionary = patches[pid]
-		if not _is_stem(PlantsData.ITEMS[q["id"]]) or int(q.get("bloom", 0)) > 0:
+		if not _stem_in(q, only) or int(q.get("bloom", 0)) > 0:
 			continue
 		var up_at: int = int(q.get("from", -1))
 		if not patches.has(up_at):
@@ -2191,7 +2222,7 @@ func vine_stats() -> Dictionary:
 	# четырнадцать», а на кадре это совсем разные вещи.
 	var mine: Dictionary = {}
 	for pid in patches:
-		if not _is_stem(PlantsData.ITEMS[patches[pid]["id"]]):
+		if not _stem_in(patches[pid], only):
 			continue
 		var at: int = pid
 		for _step in range(400):
@@ -2231,7 +2262,18 @@ func vine_stats() -> Dictionary:
 		"coil": rad_to_deg(coil), "coiled": coiled,
 		"hangs": hangs, "plaits": plaits, "plait": plait, "drop": drop,
 		"hang_try": _hang_try, "hang_edge": _hang_edge, "hang_win": _hang_win,
-		"hang_deep": _hang_deep}
+		"hang_deep": _hang_deep, "reach": _top_of(reaches, 1.0),
+		"reach90": _top_of(reaches, 0.9),
+		"f_bud": f_bud, "f_open": f_open, "f_pod": f_pod}
+
+
+func _top_of(values: Array, share: float) -> float:
+	if values.is_empty():
+		return 0.0
+	var sorted: Array = values.duplicate()
+	sorted.sort()
+	return float(sorted[clampi(int(ceil(share * float(sorted.size()))) - 1, 0,
+		sorted.size() - 1)])
 
 
 
@@ -2333,7 +2375,7 @@ func _emit_poppy(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		paths = poppy_bush_paths(p, def, many, base, up, side, fore, bulk)
 		var t_blk: int = Time.get_ticks_usec()
 		if float(def.get("petal_room", 0.0)) > 0.0:
-			blocks = _poppy_blocks(p, def, paths, side, fore, up, bulk)
+			blocks = _poppy_blocks(def, paths, side, fore, up, bulk)
 		var lay_ms: float = float(t_blk - t_lay) / 1000.0
 		var blk_ms: float = float(Time.get_ticks_usec() - t_blk) / 1000.0
 		bush_lays += 1
@@ -2358,7 +2400,7 @@ func _emit_poppy(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		# постоянен, значит стебель всегда попадает в один и тот же меш.
 		if slices > 1 and s % slices != slice_i:
 			continue
-		_emit_poppy_stem(st, p, def, s, many, base, up, side, fore,
+		_emit_poppy_stem(st, p, def, s, up, side, fore,
 			stem_c, bulk, stage, shade, blocks, paths[s])
 	var emit_ms: float = float(Time.get_ticks_usec() - t_emit) / 1000.0
 	bush_emit_ms += emit_ms
@@ -2541,7 +2583,7 @@ func _poppy_step(p: Dictionary, def: Dictionary, pid: int) -> void:
 	if not bool(kept.get("done", false)):
 		var t_blk: int = Time.get_ticks_usec()
 		if float(def.get("petal_room", 0.0)) > 0.0:
-			kept["blocks"] = _poppy_blocks(p, def, kept["paths"], kept["side"],
+			kept["blocks"] = _poppy_blocks(def, kept["paths"], kept["side"],
 				kept["fore"], kept["up"], float(p["bulk"]) * _size_k(p))
 		var blk_ms: float = float(Time.get_ticks_usec() - t_blk) / 1000.0
 		bush_block_ms += blk_ms
@@ -2743,7 +2785,11 @@ func poppy_bush_paths(p: Dictionary, def: Dictionary, many: int, base: Vector3,
 		for try_i in range(POPPY_DODGE_TRIES):
 			var nudge: float = 0.0
 			if try_i > 0:
-				nudge = POPPY_DODGE_STEP * float((try_i + 1) / 2) \
+				# Шаг растёт через попытку, знак меняется каждую: +1, −1, +2, −2…
+				# Деление нацело тут и нужно — оно и даёт пару попыток на шаг.
+				@warning_ignore("integer_division")
+				var step_i: int = (try_i + 1) / 2
+				nudge = POPPY_DODGE_STEP * float(step_i) \
 					* (1.0 if try_i % 2 == 1 else -1.0)
 			var got: Dictionary = poppy_stem_lay(shape, def, s, many, base, up,
 				side, fore, nudge, from)
@@ -2976,7 +3022,7 @@ const GAP_EPS: float = 0.00001
 # сетке на каждом цветке. По её кадрам мешают прежде всего СВОИ стебли: куст в
 # семь-двенадцать стеблей растёт из одной точки, и лепестки сидят прямо среди
 # них.
-func _poppy_blocks(p: Dictionary, def: Dictionary, paths: Array,
+func _poppy_blocks(def: Dictionary, paths: Array,
 		side: Vector3, fore: Vector3, up: Vector3, bulk: float) -> Array:
 	var out: Array = []
 	# ПЕРВЫМ ХОДОМ СТЕБЛИ И ГОЛОВКИ, ВТОРЫМ ЛИСТЬЯ, и порядок этот не для
@@ -3379,7 +3425,7 @@ func poppy_node_at(ts: PackedFloat32Array, t: float) -> int:
 	return last
 
 func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
-		s: int, many: int, base: Vector3, up: Vector3, side: Vector3,
+		s: int, up: Vector3, side: Vector3,
 		fore: Vector3, stem_c: Color, bulk: float,
 		stage: int, shade: float, blocks: Array = [],
 		plan_of: Dictionary = {}) -> void:
@@ -3509,7 +3555,7 @@ func _emit_poppy_stem(st: SurfaceTool, p: Dictionary, def: Dictionary,
 	var top: Vector3 = path[links]
 	var tip_dir: Vector3 = (path[links] - path[links - 1]).normalized()
 	if is_bud:
-		_emit_poppy_bud(st, p, def, top, tip_dir, side, bulk, mgrow,
+		_emit_poppy_bud(st, def, top, tip_dir, side, bulk, mgrow,
 			float(plan_of.get("head_m", mine)), salt, shade, stage, stem_c)
 	elif is_pod:
 		# КОРОБОЧКА — СЛЕГКА ПРИПЛЮСНУТЫЙ ШАР с подставкой и звёздочкой сверху
@@ -4170,7 +4216,7 @@ func _mix01(n: int) -> float:
 # раскрытия: иначе на кадре оно возникало бы из ничего. Размер — её число,
 # девять десятых бутона: больше — и оно вылезет сквозь сомкнутые створки,
 # заметно меньше — и в раскрытую щель ничего не будет видно.
-func _emit_poppy_bud(st: SurfaceTool, p: Dictionary, def: Dictionary,
+func _emit_poppy_bud(st: SurfaceTool, def: Dictionary,
 		top: Vector3, tip: Vector3, side: Vector3, bulk: float, mgrow: float,
 		mine: float, salt: int, shade: float, stage: int, stem_c: Color) -> void:
 	# РАСТЁТ ОТ НУЛЯ, а не тянется общим размером — разбор у `poppy_bud_out`.
@@ -4390,8 +4436,9 @@ func _speck_quad(st: SurfaceTool, at: Vector3, out: Vector3, side_v: Vector3,
 # ИДУТ ПО ВИТКУ, а не кольцами: кольцами они читаются обручами на бочке.
 func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
 		path: PackedVector3Array, r_foot: float, r_head: float,
-		gen: int, tint: Color, stage: int) -> void:
-	var dens: float = float(def.get("speck_dens", 0.0))
+		gen: int, tint: Color, stage: int, share: float = 1.0,
+		spin: float = 0.0) -> void:
+	var dens: float = float(def.get("speck_dens", 0.0)) * share
 	if dens <= 0.0 or path.size() < 2:
 		return
 	dens *= pow(float(def.get("speck_gen_k", 1.35)), float(mini(gen, 3) - 1))
@@ -4433,7 +4480,7 @@ func _emit_stem_specks(st: SurfaceTool, def: Dictionary,
 		var t: float = runs[k] / maxf(long_m, 0.000001)
 		var at: Vector3 = path[k].lerp(path[k + 1], into)
 		var way: Vector3 = (path[k + 1] - path[k]).normalized()
-		var a: float = float(i) * 2.399963      # золотой угол — виток
+		var a: float = float(i) * 2.399963 + spin      # золотой угол — виток
 		var side_v: Vector3 = way.cross(Vector3.UP)
 		if side_v.length_squared() < 0.000001:
 			side_v = way.cross(Vector3.RIGHT)
@@ -4832,6 +4879,7 @@ func _process(delta: float) -> void:
 		# мире удары сердца заводят вторые, а мир в них не стареет ни на миг:
 		# `_tick` получает ноль мирового времени и один лишь подарок.
 		_accum += delta * time_scale
+		_hand_left = maxf(_hand_left - delta, 0.0)
 		if _burst_left > 0.0:
 			_burst_left -= delta
 			_burst_accum += delta
@@ -4858,6 +4906,7 @@ func _process(delta: float) -> void:
 		# ему больше, чтобы догнать.
 		while _beat_queue.size() > int(BEAT_LAG_MAX):
 			_beat_queue.pop_back()
+			beats_lost += 1
 		var behind: bool = _beat_on and not _beat_queue.is_empty()
 		var deadline: int = Time.get_ticks_usec() \
 			+ int((maxf(BEAT_MS_BEHIND, beat_ms) if behind else beat_ms) * 1000.0)
@@ -4991,15 +5040,28 @@ func _stem_born(pid: int, from: int) -> void:
 	patches[pid]["spin"] = float(patches[from].get("spin", 0.0)) * SPIN_FADE + spin
 
 	var deep: int = int(patches[pid].get("order", 0))
+	_mark_ring(from)
+	var root: int = int(patches[pid].get("root", -1))
+	var root_deep: int = int(patches[root].get("kidorder", 0)) \
+		if patches.has(root) else 0
 	var at: int = from
 	for _step in range(400):
-		patches[at]["load"] = int(patches[at].get("load", 0)) + 1
-		if int(patches[at].get("kidorder", 0)) < deep:
-			patches[at]["kidorder"] = deep
-		_mark_plant(at, int(patches[at]["cell"]))
-		at = int(patches[at].get("from", -1))
+		var q: Dictionary = patches[at]
+		var q_def: Dictionary = PlantsData.ITEMS[String(q["id"])]
+		var was: int = _ring_step(_stem_r(q, q_def))
+		q["load"] = int(q.get("load", 0)) + 1
+		var deeper: bool = int(q.get("kidorder", 0)) < deep
+		if deeper:
+			q["kidorder"] = deep
+		if _ring_step(_stem_r(q, q_def)) != was:
+			_mark_ring(at)
+		elif deeper:
+			_mark_plant(at, int(q["cell"]))
+		at = int(q.get("from", -1))
 		if not patches.has(at):
-			return
+			break
+	if patches.has(root) and int(patches[root].get("kidorder", 0)) > root_deep:
+		_mark_vine(root)
 
 
 # ОТВЯЗАТЬ ЗВЕНО ОТ РОДИТЕЛЯ, не забыв убавить у того счёт детей.
@@ -5022,11 +5084,30 @@ func _unlink(pid: int) -> void:
 	var gone: int = 1 + int(patches[pid].get("load", 0))
 	var at: int = up
 	for _step in range(400):
-		patches[at]["load"] = maxi(0, int(patches[at].get("load", 0)) - gone)
-		_mark_plant(at, int(patches[at]["cell"]))
-		at = int(patches[at].get("from", -1))
+		var q: Dictionary = patches[at]
+		var q_def: Dictionary = PlantsData.ITEMS[String(q["id"])]
+		var was: int = _ring_step(_stem_r(q, q_def))
+		q["load"] = maxi(0, int(q.get("load", 0)) - gone)
+		if _ring_step(_stem_r(q, q_def)) != was:
+			_mark_ring(at)
+		at = int(q.get("from", -1))
 		if not patches.has(at):
 			return
+
+
+func _mark_ring(pid: int) -> void:
+	if not patches.has(pid):
+		return
+	_mark_plant(pid, int(patches[pid]["cell"]))
+	for kid in _kids_of.get(pid, []):
+		if patches.has(kid) and int(patches[kid].get("from", -1)) == pid:
+			_mark_plant(kid, int(patches[kid]["cell"]))
+
+
+func _mark_vine(root: int) -> void:
+	for pid in patches:
+		if int(patches[pid].get("root", -1)) == root:
+			_mark_plant(pid, int(patches[pid]["cell"]))
 
 
 func remove_at(pid: int) -> void:
@@ -5080,10 +5161,12 @@ func clear_all() -> void:
 	# Начатый удар не доделываем, а бросаем: сад, по которому он шёл, снесён.
 	_beat_drop()
 	patches.clear()
+	_kids_of.clear()
 	_live.clear()
 	by_cell.clear()
 	_coarse.clear()
 	_dirty.clear()
+	_shown.clear()
 	for cell in cell_nodes:
 		cell_nodes[cell].queue_free()
 	cell_nodes.clear()
@@ -5151,7 +5234,7 @@ func _stem_traits(from: int, def: Dictionary) -> Dictionary:
 	if not fresh:
 		var up: Dictionary = patches[from]
 		var drift: float = float(def.get("trait_drift", 0.08))
-		return {
+		var kept: Dictionary = {
 			"climb_k": clampf(float(up.get("climb_k", 1.0))
 				+ _rng.randf_range(-drift, drift), 0.0, 2.0),
 			"pull_k": clampf(float(up.get("pull_k", 1.0))
@@ -5164,6 +5247,12 @@ func _stem_traits(from: int, def: Dictionary) -> Dictionary:
 			# ветвиться вовсе и заросль выходит редкой.
 			"fork_k": float(up.get("fork_k", 1.0)),
 		}
+		if def.has("curl_turn"):
+			var curl_k: float = float(up.get("curl_k", 1.0))
+			if _rng.randf() < float(def.get("curl_flip", 0.0)):
+				curl_k = -curl_k
+			kept["curl_k"] = curl_k
+		return kept
 	var climb: Array = def.get("climb_vary", [1.0, 1.0])
 	var pull: Array = def.get("pull_vary", [1.0, 1.0])
 	var free: Array = def.get("free_vary", [0.0, 0.0])
@@ -5172,12 +5261,15 @@ func _stem_traits(from: int, def: Dictionary) -> Dictionary:
 	# родителя без убыли, иначе ветвление глохнет вглубь дерева.
 	var keep: float = float(patches[from].get("fork_k", 1.0)) \
 		if patches.has(from) else _rng.randf_range(float(fork[0]), float(fork[1]))
-	return {
+	var fresh_traits: Dictionary = {
 		"climb_k": _rng.randf_range(float(climb[0]), float(climb[1])),
 		"pull_k": _rng.randf_range(float(pull[0]), float(pull[1])),
 		"free_k": _rng.randf_range(float(free[0]), float(free[1])),
 		"fork_k": keep,
 	}
+	if def.has("curl_turn"):
+		fresh_traits["curl_k"] = 1.0 if _rng.randf() < 0.5 else -1.0
+	return fresh_traits
 
 
 # Какого поколения будет отросток от этого звена: первый побег продолжает ту же
@@ -5317,6 +5409,11 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 		if int(spot.get("bloom", 0)) > 0:
 			patches[pid]["bloom"] = int(spot["bloom"])
 			patches[pid]["bloom_max"] = int(spot.get("bloom_max", 1))
+			if def.has("pod_age"):
+				patches[pid]["bloom_head"] = pid if int(spot["bloom"]) == 1 \
+					or not patches.has(from) \
+					else int(patches[from].get("bloom_head", from))
+				patches[pid]["bloom_born"] = float(patches[pid]["lived"])
 		# ЕСТЬ ЛИ ЗДЕСЬ ОПОРА — от этого зависит, бодро звено растёт или нехотя
 		# (`flat_slow` в `_tick`). Меряем ОДИН РАЗ, при рождении: тот же прибор
 		# щупает шестнадцать сторон, и спрашивать его каждый удар сердца у полутора
@@ -5349,6 +5446,9 @@ func _create(spot: Dictionary, id: String, maturity: float, bulk: float,
 			patches[from]["bore"] = true
 		# Родитель перерисовывается вместе с ребёнком: у стебля они делят стык.
 		_mark_plant(from, int(patches[from]["cell"]))
+		if not _kids_of.has(from):
+			_kids_of[from] = []
+		_kids_of[from].append(pid)
 		if _is_stem(def):
 			_stem_born(pid, from)
 	if not by_cell.has(cell):
@@ -5595,8 +5695,10 @@ func _meet_born(a: Dictionary, b: Dictionary, rule: Dictionary) -> bool:
 	var def: Dictionary = PlantsData.ITEMS[born]
 	# Землю ищем тем же прибором, каким её ищет всякая посадка: середина отрезка
 	# висит между двумя точками поверхности и на самой поверхности не лежит.
-	var spot: Dictionary = main.grid.calm_surface_near(
-		(Vector3(a["pos"]) + Vector3(b["pos"])) * 0.5)
+	var mid: Vector3 = (Vector3(a["pos"]) + Vector3(b["pos"])) * 0.5
+	var spot: Dictionary = main.grid.calm_surface_near(mid)
+	if _is_stem(def):
+		spot = _ground_near(mid, [Vector3(a["pos"]), Vector3(b["pos"])])
 	if spot.is_empty() or not _fits_surface(spot["nrm"], def):
 		return false
 	if _meet_taken(Vector3(spot["pos"]), born, float(rule.get("apart", 1.5))):
@@ -5636,6 +5738,30 @@ func _meet_born(a: Dictionary, b: Dictionary, rule: Dictionary) -> bool:
 	main.mark_find(Vector3(spot["pos"]))
 	_met_born += 1
 	return true
+
+
+const GROUND_FLAT: float = 0.7
+const GROUND_TOP: float = 0.45
+
+func _ground_near(at: Vector3, toward: Array) -> Dictionary:
+	var tries: Array = [at]
+	for t in toward:
+		for k in [0.33, 0.67, 1.0]:
+			tries.append(at.lerp(Vector3(t), k))
+	var best: Dictionary = {}
+	var best_d: float = INF
+	for need in [GROUND_FLAT, GROUND_TOP]:
+		for c in tries:
+			var s: Dictionary = main.grid.calm_surface_near(c)
+			if s.is_empty() or Vector3(s["nrm"]).y < need:
+				continue
+			var d: float = at.distance_squared_to(Vector3(s["pos"]))
+			if d < best_d:
+				best_d = d
+				best = s
+		if not best.is_empty():
+			return best
+	return best
 
 
 # НЕ БЛИЖЕ СКОЛЬКИХ ЯЧЕЕК ОТ УЖЕ РОДИВШЕГОСЯ. Без этого встреча выходит не
@@ -5889,17 +6015,19 @@ func _over_grow(pid: int, p: Dictionary, span: float) -> void:
 
 
 func _state_look(p: Dictionary, def: Dictionary) -> Color:
+	var wax: float = clampf(float(def.get("wax", 0.0)), 0.0, 0.98) * 0.5 \
+		if _is_stem(def) else 0.0
 	var lv: int = state_of(p)
 	var was: int = int(p.get("state_was", lv))
 	if lv == 0 and was == 0:
-		return Color(0.0, 0.0, 0.0, 0.0)
+		return Color(0.0, 0.0, 0.0, wax)
 	var mode: float = 0.0 if _is_stem(def) else (2.0 if _is_poppy(def) else 1.0)
 	var at: float = float(p.get("state_at", _world_clock))
 	if is_dead(p):
-		return Color(float(STATE_MIN), float(STATE_DEAD), at, mode)
+		return Color(float(STATE_MIN), float(STATE_DEAD), at, mode + wax)
 	if lv <= STATE_MIN:
 		at = _world_clock - float(p.get("dying", 0.0))
-	return Color(float(was), float(lv), at, mode)
+	return Color(float(was), float(lv), at, mode + wax)
 
 
 func _state_rebase(p: Dictionary) -> void:
@@ -6028,6 +6156,8 @@ const BEAT_MS_BEHIND: float = 8.0
 # дать роста, растёт медленнее часов, а не стоит колом, догоняя разом.
 const BEAT_LAG_MAX: float = 6.0
 
+var beats_lost: int = 0
+var beat_cost: Dictionary = {}
 var _beat_on: bool = false        # удар начат и не доделан
 var _in_beat: bool = false        # ... и идёт прямо сейчас
 var _beat_dt: float = 0.0
@@ -6073,7 +6203,14 @@ func _beat_run(deadline: int) -> bool:
 	var done_here: int = 0
 	if not _beat_births:
 		while _beat_at < _beat_walk.size():
-			_beat_plant(int(_beat_walk[_beat_at]))
+			if joint_probe:
+				var c0: int = Time.get_ticks_usec()
+				var who: int = int(_beat_walk[_beat_at])
+				var kind: String = String(patches[who]["id"]) if patches.has(who) else "?"
+				_beat_plant(who)
+				beat_cost[kind] = int(beat_cost.get(kind, 0)) + Time.get_ticks_usec() - c0
+			else:
+				_beat_plant(int(_beat_walk[_beat_at]))
 			_beat_at += 1
 			done_here += 1
 			if _beat_stop(deadline, done_here):
@@ -6085,7 +6222,13 @@ func _beat_run(deadline: int) -> bool:
 		_beat_births = true
 		_beat_at = 0
 	while _beat_at < _beat_sprouts.size():
-		_beat_birth(_beat_sprouts[_beat_at])
+		if joint_probe:
+			var c1: int = Time.get_ticks_usec()
+			_beat_birth(_beat_sprouts[_beat_at])
+			var bk: String = "+" + String(_beat_sprouts[_beat_at][1])
+			beat_cost[bk] = int(beat_cost.get(bk, 0)) + Time.get_ticks_usec() - c1
+		else:
+			_beat_birth(_beat_sprouts[_beat_at])
 		_beat_at += 1
 		done_here += 1
 		if _beat_stop(deadline, done_here):
@@ -6201,7 +6344,8 @@ func _beat_plant(pid: int) -> void:
 		and int(p["bloom"]) < int(p.get("bloom_max", 1)) \
 		and lived < grow_span + BLOOM_GRACE
 	var ripe: float = _ripe_cap(p, def)
-	if done and not in_bloom and float(p["m"]) >= ripe and not _over_left(p):
+	if done and not in_bloom and float(p["m"]) >= ripe and not _over_left(p) \
+			and not _pod_left(p, def):
 		# Отросло и дозрело — из живых вон, больше его не спрашиваем.
 		_live.erase(pid)
 		return
@@ -6218,6 +6362,11 @@ func _beat_plant(pid: int) -> void:
 	# срок дорастания (`BLOOM_GRACE`), иначе отмерять было бы нечем.
 	p["lived"] = lived + span
 	_over_grow(pid, p, span)
+	if def.has("pod_age") and int(p.get("bloom", 0)) > 1:
+		var pod_step: int = int(ceil(_lia_pod_k(p, def) * 4.0))
+		if pod_step != int(p.get("pod_step", 0)):
+			p["pod_step"] = pod_step
+			_mark_plant(pid, int(p["cell"]))
 	var pace: float = _state_pace(p, def)
 	var rate: float = float(def.get("grow_rate", PlantsData.GROW_RATE_DEFAULT)) * (1.0 + def["shade_love"] * _shade(p))
 	# В складке растению вольготнее: туда наносит землю и дольше держится
@@ -6777,7 +6926,14 @@ func _one_sprout(pid: int, p: Dictionary, def: Dictionary) -> Dictionary:
 	if keep_on > 0.0 and came != Vector3.ZERO:
 		var along_land: Vector3 = came - nrm * came.dot(nrm)   # только вдоль земли
 		if along_land.length_squared() > 0.000001:
-			dir = (dir + along_land.normalized() * keep_on).normalized()
+			along_land = along_land.normalized()
+			var curl: float = float(def.get("curl_turn", 0.0))
+			if curl > 0.0:
+				curl *= lerpf(float(def.get("curl_wall", 1.0)), 1.0,
+					clampf(nrm.y, 0.0, 1.0))
+				along_land = along_land.rotated(nrm.normalized(),
+					deg_to_rad(curl) * float(p.get("curl_k", 1.0)))
+			dir = (dir + along_land * keep_on).normalized()
 
 	var bend_max: float = deg_to_rad(float(def.get("bend_max", 180.0)))
 	# Лиана лезет ВВЕРХ: тот же отросток, но с сильным перевесом по подъёму. Сила
@@ -6788,6 +6944,10 @@ func _one_sprout(pid: int, p: Dictionary, def: Dictionary) -> Dictionary:
 		var up: Vector3 = (Vector3.UP - nrm * nrm.dot(Vector3.UP))
 		if up.length_squared() > 0.001:
 			dir = (dir + up.normalized() * climb).normalized()
+	var descend: float = float(def.get("descend", 0.0))
+	if descend > 0.0:
+		var downhill: Vector3 = Vector3.DOWN - nrm * nrm.dot(Vector3.DOWN)
+		dir = (dir + downhill * descend).normalized()
 	# МОТОК РАСКРУЧИВАЕМ. Побег, который крутит всё время в одну сторону,
 	# сматывается спиралью — на кадре это виток на боку глыбы, и читается он не
 	# лозой, а шлангом. Накрученное ведётся при рождении звена (`spin`); перебрал
@@ -6795,7 +6955,7 @@ func _one_sprout(pid: int, p: Dictionary, def: Dictionary) -> Dictionary:
 	# крутизну. Запрета «не поворачивай» тут нет: побегу положено виться, нельзя
 	# только виться по кругу.
 	var spin: float = float(p.get("spin", 0.0))
-	if absf(spin) > SPIN_MAX and came != Vector3.ZERO:
+	if absf(spin) > float(def.get("spin_max", SPIN_MAX)) and came != Vector3.ZERO:
 		var side_turn: float = atan2(came.cross(dir).dot(nrm), came.dot(dir))
 		if signf(side_turn) == signf(spin):
 			dir = (came * (2.0 * came.dot(dir)) - dir).normalized()
@@ -7397,6 +7557,8 @@ func _bloom_ready(p: Dictionary, def: Dictionary) -> bool:
 		return false
 	if int(p.get("order", 0)) < _bloom_from(p, def):
 		return false
+	if def.has("bloom_green") and _wood_of(p) >= float(def["bloom_green"]):
+		return false
 	# ЦВЕТЁТ НЕ ВСЯКИЙ ГОДНЫЙ УЗЕЛ, А ДОЛЯ ИХ, И РЕШАЕТСЯ ЭТО РАЗ И НАВСЕГДА, ПО
 	# СОЛИ ЗВЕНА.
 	#
@@ -7601,6 +7763,8 @@ func _bloom_place(p: Dictionary, def: Dictionary, way: Vector3, n: int,
 	if dir.length_squared() < 0.000001:
 		return {}
 	dir = dir.normalized()
+	if n == 1 and def.has("bloom_stalk_up"):
+		dir = dir.lerp(Vector3(p["nrm"]), float(def["bloom_stalk_up"])).normalized()
 	# ВНУТРИ МЕТЁЛКИ ИЗЛОМ ОГРАНИЧЕН, как и в стебле: кисть должна виться, а не
 	# ломаться. А вот у ПЕРВОГО её звена мерки нет и быть не может — это развилка,
 	# новый побег из узла, и уходит он куда придётся.
@@ -8081,6 +8245,12 @@ const PLANT_GIFT: float = BURST_MAX
 # кистью его больше не растить — у организма их всего полторы минуты и есть
 # (`GROW_SPAN`, её правило). Это прямое следствие её решения, а не поломка.
 const BORN_UNFOLD: float = GROW_SPAN
+const UNFOLD_PACE: float = 1.5
+var unfold_pace: float = UNFOLD_PACE
+
+
+func _burst_pace(p: Dictionary) -> float:
+	return unfold_pace if bool(p.get(UNFOLD, false)) else BURST_PACE
 # Пометка «этот организм разворачивается сам» — по ней запас переходит отросткам.
 const UNFOLD: String = "unfold"
 # ТОЧКА РОСТА — НЕ РАСТЕНИЕ ЦЕЛИКОМ (решение пользователя 2026-08-28).
@@ -8188,7 +8358,7 @@ func unfold_at(pid: int) -> void:
 		return
 	p[UNFOLD] = true
 	p["burst"] = maxf(float(p.get("burst", 0.0)), left)
-	_burst_left = maxf(_burst_left, left / BURST_PACE + TICK)
+	_burst_left = maxf(_burst_left, left / unfold_pace + TICK)
 
 
 # ИЩЕМ ПО МЕСТУ, А НЕ ПЕРЕБОРОМ ВСЕГО САДА. Прежде кисть обходила КАЖДОЕ
@@ -8252,6 +8422,7 @@ func burst_at(at: Vector3, radius: float, gift: float = BURST_GIFT) -> void:
 	# Срок, на который заводится своё сердце всплеска: этого хватает, чтобы
 	# вылить даже полный потолок, и с запасом на один удар.
 	_burst_left = maxf(_burst_left, BURST_MAX / BURST_PACE + TICK)
+	_hand_left = maxf(_hand_left, BURST_MAX / BURST_PACE + TICK)
 
 
 # Сколько подаренного растение съедает за этот удар. Больше `BURST_PACE` секунд
@@ -8259,7 +8430,7 @@ func burst_at(at: Vector3, radius: float, gift: float = BURST_GIFT) -> void:
 func _burst_take(p: Dictionary, gift: float) -> float:
 	if gift <= 0.0 or not p.has("burst"):
 		return 0.0
-	var take: float = minf(float(p["burst"]), gift * BURST_PACE)
+	var take: float = minf(float(p["burst"]), gift * _burst_pace(p))
 	var rest: float = float(p["burst"]) - take
 	if rest <= 0.001:
 		p.erase("burst")
@@ -8302,6 +8473,13 @@ func import_garden(d: Dictionary) -> void:
 	_next = int(d.get("next", 1))
 	by_cell.clear()
 	_coarse.clear()
+	_kids_of.clear()
+	for pid in patches:
+		var up: int = int(patches[pid].get("from", -1))
+		if up >= 0:
+			if not _kids_of.has(up):
+				_kids_of[up] = []
+			_kids_of[up].append(pid)
 	for pid in patches:
 		# Старый снимок пометки `bore` не знает (заведена 02.09.2026): без неё
 		# каждое звено сошло бы за кончик и счёт поколений в таком саду встал бы.
@@ -8329,7 +8507,8 @@ func import_garden(d: Dictionary) -> void:
 		var q_def: Dictionary = PlantsData.ITEMS[String(q["id"])]
 		if float(patches[pid].get("lived", 0.0)) < _state_span(q, q_def) \
 				or float(patches[pid]["m"]) < _ripe_cap(patches[pid], q_def) \
-				or (state_of(q) <= STATE_MIN and not is_dead(q)) or _over_left(q):
+				or (state_of(q) <= STATE_MIN and not is_dead(q)) or _over_left(q) \
+				or _pod_left(q, q_def):
 			_live[pid] = true
 		# И СЕРДЦЕ ВСПЛЕСКА ЗАВОДИМ ЗАНОВО, если в снимке остался неизрасходованный
 		# запас. Сам запас лежит в карточке и сохраняется, а срок насоса — нет:
@@ -8337,7 +8516,7 @@ func import_garden(d: Dictionary) -> void:
 		# (`BORN_UNFOLD`), после загрузки стоял бы до первого мазка кистью.
 		var kept: float = float(patches[pid].get("burst", 0.0))
 		if kept > 0.0:
-			_burst_left = maxf(_burst_left, kept / BURST_PACE + TICK)
+			_burst_left = maxf(_burst_left, kept / _burst_pace(q) + TICK)
 		_coarse_add(pid, patches[pid])
 		_mark_cell(cell)
 	if state_test != "":
@@ -8559,6 +8738,97 @@ func dirty_count() -> int:
 	return _dirty.size()
 
 
+var joint_probe: bool = false
+var _shown: Dictionary = {}
+var _shown_rec: Dictionary = {}
+var _emit_pid: int = -1
+
+
+func joint_report(kinds: Array) -> Dictionary:
+	var shown: Dictionary = {}
+	for key in _shown:
+		if cell_nodes.has(key):
+			var rec: Dictionary = _shown[key]
+			for pid in rec:
+				shown[pid] = rec[pid]
+	var kid_seen: Dictionary = {}
+	for pid in shown:
+		kid_seen[int(shown[pid]["from"])] = true
+	var out: Dictionary = {"shown": 0, "hang": 0, "hang_dead": 0, "gap": 0,
+		"step": 0, "step_big": 0, "worst": 1.0, "open": 0, "open_bloom": 0,
+		"ghost": 0, "alive": 0, "wait": 0, "long": 0, "bloom_off": 0, "lost": 0}
+	for pid in shown:
+		var s: Dictionary = shown[pid]
+		if not patches.has(pid):
+			out["ghost"] += 1
+			continue
+		if not kinds.has(String(patches[pid]["id"])):
+			continue
+		out["shown"] += 1
+		var f: int = int(s["from"])
+		if f >= 0:
+			if not shown.has(f):
+				out["hang"] += 1
+				if not patches.has(f):
+					out["hang_dead"] += 1
+			elif int(s["bloom"]) != 1:
+				var ps: Dictionary = shown[f]
+				if Vector3(s["a"]).distance_to(Vector3(ps["b"])) > 0.004:
+					out["gap"] += 1
+				var lo: float = maxf(minf(float(s["ra"]), float(ps["rb"])), 0.00001)
+				var ratio: float = maxf(float(s["ra"]), float(ps["rb"])) / lo
+				out["worst"] = maxf(float(out["worst"]), ratio)
+				if ratio > 1.25:
+					out["step"] += 1
+				if ratio > 1.6:
+					out["step_big"] += 1
+		if not bool(s["cap"]) and not kid_seen.has(pid):
+			out["open"] += 1
+			if _kids_all_bloom(pid):
+				out["open_bloom"] += 1
+	for pid in patches:
+		var p: Dictionary = patches[pid]
+		if not kinds.has(String(p["id"])):
+			continue
+		var def: Dictionary = PlantsData.ITEMS[String(p["id"])]
+		if not _is_stem(def):
+			continue
+		out["alive"] += 1
+		if shown.has(pid):
+			continue
+		if int(p.get("bloom", 0)) > 0 and _bloom_k(p, def) <= 0.0:
+			out["bloom_off"] += 1
+		elif _dirty.has(int(p["cell"])):
+			out["wait"] += 1
+		elif patches.has(int(p.get("from", -1))) and Vector3(_stem_ring(p, def, true)["at"]) \
+				.distance_to(Vector3(_stem_ring(patches[int(p["from"])], def, true)["at"])) \
+				> _stem_max(def):
+			out["long"] += 1
+		else:
+			out["lost"] += 1
+	return out
+
+
+func _kids_all_bloom(pid: int) -> bool:
+	var node: Vector3i = main.grid.node_of(int(patches[pid]["cell"]))
+	var any := false
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				var c: int = main.grid.node_seed(node + Vector3i(dx, dy, dz))
+				if c < 0:
+					continue
+				for kid in by_cell.get(c, {}):
+					if not patches.has(kid) or int(patches[kid].get("from", -1)) != pid:
+						continue
+					any = true
+					var q: Dictionary = patches[kid]
+					if int(q.get("bloom", 0)) <= 0 or _bloom_k(q,
+							PlantsData.ITEMS[String(q["id"])]) > 0.0:
+						return false
+	return any
+
+
 # Пометить куски, у которых растение перешло на новую ступень роста. Само по
 # себе это дёшево — обход без геометрии, — а вот пересборка стоит дорого, и она
 # идёт отдельно.
@@ -8607,7 +8877,7 @@ func _mark_steps() -> void:
 		# растение едет к новому размеру само (`_morph_track`), а вот опоздание
 		# догонять нечем.
 		var shots: int = int(PlantsData.ITEMS[String(p["id"])].get("show_steps",
-			STEPS / SHOW_EVERY))
+			SHOW_STEPS))
 		var shot := int(p["m"] * float(shots))
 		if shot != int(p.get("shown", -1)):
 			p["shown"] = shot
@@ -8640,7 +8910,7 @@ func _drain(budget: float) -> void:
 	# игрок смотрит ровно в одно место и ждёт ответа именно там; кочка на другом
 	# конце острова подождёт кадр-другой без всякого вреда.
 	var order: Array = _dirty.keys()
-	if _burst_left > 0.0 and order.size() > 1:
+	if _hand_left > 0.0 and order.size() > 1:
 		var spot: Vector3 = _burst_spot
 		order.sort_custom(func(a, b):
 			return main.grid.seeds[a].distance_squared_to(spot) \
@@ -8781,13 +9051,13 @@ func _parts_for(cell: int) -> int:
 	var here: Dictionary = by_cell.get(cell, {})
 	if here.is_empty():
 		return 1
-	var load: float = 0.0
+	var weight: float = 0.0
 	for pid in here:
 		var p: Dictionary = patches.get(pid, {})
 		if p.is_empty():
 			continue
-		load += float(PlantsData.ITEMS[p["id"]].get("part_weight", 1.0))
-	return clampi(int(ceil(load / PART_WEIGHT)), 1, PART_MAX)
+		weight += float(PlantsData.ITEMS[p["id"]].get("part_weight", 1.0))
+	return clampi(int(ceil(weight / PART_WEIGHT)), 1, PART_MAX)
 
 
 # НА СКОЛЬКО ДОЛЕЙ ДЕЛИТСЯ САМО РАСТЕНИЕ. Лёгкому хватает одной; куст мака
@@ -8863,6 +9133,7 @@ func _mark_plant(pid: int, cell: int) -> void:
 func _drop_parts_from(cell: int, from_part: int) -> void:
 	for p in range(from_part, PART_MAX):
 		var key := Vector2i(cell, p)
+		_shown.erase(key)
 		if cell_nodes.has(key):
 			cell_nodes[key].queue_free()
 			cell_nodes.erase(key)
@@ -8870,6 +9141,9 @@ func _drop_parts_from(cell: int, from_part: int) -> void:
 func _rebuild_part(cell: int, part: int, parts: int) -> int:
 	var here: Dictionary = by_cell.get(cell, {})
 	var key := Vector2i(cell, part)
+	if joint_probe:
+		_shown.erase(key)
+		_shown_rec = {}
 	if here.is_empty():
 		if cell_nodes.has(key):
 			cell_nodes[key].queue_free()
@@ -8908,8 +9182,12 @@ func _rebuild_part(cell: int, part: int, parts: int) -> int:
 		mine += 1
 		tufts.set_custom(2, _state_look(patches[pid],
 			PlantsData.ITEMS[String(patches[pid]["id"])]))
+		_emit_pid = int(pid)
 		if _emit_tuft(tufts, patches[pid], j, slices, int(pid)):
 			any_tuft = true
+	_emit_pid = -1
+	if joint_probe and any_tuft:
+		_shown[key] = _shown_rec
 	if not any_tuft:
 		if cell_nodes.has(key):
 			cell_nodes[key].queue_free()
@@ -9742,7 +10020,7 @@ func _bark_of(p: Dictionary, def: Dictionary) -> Color:
 	var bark: Color = def.get("stem_color", Color(0.34, 0.26, 0.17))
 	# У цветоноса своя жизнь, его не трогаем: он и так весь молодой.
 	if int(p.get("bloom", 0)) > 0:
-		return bark
+		return Color(def.get("bloom_color", bark))
 	var wood: float = _wood_of(p)
 	# КОНЦЫ ВСЁ РАВНО ЗЕЛЕНЕЕ. Правило по ноше не отменяется правилом по
 	# поколениям, а складывается с ним: у старой лозы ствол бурый, а свежий
@@ -9753,9 +10031,14 @@ func _bark_of(p: Dictionary, def: Dictionary) -> Color:
 		return bark
 	# Не в чистую зелень: даже молодой побег к основанию буреет, и резкий переход
 	# читался бы двумя приклеенными кусками.
-	return bark.lerp(TIP_GREEN, green * 0.85)
+	var tint: Color = bark.lerp(Color(def.get("tip_green", TIP_GREEN)), green * 0.85)
+	if def.has("tip_red"):
+		var fresh: float = 1.0 - clampf(float(p.get("load", 0))
+			/ maxf(float(def.get("tip_red_load", 4.0)), 0.001), 0.0, 1.0)
+		tint = tint.lerp(Color(def["tip_red"]), fresh * float(def.get("tip_red_mix", 0.6)))
+	return tint
 
-func _stem_ring(p: Dictionary, def: Dictionary) -> Dictionary:
+func _stem_ring(p: Dictionary, def: Dictionary, shown: bool = false) -> Dictionary:
 	var nrm: Vector3 = p["nrm"]
 	# ТОЛЩИНУ ДАЁТ НЕ ВОЗРАСТ, А НОША. Прежде радиус шёл от зрелости звена, и
 	# разницы почти не было видно: звено взрослеет за десяток секунд, и вся плеть
@@ -9763,6 +10046,8 @@ func _stem_ring(p: Dictionary, def: Dictionary) -> Dictionary:
 	# НИЖЕ по течению (`load`): у основания это вся лиана, у кончика ноль. Так
 	# толщина и устроена у живой лозы — стебель держит то, что над ним.
 	var r: float = _stem_r(p, def)
+	if shown:
+		r = _shown_r(r)
 	var from: int = int(p.get("from", -1))
 	# ОСЬ КОЛЬЦА — БИССЕКТРИСА, а не направление входа.
 	#
@@ -9777,6 +10062,21 @@ func _stem_ring(p: Dictionary, def: Dictionary) -> Dictionary:
 			in_dir = d.normalized()
 	var out_dir: Vector3 = p.get("out", Vector3.ZERO)
 	return _stem_ring_at(p, nrm, r, in_dir, out_dir, from)
+
+
+const SHOW_R_STEP: float = 1.04
+const SHOW_R_BASE: float = 0.0005
+
+func _shown_r(r: float) -> float:
+	if r <= SHOW_R_BASE:
+		return r
+	return SHOW_R_BASE * pow(SHOW_R_STEP, float(_ring_step(r)))
+
+
+func _ring_step(r: float) -> int:
+	if r <= SHOW_R_BASE:
+		return 0
+	return int(round(log(r / SHOW_R_BASE) / log(SHOW_R_STEP)))
 
 
 # ТОЛЩИНА СТЕБЛЯ В ЭТОМ ЗВЕНЕ. Вынесена из `_stem_ring` отдельно, когда её
@@ -10000,10 +10300,14 @@ func _emit_root(st: SurfaceTool, p: Dictionary, def: Dictionary,
 # Кольцо у ПОДОШВЫ ЦВЕТОНОСА: стоит на месте родителя, но развёрнуто по своей
 # оси и своей толщины, чуть шире — у живой лозы цветонос у основания с наплывом.
 func _bloom_foot(p: Dictionary, up: Dictionary, def: Dictionary) -> Dictionary:
-	var mine: Dictionary = _stem_ring(p, def)
-	var way: Vector3 = Vector3(p["pos"]) - Vector3(up["pos"])
+	var mine: Dictionary = _stem_ring(p, def, true)
+	var foot: Vector3 = Vector3(up["pos"])
+	if bool(def.get("bloom_on_axis", false)):
+		foot = Vector3(_stem_ring(up, def, true)["at"])
+	var way: Vector3 = Vector3(mine["at"]) - foot if bool(def.get("bloom_on_axis", false)) \
+		else Vector3(p["pos"]) - Vector3(up["pos"])
 	if way.length_squared() < 0.000001:
-		return _stem_ring(up, def)
+		return _stem_ring(up, def, true)
 	way = way.normalized()
 	var side: Vector3 = way.cross(Vector3(p["nrm"]))
 	if side.length_squared() < 0.000001:
@@ -10011,19 +10315,105 @@ func _bloom_foot(p: Dictionary, up: Dictionary, def: Dictionary) -> Dictionary:
 	if side.length_squared() < 0.000001:
 		side = way.cross(Vector3.UP)
 	side = side.normalized()
-	return {"at": Vector3(up["pos"]), "r": float(mine["r"]) * BLOOM_FOOT,
-		"side": side, "turn": way.cross(side).normalized(), "axis": way}
+	return {"at": foot, "r": float(mine["r"]) * BLOOM_FOOT,
+		"side": side, "turn": side.cross(way).normalized(), "axis": way}
 
 
 # Насколько подошва цветоноса шире его самого: наплыв в месте, где он выходит
 # из лозы. Без него метёлка торчала бы из стебля палочкой, воткнутой в тело.
 const BLOOM_FOOT: float = 1.35
+const STALK_SPARE: float = 1.25
+const SMOOTH_MAX: int = 3
+
+
+func _bloom_stalk_max(def: Dictionary) -> float:
+	return main.CELL_SPACING * float(def.get("bloom_step_far", 0.17)) \
+		* float(def.get("bloom_stalk", 1.0)) \
+		* (1.0 + float(def.get("bloom_stalk_slope", 0.0))) * STALK_SPARE
+
+
+func _seat_on(p: Dictionary, def: Dictionary, root: Vector3, back: Dictionary,
+		ring: Dictionary, t: float) -> Vector3:
+	if def.has("stem_smooth") and back.has("axis") \
+			and patches.has(int(p.get("from", -1))):
+		return _stem_curve(root, Vector3(back["axis"]), Vector3(ring["at"]),
+			Vector3(ring["axis"]), t)
+	return root.lerp(Vector3(ring["at"]), t)
+
+
+func _stem_curve(a: Vector3, ta: Vector3, b: Vector3, tb: Vector3, t: float) -> Vector3:
+	var span: float = a.distance_to(b)
+	var t2: float = t * t
+	var t3: float = t2 * t
+	return a * (2.0 * t3 - 3.0 * t2 + 1.0) + ta * (span * (t3 - 2.0 * t2 + t)) \
+		+ b * (-2.0 * t3 + 3.0 * t2) + tb * (span * (t3 - t2))
+
+
+func _stem_curve_way(a: Vector3, ta: Vector3, b: Vector3, tb: Vector3,
+		t: float) -> Vector3:
+	var span: float = a.distance_to(b)
+	var t2: float = t * t
+	return a * (6.0 * t2 - 6.0 * t) + ta * (span * (3.0 * t2 - 4.0 * t + 1.0)) \
+		+ b * (-6.0 * t2 + 6.0 * t) + tb * (span * (3.0 * t2 - 2.0 * t))
+
+
+func _emit_smooth_stem(st: SurfaceTool, theirs: Dictionary, mine: Dictionary,
+		r_a: float, r_b: float, v_far: float, step_deg: float) -> PackedVector3Array:
+	var a: Vector3 = theirs["at"]
+	var b: Vector3 = mine["at"]
+	var ta: Vector3 = theirs["axis"]
+	var tb: Vector3 = mine["axis"]
+	var chord: Vector3 = (b - a).normalized()
+	var bend: float = rad_to_deg(maxf(ta.angle_to(chord), tb.angle_to(chord)) * 2.0)
+	var parts: int = clampi(1 + int(bend / maxf(step_deg, 1.0)), 1, SMOOTH_MAX)
+	var centres := PackedVector3Array()
+	var rings: Array = []
+	var side: Vector3 = theirs["side"]
+	for k in range(parts + 1):
+		var t: float = float(k) / float(parts)
+		var at: Vector3 = _stem_curve(a, ta, b, tb, t)
+		var way: Vector3 = _stem_curve_way(a, ta, b, tb, t)
+		if k == 0:
+			way = ta
+		elif k == parts:
+			way = tb
+		elif way.length_squared() < 0.0000001:
+			way = chord
+		way = way.normalized()
+		var s: Vector3 = Vector3(theirs["side"]).lerp(Vector3(mine["side"]), t)
+		if k == 0:
+			s = theirs["side"]
+		elif k == parts:
+			s = mine["side"]
+		s = s - way * s.dot(way)
+		if s.length_squared() < 0.000001:
+			s = side - way * side.dot(way)
+		s = s.normalized()
+		side = s
+		var turn: Vector3 = s.cross(way).normalized()
+		centres.append(at)
+		rings.append([at, s, turn, lerpf(r_a, r_b, t), v_far * t])
+	for k in range(parts):
+		var lo: Array = rings[k]
+		var hi: Array = rings[k + 1]
+		for i in range(STEM_SIDES):
+			for tri in BAND_TRI:
+				var far: bool = int(tri[0]) == 1
+				var nxt: bool = int(tri[1]) == 1
+				var ring: Array = hi if far else lo
+				var ang: float = TAU * float(i + (1 if nxt else 0)) / float(STEM_SIDES)
+				var out: Vector3 = Vector3(ring[1]) * cos(ang) + Vector3(ring[2]) * sin(ang)
+				st.set_normal(out)
+				st.set_uv(Vector2(float(i + (1 if nxt else 0)) / float(STEM_SIDES),
+					float(ring[4])))
+				st.add_vertex(Vector3(ring[0]) + out * float(ring[3]))
+	return centres
 
 func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 	if int(p.get("bloom", 0)) > 0 and _bloom_k(p, def) <= 0.0:
 		return false
 	var from: int = int(p.get("from", -1))
-	var mine: Dictionary = _stem_ring(p, def)
+	var mine: Dictionary = _stem_ring(p, def, true)
 	var theirs: Dictionary
 	# ДОГОН У ЛОЗЫ — ЭТО ВЫДВИЖЕНИЕ КОЛЕНА, а не раздувание кочки. Растёт лоза
 	# новыми звеньями: пока звена нет — пусто, появилось — есть целиком. Толчок
@@ -10050,7 +10440,7 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 		# его и не видно, а выходит цветонос уже круглым.
 		theirs = _bloom_foot(p, patches[from], def)
 	elif patches.has(from):
-		theirs = _stem_ring(patches[from], def)
+		theirs = _stem_ring(patches[from], def, true)
 	else:
 		# КОРЕНЬ РИСУЕТ НЕ ПЕНЁК, А ИЗГИБ. Колена у него нет — не от кого, — и без
 		# основания только что посаженная лиана была бы НЕВИДИМА секунды четыре,
@@ -10069,6 +10459,9 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 		_emit_root(st, p, def, mine)
 		_emit_leaves(st, p, def, mine, mine)
 		_emit_blooms(st, p, def, mine, mine)
+		if joint_probe:
+			_shown_rec[_emit_pid] = {"from": -1, "b": mine["at"], "rb": mine["r"],
+				"cap": int(p.get("kids", 0)) == 0, "bloom": 0}
 		return true
 	var a: Vector3 = theirs["at"]
 	var b: Vector3 = mine["at"]
@@ -10082,11 +10475,15 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 	# ПО СЕБЕ, и соседи по цепочке разъезжаются: подними игрок холм под лианой, и
 	# между двумя звеньями окажется весь его склон. На кадре это толстые прямые
 	# палки через полкарты.
-	if span > _stem_max(def):
+	if span > _stem_max(def) and not (int(p.get("bloom", 0)) == 1
+			and span <= _bloom_stalk_max(def)):
 		return false
 
 	var r_a: float = theirs["r"]
 	var r_b: float = mine["r"]
+	if joint_probe:
+		_shown_rec[_emit_pid] = {"from": from, "a": a, "ra": r_a, "b": b, "rb": r_b,
+			"cap": int(p.get("kids", 0)) == 0, "bloom": int(p.get("bloom", 0))}
 	# Разметка коры: поперёк — ровно один оборот образца, вдоль — столько же по
 	# длине. Точка выходит примерно квадратной сама собой, и подгонять её числом
 	# не надо: чем толще стебель, тем крупнее на нём кора, как оно и бывает.
@@ -10109,22 +10506,29 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 		nrms.append([out_a, out_b])
 		ring_a.append(a + out_a * r_a)
 		ring_b.append(b + out_b * r_b)
-	# Обход не важен: у материала стороны не отсекаются.
-	for i in range(STEM_SIDES):
-		var u0: float = float(i) / float(STEM_SIDES)
-		var u1: float = float(i + 1) / float(STEM_SIDES)
-		for k in BAND_TRI:
-			var far: bool = int(k[0]) == 1
-			var nxt: bool = int(k[1]) == 1
-			st.set_normal(nrms[i + 1 if nxt else i][1 if far else 0])
-			st.set_uv(Vector2(u1 if nxt else u0, v_far if far else 0.0))
-			var ring: Array = ring_b if far else ring_a
-			st.add_vertex(ring[i + 1] if nxt else ring[i])
+	var path := PackedVector3Array([a, b])
+	if def.has("stem_smooth"):
+		path = _emit_smooth_stem(st, theirs, mine, r_a, r_b, v_far,
+			float(def["stem_smooth"]))
+	else:
+		# Обход не важен: у материала стороны не отсекаются.
+		for i in range(STEM_SIDES):
+			var u0: float = float(i) / float(STEM_SIDES)
+			var u1: float = float(i + 1) / float(STEM_SIDES)
+			for k in BAND_TRI:
+				var far: bool = int(k[0]) == 1
+				var nxt: bool = int(k[1]) == 1
+				st.set_normal(nrms[i + 1 if nxt else i][1 if far else 0])
+				st.set_uv(Vector2(u1 if nxt else u0, v_far if far else 0.0))
+				var ring: Array = ring_b if far else ring_a
+				st.add_vertex(ring[i + 1] if nxt else ring[i])
 
 	# КОНЧИК ЗАКРЫВАЕМ КУПОЛКОМ. У звена без продолжения трубка обрывалась
 	# открытым торцом, и он читался плоским кружком, будто ветвь отпилили.
 	if int(p.get("kids", 0)) == 0:
 		var tip: Vector3 = (b - a).normalized()
+		if def.has("stem_smooth"):
+			tip = Vector3(mine["axis"])
 		var top: Vector3 = b + tip * (r_b * TIP_DOME)
 		for i in range(STEM_SIDES):
 			st.set_normal(tip)
@@ -10136,8 +10540,16 @@ func _emit_stem(st: SurfaceTool, p: Dictionary, def: Dictionary) -> bool:
 			st.set_normal((Vector3(nrms[i + 1][1]) + tip).normalized())
 			st.set_uv(Vector2(float(i + 1) / float(STEM_SIDES), v_far))
 			st.add_vertex(ring_b[i + 1])
+	if def.has("speck_dens"):
+		var gen: int = 3 if int(p.get("bloom", 0)) > 0 else int(p.get("order", 0)) + 1
+		_emit_stem_specks(st, def, path, r_a, r_b, gen,
+			bark * float(p["body"]["shade"]), stage, 1.0 - _wood_of(p),
+			_hash01(int(p["salt"]) + 9173) * TAU)
 	_emit_leaves(st, p, def, mine, theirs)
 	_emit_blooms(st, p, def, mine, theirs)
+	if int(p.get("kids", 0)) == 0 and int(p.get("bloom", 0)) <= 0 \
+			and def.has("tip_curl"):
+		_emit_tip_curl(st, p, def, a, b, r_b, bark * float(p["body"]["shade"]), stage)
 	return true
 
 
@@ -10458,7 +10870,7 @@ func _leaf_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 		# они и читались парой из одного места. Разводим их по колену: последний
 		# у самого звена, прочие отступают назад, к родителю.
 		var slot: float = 1.0 - float(many - 1 - i) * LEAF_APART
-		var seat: Vector3 = root.lerp(Vector3(ring["at"]), clampf(slot, 0.0, 1.0))
+		var seat: Vector3 = _seat_on(p, def, root, back, ring, clampf(slot, 0.0, 1.0))
 		var seat_r: float = lerpf(root_r, rad, clampf(slot, 0.0, 1.0))
 		# ЧЕРЕШОК — ОТДЕЛЬНОЕ ТЕЛО, а не часть картинки (решение пользователя
 		# 2026-08-28). `foot` сидит в стебле, `at` — там, где начинается пластина;
@@ -10505,7 +10917,7 @@ func _bloom_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 	# голое, а нам это заодно и нужно: узел лежит на опоре, и цветок, сидящий на
 	# первом же звене, оказался бы в камне. Ножка выносит кисть наружу, и дальше
 	# ей уже есть где висеть.
-	if int(p.get("bloom", 0)) <= 1:
+	if int(p.get("bloom", 0)) <= 1 and not _bloom_stub(p, def):
 		return []
 	var at: float = float(def.get("flower_at", 0.2))
 	var grown: float = clampf((float(p["m"]) - at) / maxf(1.0 - at, 0.0001),
@@ -10576,7 +10988,7 @@ func _bloom_plan(p: Dictionary, def: Dictionary, ring: Dictionary,
 		# Цветки одного звена сидят вдоль колена, а не в одной точке — те же
 		# грабли, что уже собраны листом.
 		var slot: float = 1.0 - float(many - 1 - i) * LEAF_APART
-		var seat: Vector3 = root.lerp(Vector3(ring["at"]), clampf(slot, 0.0, 1.0))
+		var seat: Vector3 = _seat_on(p, def, root, back, ring, clampf(slot, 0.0, 1.0))
 		var seat_r: float = lerpf(root_r, rad, clampf(slot, 0.0, 1.0))
 		# ЦВЕТОНОЖКА — ОТДЕЛЬНОЕ ТЕЛО (решение пользователя 2026-08-28): цветок
 		# сидит не на самой оси метёлки, а на своей короткой ножке, отходящей от
@@ -10662,7 +11074,200 @@ func _emit_blooms(st: SurfaceTool, p: Dictionary, def: Dictionary,
 		float(p.get("bloom", 1)) / maxf(1.0, float(p.get("bloom_max", 1))))
 	var thin: float = axis_r / maxf(float(def.get("pedicel_thin", 3.0)), 1.0)
 	_emit_stalks(st, plan, p, def, thin, thin * 0.8)
+	if String(def.get("flower_look", "")) == "poppy":
+		_emit_lia_blooms(st, plan, p, def, thin * 0.8)
+		return
 	_emit_petals(st, plan, p, def)
+
+
+func _bloom_stub(p: Dictionary, def: Dictionary) -> bool:
+	return String(def.get("flower_look", "")) == "poppy" \
+		and int(p.get("bloom", 0)) == 1 and int(p.get("kids", 0)) == 0 \
+		and float(p["m"]) >= float(def.get("stub_at", 0.6))
+
+
+func _lia_pod_k(p: Dictionary, def: Dictionary) -> float:
+	if int(p.get("bloom", 0)) <= 1 or not def.has("pod_age"):
+		return 0.0
+	var head: int = int(p.get("bloom_head", -1))
+	var salt: int = int(patches[head]["salt"]) if patches.has(head) else int(p["salt"])
+	if _mix01(salt + 1553) >= float(def["pod_share"]):
+		return 0.0
+	var age: float = float(p.get("lived", 0.0)) - float(p.get("bloom_born", 0.0))
+	return clampf((age - float(def.get("pod_age", 25.0)))
+		/ maxf(float(def.get("pod_grow", 8.0)), 0.001), 0.0, 1.0)
+
+
+func _pod_left(p: Dictionary, def: Dictionary) -> bool:
+	if not def.has("pod_age") or int(p.get("bloom", 0)) <= 1 or is_dead(p):
+		return false
+	var head: int = int(p.get("bloom_head", -1))
+	var salt: int = int(patches[head]["salt"]) if patches.has(head) else int(p["salt"])
+	return _mix01(salt + 1553) < float(def["pod_share"]) and _lia_pod_k(p, def) < 1.0
+
+
+func lia_phase(p: Dictionary, def: Dictionary) -> Vector2:
+	var open_at: float = float(def.get("flower_open", 0.3))
+	var open_k: float = clampf((float(p["m"]) - open_at)
+		/ maxf(1.0 - open_at, 0.0001) * 4.0, 0.0, 1.0)
+	return Vector2(open_k, _lia_pod_k(p, def))
+
+
+func _emit_lia_blooms(st: SurfaceTool, plan: Array, p: Dictionary, def: Dictionary,
+		thin: float) -> void:
+	var stage: int = clampi(int(float(p["m"]) * float(STAGES)), 0, STAGES - 1)
+	var phase: Vector2 = lia_phase(p, def)
+	var from_at: float = float(def.get("flower_at", 0.2))
+	var open_at: float = float(def.get("flower_open", 0.3))
+	var bud_g: float = clampf((float(p["m"]) - from_at)
+		/ maxf(open_at - from_at, 0.0001), 0.0, 1.0)
+	var bud_c: Color = Color(def.get("bud_color", Color(0.36, 0.45, 0.25)))
+	var heart_c: Color = Color(def.get("heart_color", Color(0.66, 0.72, 0.47)))
+	var pin_c: Color = Color(def.get("stamen_color", Color(0.10, 0.09, 0.11)))
+	var off: float = float(def.get("flower_off", 0.2))
+	var bud_long: float = float(def.get("bud_long", 0.6))
+	var bud_wide: float = float(def.get("bud_wide", 0.3))
+	var open: Array = []
+	for f in plan:
+		var along: Vector3 = f["along"]
+		var face: Vector3 = f["face"]
+		var seat: Vector3 = f["at"]
+		var long: float = float(f["long"])
+		var shade: float = float(f["shade"])
+		var neck: Vector3 = seat - along * (off * long)
+		if phase.y > 0.0:
+			_emit_lia_pod(st, def, neck, along, face, long, phase.y, shade, stage, thin)
+			continue
+		if phase.x < 1.0:
+			var bl: float = long * bud_long * lerpf(0.45, 1.0, bud_g)
+			var bw: float = long * bud_wide * lerpf(0.45, 1.0, bud_g)
+			var hang: Vector3 = (along + Vector3.DOWN * 0.8).normalized()
+			if phase.x <= 0.0:
+				_emit_pill(st, neck + hang * (bl * 0.5), hang, bl, bw * 0.5,
+					bud_c * shade, face, stage, 8)
+				_emit_bud_specks(st, def, neck, hang, bl, bw * 0.5, face,
+					bud_c * shade, stage, int(f["salt"]))
+				continue
+			var apart: Vector3 = face - hang * face.dot(hang)
+			if apart.length_squared() > 0.000001:
+				apart = apart.normalized()
+				var lean_s: float = deg_to_rad(lerpf(4.0, 70.0, phase.x))
+				for turn_i in [1.0, -1.0]:
+					var out_s: Vector3 = apart * float(turn_i)
+					var along_s: Vector3 = (hang * cos(lean_s) + out_s * sin(lean_s)).normalized()
+					var face_s: Vector3 = (out_s * cos(lean_s) - hang * sin(lean_s)).normalized()
+					_emit_shell(st, neck, along_s, face_s, bl, bw * 0.5, deg_to_rad(72.0),
+						bud_c * shade, stage, 3, 4)
+					_emit_shell_specks(st, def, neck, along_s, face_s, bl, bw * 0.5,
+						deg_to_rad(72.0), bud_c * shade, stage)
+		var hw: float = long * float(def.get("heart_wide", 0.16)) * lerpf(0.6, 1.0, phase.x)
+		_emit_twig(st, neck, seat, thin, hw * 1.05, face, bud_c * shade, stage)
+		_emit_pill(st, seat + along * (hw * 0.55), along, hw * 1.25, hw,
+			heart_c * shade, face, stage, 5)
+		_emit_twig(st, seat - along * (hw * 0.15), seat + along * (hw * 0.8),
+			hw * 1.05, hw * 1.55, face, pin_c * shade, stage, 6)
+		var g: Dictionary = f.duplicate()
+		g["long"] = long * lerpf(bud_long, 1.0, phase.x)
+		g["tint"] = poppy_paint(int(f["salt"]), def)
+		g["ring"] = hw * 1.25
+		g["open_k"] = phase.x
+		open.append(g)
+	_emit_petals(st, open, p, def, POPPY_PETAL_COL, POPPY_PETAL_KINDS)
+
+
+func _emit_bud_specks(st: SurfaceTool, def: Dictionary, foot: Vector3, way: Vector3,
+		long: float, wide: float, face: Vector3, tint: Color, stage: int,
+		salt: int) -> void:
+	var many: int = int(def.get("speck_bud", 0))
+	if many <= 0 or long <= 0.0 or wide <= 0.0:
+		return
+	var side: Vector3 = way.cross(face)
+	if side.length_squared() < 0.000001:
+		side = way.cross(Vector3.UP)
+	if side.length_squared() < 0.000001:
+		return
+	side = side.normalized()
+	var turn: Vector3 = way.cross(side).normalized()
+	var c: Color = tint.lightened(float(def.get("speck_light", 0.24)))
+	var spin: float = _hash01(salt + 3301) * TAU
+	for i in range(many):
+		var u: float = lerpf(0.15, 0.85, (float(i) + 0.5) / float(many))
+		var r: float = lerpf(wide * 0.42, wide, u / 0.55) if u <= 0.55 \
+			else lerpf(wide, wide * 0.30, (u - 0.55) / 0.45)
+		var a: float = float(i) * 2.399963 + spin
+		var out: Vector3 = (side * cos(a) + turn * sin(a)).normalized()
+		_emit_speck(st, foot + way * (long * u) + out * (r * 0.95), way, out,
+			long * float(def.get("speck_bud_long", 0.10)) * 0.5,
+			long * float(def.get("speck_bud_wide", 0.045)) * 0.5, c, stage)
+
+
+func _emit_shell_specks(st: SurfaceTool, def: Dictionary, seat: Vector3,
+		along: Vector3, face: Vector3, long: float, wide: float, span: float,
+		tint: Color, stage: int) -> void:
+	var many: int = int(def.get("speck_bud", 0))
+	if many <= 0:
+		return
+	var edge: Vector3 = along.cross(face)
+	if edge.length_squared() < 0.000000001:
+		return
+	edge = edge.normalized()
+	var c: Color = tint.lightened(float(def.get("speck_light", 0.24)))
+	for i in range(many):
+		var u: float = lerpf(0.18, 0.82, (float(i) + 0.5) / float(many))
+		var a: float = span * (2.0 * fmod(float(i) * 0.618034, 1.0) - 1.0) * 0.62
+		var got: Array = _shell_point(seat, along, face, edge, u, a, long, wide)
+		var n: Vector3 = got[1]
+		_emit_speck(st, Vector3(got[0]) + n * (long * 0.004), along, n,
+			long * float(def.get("speck_bud_long", 0.10)) * 0.5,
+			long * float(def.get("speck_bud_wide", 0.045)) * 0.5, c, stage)
+
+
+func _emit_lia_pod(st: SurfaceTool, def: Dictionary, neck: Vector3, along: Vector3,
+		face: Vector3, long: float, k: float, shade: float, stage: int,
+		thin: float) -> void:
+	var pw: float = long * float(def.get("pod_wide", 0.24)) * lerpf(0.45, 1.0, k)
+	var squash: float = float(def.get("pod_squash", 0.82))
+	var young: Color = Color(def.get("pod_color", Color(0.58, 0.62, 0.44)))
+	var c: Color = young.lerp(Color(def.get("pod_color_ripe", young)), k) * shade
+	var mid: Vector3 = neck + along * (pw * squash * 1.15)
+	_emit_twig(st, neck, mid, thin, pw * 0.45, face, c.darkened(0.1), stage)
+	_emit_globe(st, mid, along, pw, squash, c, face, stage, 6, 4)
+	var crown: Color = c.darkened(0.18).lerp(
+		Color(def.get("pod_crown_color", c)) * shade, k)
+	var cap: Vector3 = mid + along * (pw * squash * 0.9)
+	_emit_twig(st, cap, cap + along * (pw * 0.22), pw * 0.55, pw * 0.40, face,
+		crown, stage, 6)
+
+
+const TIP_CURL_TURNS: float = 1.15
+const TIP_CURL_END: float = 0.25
+const TIP_CURL_STEPS: int = 8
+
+func _emit_tip_curl(st: SurfaceTool, p: Dictionary, def: Dictionary, a: Vector3,
+		b: Vector3, r_b: float, tint: Color, stage: int) -> void:
+	var size: float = float(def.get("tip_curl", 0.0)) \
+		* clampf(float(p["m"]) / 0.4, 0.25, 1.0) * _leaf_k(p)
+	if size <= 0.0 or b.distance_squared_to(a) < 0.0000001:
+		return
+	var d0: Vector3 = (b - a).normalized()
+	var nrm: Vector3 = p["nrm"]
+	var lift: Vector3 = nrm - d0 * d0.dot(nrm)
+	if lift.length_squared() < 0.000001:
+		lift = Vector3.UP - d0 * d0.dot(Vector3.UP)
+	if lift.length_squared() < 0.000001:
+		return
+	lift = lift.normalized()
+	var turns: float = TIP_CURL_TURNS * TAU
+	var shrink: float = log(TIP_CURL_END) / turns
+	var da: float = turns / float(TIP_CURL_STEPS)
+	var path := PackedVector3Array()
+	var at: Vector3 = b
+	path.append(at)
+	for i in range(TIP_CURL_STEPS):
+		var ang: float = (float(i) + 0.5) * da
+		at += (d0 * cos(ang) + lift * sin(ang)) * (size * exp(shrink * ang) * da)
+		path.append(at)
+	_emit_tube(st, path, r_b, r_b * 0.35, lift.cross(d0), tint, stage)
 
 
 # =============================================================================
@@ -11025,6 +11630,8 @@ func _emit_petals(st: SurfaceTool, flowers: Array, p: Dictionary,
 			var lean: float = open_in
 			if rows > 1:
 				lean = lerpf(open_in, open_out, float(row) / float(rows - 1))
+			if f.has("open_k"):
+				lean *= lerpf(0.25, 1.0, float(f["open_k"]))
 			# Наружный ряд крупнее и сидит ниже — у живого цветка внешние доли
 			# всегда старше и шире внутренних.
 			var long: float = size * (1.0 + rank * float(row))
