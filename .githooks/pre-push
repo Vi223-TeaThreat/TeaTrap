@@ -52,6 +52,10 @@ fi
 if grep -q "^Шипы:" "$log" && ! grep -q "^Шипы: за 90° всего 0" "$log"; then
 	bad="${bad:+$bad; }шипы на камне"
 fi
+"$godot" --headless --path "$root" --quit-after 4000 -- --islandcheck >>"$log" 2>&1
+if ! grep -q "^Проверка островов: все чисты" "$log"; then
+	bad="${bad:+$bad; }острова уровней (нет заготовки или есть изъяны — см. --islandcheck)"
+fi
 
 if [ -n "$bad" ]; then
 	echo "" >&2

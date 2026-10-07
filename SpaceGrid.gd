@@ -217,7 +217,7 @@ const SCATTER_BACK: Array = [
 
 
 func generate(radius: float, top: float, bottom: float, headroom: float,
-		underroom: float, step: float, grid_seed: int) -> void:
+		underroom: float, step: float, grid_seed: int, land_radius: float = -1.0) -> void:
 	_spacing = step
 	_cell_size = step * 1.4
 	_scatter_salt = grid_seed
@@ -259,7 +259,7 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	# Соразмерность острову — см. `LAND_TUNED_AT`. Длины волн растут вместе с
 	# высотами, оттого частоты и делятся на ту же величину. Считается ДО первой
 	# волны: на ней же и делится.
-	_land_k = radius / LAND_TUNED_AT
+	_land_k = (land_radius if land_radius > 0.0 else radius) / LAND_TUNED_AT
 	var shape := FastNoiseLite.new()
 	shape.seed = grid_seed
 	shape.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
@@ -336,18 +336,7 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	_land_edge.seed = grid_seed + 4649
 	_land_edge.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
 	_land_edge.frequency = EDGE_WAVE / _land_k
-	_rock_noise = FastNoiseLite.new()
-	_rock_noise.seed = grid_seed + 4243
-	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	# Доли камня: 1/0.16 = 6.25 м, это 9.4 ячейки. См. `_facet` — там же вторая,
-	# средняя доля. Мельче четырёх ячеек решётка не держит ничего.
-	_rock_noise.frequency = 0.16
-	# Волна, которой ведут уровни слоёв, — 11.8 м, крупнее любой глыбы. Без неё
-	# полки одинаковы во всём мире и читаются разлиновкой.
-	_ledge_warp = FastNoiseLite.new()
-	_ledge_warp.seed = grid_seed + 909
-	_ledge_warp.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	_ledge_warp.frequency = 0.085
+	_setup_rock(grid_seed)
 	# ВРЕМЯ ПО ЧАСТЯМ. Её просьба 09.09.2026 — «сделать генерацию мира дешевле и
 	# быстрее». Одним числом на всю постройку тут ничего не решить: пока не
 	# видно, что именно дорого, всякая правка это гадание. Разбивку читает
@@ -378,6 +367,119 @@ func generate(radius: float, top: float, bottom: float, headroom: float,
 	# и была: подошвой запаса по высоте (`_play_high`).
 	_fill_terrain(radius, bottom, shape)
 	step_ms["высота земли"] = Time.get_ticks_msec() - mark
+
+
+func _setup_rock(grid_seed: int) -> void:
+	_rock_noise = FastNoiseLite.new()
+	_rock_noise.seed = grid_seed + 4243
+	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	# Доли камня: 1/0.16 = 6.25 м, это 9.4 ячейки. См. `_facet` — там же вторая,
+	# средняя доля. Мельче четырёх ячеек решётка не держит ничего.
+	_rock_noise.frequency = 0.16
+	# Волна, которой ведут уровни слоёв, — 11.8 м, крупнее любой глыбы. Без неё
+	# полки одинаковы во всём мире и читаются разлиновкой.
+	_ledge_warp = FastNoiseLite.new()
+	_ledge_warp.seed = grid_seed + 909
+	_ledge_warp.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_ledge_warp.frequency = 0.085
+
+
+func bake_state() -> Dictionary:
+	return {
+		"spacing": _spacing, "salt": _scatter_salt, "play_radius": _play_radius,
+		"play_low": _play_low, "play_high": _play_high, "land_span": _land_span,
+		"land_k": _land_k, "seeds": seeds, "nodes": _node_xyz, "fill": fill,
+		"base_fill": base_fill, "edit_val": edit_val, "edit_lift": edit_lift,
+		"cavity": cavity, "fill_soft": fill_soft, "shade_slope": shade_slope,
+		"stone": stone, "stone_mid": stone_mid, "stone_soft": stone_soft,
+		"crack_cut": crack_cut, "seam": seam, "seam_dir": seam_dir, "lumps": lumps,
+	}
+
+
+func load_state(d: Dictionary) -> void:
+	var mark: int = Time.get_ticks_msec()
+	step_ms.clear()
+	_spacing = float(d["spacing"])
+	_cell_size = _spacing * 1.4
+	_scatter_salt = int(d["salt"])
+	_play_radius = float(d["play_radius"])
+	_play_low = float(d["play_low"])
+	_play_high = float(d["play_high"])
+	_land_span = float(d["land_span"])
+	_land_k = float(d["land_k"])
+	_setup_rock(_scatter_salt)
+	_build_joints(_scatter_salt)
+	seeds = d["seeds"]
+	_node_xyz = d["nodes"]
+	lattice = PackedVector3Array()
+	lattice.resize(seeds.size())
+	_node_index = {}
+	for i in range(seeds.size()):
+		var node := Vector3i(_node_xyz[i * 3], _node_xyz[i * 3 + 1], _node_xyz[i * 3 + 2])
+		lattice[i] = Vector3(node) * _spacing
+		_node_index[node] = i
+	_mark.resize(seeds.size())
+	_mark.fill(0)
+	step_ms["семена из файла"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
+	_build_seed_hash()
+	step_ms["сетка поиска"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
+	_build_neighbours()
+	step_ms["соседи"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
+	_build_slope_basis()
+	step_ms["рамы наклона"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
+	_build_cells()
+	step_ms["ячейки"] = Time.get_ticks_msec() - mark
+	mark = Time.get_ticks_msec()
+	fill = d["fill"]
+	base_fill = d["base_fill"]
+	edit_val = d["edit_val"]
+	edit_lift = bool(d["edit_lift"])
+	cavity = d["cavity"]
+	fill_soft = d["fill_soft"]
+	shade_slope = d["shade_slope"]
+	stone = d["stone"]
+	stone_mid = d["stone_mid"]
+	stone_soft = d["stone_soft"]
+	crack_cut = d["crack_cut"]
+	seam = d["seam"]
+	seam_dir = d["seam_dir"]
+	lumps = d["lumps"]
+	_lump_hash.clear()
+	for i in range(lumps.size()):
+		var key: Vector3i = _lump_key(lumps[i]["pos"])
+		if not _lump_hash.has(key):
+			_lump_hash[key] = []
+		_lump_hash[key].append(i)
+	solid = {}
+	for i in range(fill.size()):
+		if fill[i] > SOLID_AT:
+			solid[i] = true
+	_look_build()
+	step_ms["поле и облик"] = Time.get_ticks_msec() - mark
+
+
+func _edit_for(j: int, value: float) -> float:
+	var room: float = EDIT_CAP
+	if edit_lift:
+		room += clampf(0.5 - base_fill[j], 0.0, EDIT_LIFT)
+	var made: float = clampf(value - base_fill[j] - _facet(j), -room * 0.999999,
+		room * 0.999999)
+	return room * 0.5 * log((1.0 + made / room) / (1.0 - made / room))
+
+
+func nudge_fill(want: Dictionary) -> Array:
+	var delta: Dictionary = {}
+	for j in want:
+		var e: float = _edit_for(int(j), float(want[j]))
+		if absf(e - edit_val[j]) > 0.0002:
+			delta[j] = e - edit_val[j]
+	if delta.is_empty():
+		return []
+	return apply_delta(delta, 1.0)
 
 
 # --- Семена ------------------------------------------------------------------
@@ -1605,8 +1707,12 @@ func fold_look(p: Vector3) -> Dictionary:
 		"dot": worst, "stone": stone_soft[j], "seam": seam[j]}
 
 
+var solo_fixed: PackedInt32Array = PackedInt32Array()
+
 func solo_spikes(fix: bool) -> int:
 	var many := 0
+	if fix:
+		solo_fixed.clear()
 	for j in range(fill.size()):
 		if fill[j] <= SOLID_AT:
 			continue
@@ -1620,9 +1726,18 @@ func solo_spikes(fix: bool) -> int:
 			continue
 		many += 1
 		if fix:
-			fill[j] = SOLID_AT - 0.02
+			edit_val[j] = _edit_for(j, SOLID_AT - 0.02)
+			fill[j] = base_fill[j] + _edit_of(j) + _facet(j)
+			solo_fixed.append(j)
+			if _batching:
+				_batch[j] = true
+				for k in range(6):
+					if nb_table[at + k] >= 0:
+						_batch[nb_table[at + k]] = true
 	return many
 
+
+var last_look: PackedInt32Array = PackedInt32Array()
 
 func end_batch() -> void:
 	_batching = false
@@ -1631,6 +1746,7 @@ func end_batch() -> void:
 	_smooth_cavity(_batch.keys())
 	_look_put(_batch.keys())
 	_refresh_shade_round(_batch)
+	last_look = PackedInt32Array(_grown(_batch).keys())
 	_batch = {}
 
 
@@ -3032,6 +3148,7 @@ func apply_delta(delta: Dictionary, mult: float,
 	_smooth_cavity(seen.keys())
 	_look_put(seen.keys())
 	_refresh_shade_round(seen)
+	last_look = PackedInt32Array(_grown(seen).keys())
 	return zone.keys()
 
 

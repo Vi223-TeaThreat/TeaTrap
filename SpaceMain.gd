@@ -277,7 +277,7 @@ func _ready() -> void:
 			"--meetbench", "--rockbench", "--scenebench", "--showbench",
 			"--dabbench", "--poppybench", "--printbench", "--towerbench", "--liftcheck",
 			"--weatherbench", "--storybench", "--uicheck", "--statebench", "--audit",
-			"--joinbench"]:
+			"--joinbench", "--islandcheck", "--bakeislands"]:
 		if key in OS.get_cmdline_user_args():
 			bench = true
 	story = SpaceStoryScript.new()
@@ -437,6 +437,12 @@ func _ready() -> void:
 		await _fill_world()
 		_state_bench(args)
 		get_tree().quit()
+	elif "--bakeislands" in args:
+		await _bake_islands(args)
+		get_tree().quit()
+	elif "--islandcheck" in args:
+		await _island_check(args)
+		get_tree().quit()
 	elif story.active():
 		await _fill_world()
 		_seed_scene()
@@ -576,6 +582,278 @@ func _reset_garden() -> void:
 # любого из двух — на него нельзя положиться ни в ту, ни в другую сторону.
 func _notification(_what: int) -> void:
 	pass
+
+
+const LevelsData = preload("res://Levels.gd")
+const ISLAND_DIR := "res://islands/"
+const ISLAND_FORMAT: int = 1
+var island_baked: bool = false
+var _bake_fresh: bool = false
+
+
+func _island_path(id: String) -> String:
+	return ISLAND_DIR + id + ".island"
+
+
+func _island_key(lv: Dictionary) -> String:
+	return var_to_str([ISLAND_FORMAT, int(lv.get("seed", WORLD_SEED)),
+		snappedf(island_radius, 0.001), float(lv.get("land", -1.0)),
+		lv.get("rocks", []), lv.get("relief", []),
+		lv.get("centre", {}), CELL_SPACING, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM,
+		UNDERROOM])
+
+
+func _load_island() -> bool:
+	var args := OS.get_cmdline_user_args()
+	if not story.active() or _bake_fresh or "--fresh" in args or "--bakeislands" in args:
+		return false
+	var name_text: String = String(story.level.get("name", ""))
+	var path: String = _island_path(String(story.level["id"]))
+	if not FileAccess.file_exists(path):
+		print("Остров «", name_text, "» не заготовлен (нет ", path, ") — строю с нуля")
+		return false
+	var started := Time.get_ticks_msec()
+	var data = _read_island(path)
+	if data == null:
+		print("Заготовку острова «", name_text, "» не прочесть — строю с нуля")
+		return false
+	if not (data is Dictionary) or int(data.get("format", 0)) != ISLAND_FORMAT \
+			or String(data.get("key", "")) != _island_key(story.level):
+		print("ЗАГОТОВКА ОСТРОВА «", name_text, "» СДЕЛАНА ПО ДРУГОЙ КАРТОЧКЕ — строю с",
+			" нуля; заготовить заново: --bakeislands")
+		return false
+	var read_ms: int = Time.get_ticks_msec() - started
+	grid.load_state(data["grid"])
+	paint = data["paint"]
+	story.focus = data["focus"]
+	island_baked = true
+	var parts := ""
+	for k in grid.step_ms:
+		parts += ", %s %d" % [k, int(grid.step_ms[k])]
+	print("Остров «", name_text, "» заготовлен заранее (", String(data.get("made", "")),
+		"): загружен за ", Time.get_ticks_msec() - started, " мс — чтение файла ", read_ms,
+		parts)
+	return true
+
+
+func _read_island(path: String):
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null or f.get_length() < 8:
+		return null
+	var size: int = f.get_64()
+	var packed: PackedByteArray = f.get_buffer(f.get_length() - 8)
+	f.close()
+	var raw: PackedByteArray = packed.decompress(size, FileAccess.COMPRESSION_ZSTD)
+	if raw.size() != size:
+		return null
+	return bytes_to_var(raw)
+
+
+func _save_island() -> int:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(ISLAND_DIR))
+	var path: String = _island_path(String(story.level["id"]))
+	var raw: PackedByteArray = var_to_bytes({
+		"format": ISLAND_FORMAT,
+		"key": _island_key(story.level),
+		"level": String(story.level["id"]),
+		"made": Time.get_datetime_string_from_system(false, true),
+		"grid": grid.bake_state(),
+		"paint": paint,
+		"focus": story.focus,
+	})
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return -1
+	f.store_64(raw.size())
+	f.store_buffer(raw.compress(FileAccess.COMPRESSION_ZSTD))
+	f.close()
+	return FileAccess.get_file_as_bytes(path).size()
+
+
+func _touch_look() -> void:
+	for j in grid.last_look:
+		_touch_chunks(j)
+	grid.last_look = PackedInt32Array()
+
+
+func _reset_world() -> void:
+	for ch in chunk_nodes.keys():
+		var gone: Node = chunk_nodes[ch]
+		remove_child(gone)
+		gone.queue_free()
+	chunk_nodes.clear()
+	chunk_list.clear()
+	_dirty_chunks.clear()
+	_touched_cells.clear()
+	_buried_cache.clear()
+	paint = {}
+	history.clear()
+	story.focus = Vector3.ZERO
+
+
+const REPAIR_ROUNDS: int = 8
+const REPAIR_PINCH: float = 0.002
+const REPAIR_MIX: float = 0.5
+
+func _repair_island() -> Dictionary:
+	var out: Dictionary = {"rounds": 0, "pinch": 0, "smoothed": 0}
+	var touched: Dictionary = {}
+	for _r in range(REPAIR_ROUNDS):
+		var want: Dictionary = {}
+		for j in range(grid.fill.size()):
+			var f: float = grid.fill[j]
+			if absf(f - 0.5) < REPAIR_PINCH and grid.in_play(j):
+				want[j] = 0.5 + (REPAIR_PINCH if f > 0.5 else -REPAIR_PINCH) * 1.5
+				out["pinch"] = int(out["pinch"]) + 1
+		var check: Dictionary = surface_check()
+		for s in check["spots"]:
+			var near: Dictionary = {}
+			for j in s["seeds"]:
+				near[int(j)] = true
+				if int(out["rounds"]) >= 3:
+					for k in range(6):
+						if grid.nb_table[int(j) * 6 + k] >= 0:
+							near[grid.nb_table[int(j) * 6 + k]] = true
+			for j in near:
+				if want.has(j):
+					continue
+				var sum: float = 0.0
+				var kin := 0
+				for k in range(6):
+					var n: int = grid.nb_table[int(j) * 6 + k]
+					if n >= 0:
+						sum += grid.fill[n]
+						kin += 1
+				if kin > 0:
+					want[j] = lerpf(grid.fill[j], sum / float(kin), REPAIR_MIX)
+					touched[j] = true
+		if want.is_empty():
+			break
+		out["rounds"] = int(out["rounds"]) + 1
+		_after_field_change(grid.nudge_fill(want))
+		_touch_look()
+		_flush_chunks()
+	out["smoothed"] = touched.size()
+	return out
+
+
+func _bake_islands(args: PackedStringArray) -> void:
+	var only: String = ""
+	for a in args:
+		if a.begins_with("--level="):
+			only = a.substr(8)
+	var made := 0
+	var failed: Array = []
+	for lv in LevelsData.LEVELS:
+		var id: String = String(lv["id"])
+		if only != "" and id != only:
+			continue
+		var started := Time.get_ticks_msec()
+		story.use_level(id)
+		world_seed = story.island_seed()
+		island_radius = clampf(story.island_radius(), 8.0, 30.0)
+		_reset_world()
+		_bake_fresh = true
+		_build_world()
+		await _fill_world()
+		_seed_scene()
+		var name_text: String = String(lv["name"])
+		surface_report(surface_check(), "До починки, остров «%s»" % name_text)
+		var fixed: Dictionary = _repair_island()
+		print("Починка острова «", name_text, "»: заходов ", int(fixed["rounds"]),
+			", семян у порога сдвинуто ", int(fixed["pinch"]),
+			", приглажено у шипов ", int(fixed["smoothed"]))
+		var field: Dictionary = surface_check()
+		surface_report(field, "Целостность острова «%s»" % name_text)
+		var drawn: Dictionary = drawn_check()
+		drawn_report(drawn, "Нарисованное на острове «%s»" % name_text)
+		var broken: bool = int(field["open"]) > 0 or int(field["doubled"]) > 0 \
+			or int(field["fins"]) > 0 or not (field["pieces"] as Array).is_empty() \
+			or not bool(drawn["clean"])
+		if broken:
+			failed.append(name_text)
+			print("ОСТРОВ «", name_text, "» НЕ ЗАГОТОВЛЕН: дыры, плавники или оторванное",
+				" не ушли — файл не тронут")
+			continue
+		var size: int = _save_island()
+		var same: String = _bake_compare()
+		made += 1
+		print("Остров «", name_text, "» заготовлен: ", _island_path(id), ", ",
+			snappedf(float(size) / 1048576.0, 0.01), " МБ, за ",
+			Time.get_ticks_msec() - started, " мс; ", same)
+	_bake_fresh = false
+	print("Заготовка островов: записано ", made, "" if failed.is_empty()
+		else ", НЕ ЗАГОТОВЛЕНЫ: " + ", ".join(failed))
+
+
+func _island_check(args: PackedStringArray) -> void:
+	var only: String = ""
+	for a in args:
+		if a.begins_with("--level="):
+			only = a.substr(8)
+	var fresh: bool = "--fresh" in args
+	var dirty: Array = []
+	for lv in LevelsData.LEVELS:
+		var id: String = String(lv["id"])
+		if only != "" and id != only:
+			continue
+		var name_text: String = String(lv["name"])
+		story.use_level(id)
+		world_seed = story.island_seed()
+		island_radius = clampf(_arg_num(args, "--island", story.island_radius()), 8.0, 30.0)
+		_reset_world()
+		_build_world()
+		await _fill_world()
+		_seed_scene()
+		print("Остров «", name_text, "»: ", "из заготовки" if island_baked
+			else "построен с нуля", ", радиус ", snappedf(island_radius, 0.1), " м")
+		_relief_report()
+		var field: Dictionary = surface_check()
+		surface_report(field, "Целостность острова «%s»" % name_text)
+		var drawn: Dictionary = drawn_check()
+		drawn_report(drawn, "Нарисованное на острове «%s»" % name_text)
+		if not bool(field["clean"]) or not bool(drawn["clean"]):
+			dirty.append(name_text)
+		elif not island_baked and not fresh:
+			dirty.append(name_text + " (нет годной заготовки)")
+	print("Проверка островов: ", "все чисты" if dirty.is_empty()
+		else "ЕСТЬ ИЗЪЯНЫ — " + ", ".join(dirty))
+
+
+func _bake_compare() -> String:
+	var data = _read_island(_island_path(String(story.level["id"])))
+	if not (data is Dictionary):
+		return "ОШИБКА: записанное не читается"
+	var copy = SpaceGridScript.new()
+	copy.load_state(data["grid"])
+	var differ: Array = []
+	for field in ["seeds", "fill", "cavity", "fill_soft", "shade_slope", "stone_soft",
+			"seam", "crack_cut", "nb_table", "slope_basis", "_look_bytes"]:
+		if copy.get(field) != grid.get(field):
+			differ.append(field)
+	if copy.stone != grid.stone or copy.solid.size() != _solid_count():
+		differ.append("stone/solid")
+	var meshes := 0
+	for ch in chunk_nodes:
+		var lo: Vector3i = Vector3i(ch) * CHUNK_NODES
+		var mine: ArrayMesh = SurfaceScript.build(copy, lo,
+			lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES))
+		var drawn: ArrayMesh = (chunk_nodes[ch] as MeshInstance3D).mesh
+		if mine == null or drawn == null or mine.surface_get_arrays(0) != drawn.surface_get_arrays(0):
+			meshes += 1
+	if differ.is_empty() and meshes == 0:
+		return "загруженное сходится с построенным до знака (поле, облик, все " + \
+			str(chunk_nodes.size()) + " кусков поверхности)"
+	return "ОШИБКА: загруженное расходится с построенным — " + ", ".join(differ) + \
+		(", кусков поверхности %d" % meshes if meshes > 0 else "")
+
+
+func _solid_count() -> int:
+	var n := 0
+	for j in range(grid.fill.size()):
+		if grid.fill[j] > 0.5:
+			n += 1
+	return n
 
 
 # =============================================================================
@@ -859,11 +1137,13 @@ func _camera_flat_axes() -> Dictionary:
 func _build_world() -> void:
 	var started := Time.get_ticks_msec()
 	grid = SpaceGridScript.new()
-	grid.generate(island_radius, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, UNDERROOM,
-		CELL_SPACING, world_seed)
+	island_baked = false
+	if not _load_island():
+		grid.generate(island_radius, ISLAND_TOP, ISLAND_BOTTOM, HEADROOM, UNDERROOM,
+			CELL_SPACING, world_seed, story.land_radius() if story.active() else -1.0)
 	solid = {}
 	for i in grid.solid:
-		solid[i] = "ground"
+		solid[i] = paint.get(i, "ground") if island_baked else "ground"
 
 	for i in solid:
 		_touch_chunks(i, false)
@@ -951,6 +1231,7 @@ func _fill_world() -> void:
 		chunk_nodes.size(), ", вырезано ячеек — ", grid.built_count())
 	if "--audit" in OS.get_cmdline_user_args():
 		_audit_surface()
+		surface_report(surface_check(), "Целостность голого поля")
 		# Рельеф печатаем тут же: голый мир, без обстановки — те же числа, что и в
 		# самопроверке, но за секунды, а не за десять минут.
 		_relief_report()
@@ -3245,6 +3526,251 @@ func _audit_surface() -> void:
 		"; вывернутых тетраэдров на поверхности — ", int(stats.get("inverted", 0)))
 
 
+const CHECK_SPIKE: float = 90.0
+const CHECK_FIN: float = 150.0
+const CHECK_SPECK: float = 0.0005
+const CHECK_PINCH: float = 0.001
+
+func surface_check() -> Dictionary:
+	var started := Time.get_ticks_msec()
+	var keys := PackedInt32Array()
+	var pts := PackedVector3Array()
+	var stones := PackedFloat32Array()
+	for ch in chunk_list:
+		var lo: Vector3i = ch * CHUNK_NODES
+		SurfaceScript.inspect(grid, lo, lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES),
+			keys, pts, stones)
+	var count: int = stones.size()
+	var normal := PackedVector3Array()
+	normal.resize(count)
+	var area := PackedFloat32Array()
+	area.resize(count)
+	for t in range(count):
+		var n: Vector3 = (pts[t * 3 + 1] - pts[t * 3]).cross(pts[t * 3 + 2] - pts[t * 3])
+		area[t] = n.length() * 0.5
+		normal[t] = -n.normalized() if n.length() > 0.000000001 else Vector3.ZERO
+	var edge_of: Dictionary = {}
+	var doubled := 0
+	for t in range(count):
+		for e in range(3):
+			var w: int = (e + 1) % 3
+			var key := Vector4i(keys[t * 6 + e * 2], keys[t * 6 + e * 2 + 1],
+				keys[t * 6 + w * 2], keys[t * 6 + w * 2 + 1])
+			if key.x == key.z and key.y == key.w:
+				continue
+			if edge_of.has(key):
+				if int(edge_of[key]) >= 0:
+					doubled += 1
+				edge_of[key] = -1
+			else:
+				edge_of[key] = t * 3 + e
+	var out: Dictionary = {"tris": count, "open": 0, "pinch": 0, "doubled": doubled,
+		"spikes": 0, "visible": 0, "fins": 0, "stone_spikes": 0, "ground_spikes": 0,
+		"holes": [], "spots": [], "pieces": [], "voids": 0, "worst": 0.0}
+	for key in edge_of:
+		var code: int = edge_of[key]
+		if code < 0:
+			continue
+		var t: int = int(code / 3.0)
+		var tail: Vector3 = pts[t * 3 + (code % 3 + 1) % 3]
+		var mid: Vector3 = (pts[code] + tail) * 0.5
+		var back := Vector4i(key.z, key.w, key.x, key.y)
+		if not edge_of.has(back):
+			if pts[code].distance_to(tail) < CHECK_PINCH:
+				out["pinch"] = int(out["pinch"]) + 1
+				continue
+			out["open"] = int(out["open"]) + 1
+			if (out["holes"] as Array).size() < 6:
+				out["holes"].append(mid)
+			continue
+		var other: int = edge_of[back]
+		if other < 0 or key.x > key.z or (key.x == key.z and key.y > key.w):
+			continue
+		var t2: int = int(other / 3.0)
+		var bend: float = rad_to_deg(normal[t].angle_to(normal[t2]))
+		if bend <= CHECK_SPIKE:
+			continue
+		out["spikes"] = int(out["spikes"]) + 1
+		var small: float = minf(area[t], area[t2])
+		if small < CHECK_SPECK:
+			continue
+		var rock: bool = (stones[t] + stones[t2]) * 0.5 > 0.5
+		out["visible"] = int(out["visible"]) + 1
+		out["stone_spikes" if rock else "ground_spikes"] = int(out[
+			"stone_spikes" if rock else "ground_spikes"]) + 1
+		if bend > CHECK_FIN:
+			out["fins"] = int(out["fins"]) + 1
+		out["worst"] = maxf(float(out["worst"]), bend)
+		var near: Dictionary = {}
+		for k in range(6):
+			near[keys[t * 6 + k]] = true
+			near[keys[t2 * 6 + k]] = true
+		out["spots"].append({"at": mid, "bend": bend, "small": small,
+			"big": maxf(area[t], area[t2]), "rock": rock, "seeds": near.keys()})
+	var boss := PackedInt32Array()
+	boss.resize(count)
+	for t in range(count):
+		boss[t] = t
+	var first: Dictionary = {}
+	for t in range(count):
+		for v in range(3):
+			var vk := Vector2i(keys[t * 6 + v * 2], keys[t * 6 + v * 2 + 1])
+			if first.has(vk):
+				_plate_join(boss, int(first[vk]), t)
+			else:
+				first[vk] = t
+	var parts: Dictionary = {}
+	for t in range(count):
+		var r: int = _plate_boss(boss, t)
+		if not parts.has(r):
+			parts[r] = {"tris": 0, "area": 0.0, "mid": Vector3.ZERO, "volume": 0.0}
+		var part: Dictionary = parts[r]
+		part["tris"] = int(part["tris"]) + 1
+		part["area"] = float(part["area"]) + area[t]
+		part["mid"] = Vector3(part["mid"]) + pts[t * 3]
+		part["volume"] = float(part["volume"]) \
+			+ pts[t * 3].dot(pts[t * 3 + 1].cross(pts[t * 3 + 2])) / 6.0
+	var main_root := -1
+	for r in parts:
+		if main_root < 0 or int(parts[r]["tris"]) > int(parts[main_root]["tris"]):
+			main_root = r
+	for r in parts:
+		if r == main_root:
+			continue
+		var part: Dictionary = parts[r]
+		part["mid"] = Vector3(part["mid"]) / float(part["tris"])
+		if float(part["volume"]) > 0.0:
+			out["voids"] = int(out["voids"]) + 1
+		out["pieces"].append(part)
+	(out["spots"] as Array).sort_custom(func(a, b): return float(a["bend"]) > float(b["bend"]))
+	out["clean"] = int(out["open"]) == 0 and doubled == 0 and int(out["visible"]) == 0 \
+		and (out["pieces"] as Array).is_empty()
+	out["ms"] = Time.get_ticks_msec() - started
+	return out
+
+
+func surface_report(check: Dictionary, title: String) -> void:
+	var pieces: Array = check["pieces"]
+	var piece_area := 0.0
+	for part in pieces:
+		piece_area += float(part["area"])
+	print(title, ": ", "ЧИСТО" if bool(check["clean"]) else "ЕСТЬ ИЗЪЯНЫ",
+		" — треугольников ", int(check["tris"]), ", дыр (незамкнутых рёбер) ",
+		int(check["open"]), " (и ещё ", int(check["pinch"]),
+		" рёбер короче миллиметра у точки, где поле ровно на пороге, — их не видно)",
+		", вывернутых рёбер ", int(check["doubled"]),
+		", шипов круче ", int(CHECK_SPIKE), "° видимых ", int(check["visible"]),
+		" (на камне ", int(check["stone_spikes"]), ", на земле ", int(check["ground_spikes"]),
+		"; плавников круче ", int(CHECK_FIN), "° ", int(check["fins"]),
+		"; мельче ", snappedf(CHECK_SPECK * 10000.0, 0.1), " см² ещё ",
+		int(check["spikes"]) - int(check["visible"]), " — их не видно)",
+		", оторванных кусков ", pieces.size() - int(check["voids"]),
+		", пустот внутри ", int(check["voids"]),
+		(" (%.2f м²)" % piece_area) if not pieces.is_empty() else "",
+		"; норма — нули, проверено за ", int(check["ms"]), " мс")
+	for p in check["holes"]:
+		print("   дыра у ", _spot_text(p))
+	var spots: Array = check["spots"]
+	for i in range(mini(8, spots.size())):
+		var s: Dictionary = spots[i]
+		print("   ", "плавник " if float(s["bend"]) > CHECK_FIN else "шип ",
+			snappedf(float(s["bend"]), 0.1), "° ", "на камне" if bool(s["rock"]) else "на земле",
+			" у ", _spot_text(s["at"]), ", треугольники ",
+			snappedf(float(s["small"]) * 10000.0, 1.0), " и ",
+			snappedf(float(s["big"]) * 10000.0, 1.0), " см²")
+	for i in range(mini(6, pieces.size())):
+		var part: Dictionary = pieces[i]
+		print("   ", "пустота" if float(part["volume"]) > 0.0 else "кусок", " из ",
+			int(part["tris"]), " треугольников, ", snappedf(float(part["area"]) * 10000.0, 1.0),
+			" см², у ", _spot_text(part["mid"]))
+
+
+func drawn_check() -> Dictionary:
+	var started := Time.get_ticks_msec()
+	var ids: Dictionary = {}
+	var edge_of: Dictionary = {}
+	var where: Dictionary = {}
+	var out: Dictionary = {"tris": 0, "open": 0, "doubled": 0, "stale": 0, "dim": 0,
+		"stale_list": [], "holes": []}
+	for ch in chunk_nodes:
+		var mi: MeshInstance3D = chunk_nodes[ch]
+		var lo: Vector3i = Vector3i(ch) * CHUNK_NODES
+		var fresh: ArrayMesh = SurfaceScript.build(grid, lo,
+			lo + Vector3i(CHUNK_NODES, CHUNK_NODES, CHUNK_NODES))
+		var had: Array = mi.mesh.surface_get_arrays(0) \
+			if mi.mesh != null and mi.mesh.get_surface_count() > 0 else []
+		var need: Array = fresh.surface_get_arrays(0) if fresh != null else []
+		var drawn: PackedVector3Array = had[Mesh.ARRAY_VERTEX] if not had.is_empty() \
+			else PackedVector3Array()
+		var want: PackedVector3Array = need[Mesh.ARRAY_VERTEX] if not need.is_empty() \
+			else PackedVector3Array()
+		if drawn != want:
+			out["stale"] = int(out["stale"]) + 1
+			if (out["stale_list"] as Array).size() < 6:
+				out["stale_list"].append([ch, int(drawn.size() / 3.0), int(want.size() / 3.0)])
+		elif not had.is_empty() and had[Mesh.ARRAY_NORMAL] != need[Mesh.ARRAY_NORMAL]:
+			out["dim"] = int(out["dim"]) + 1
+		for t in range(int(drawn.size() / 3.0)):
+			out["tris"] = int(out["tris"]) + 1
+			var v := PackedInt32Array([0, 0, 0])
+			for k in range(3):
+				var p: Vector3 = drawn[t * 3 + k]
+				if not ids.has(p):
+					ids[p] = ids.size()
+					where[ids[p]] = p
+				v[k] = ids[p]
+			for e in range(3):
+				var key := Vector2i(v[e], v[(e + 1) % 3])
+				if key.x == key.y:
+					continue
+				if edge_of.has(key):
+					out["doubled"] = int(out["doubled"]) + 1
+				edge_of[key] = true
+	out["pinch"] = 0
+	for key in edge_of:
+		if not edge_of.has(Vector2i(key.y, key.x)):
+			if Vector3(where[key.x]).distance_to(where[key.y]) < CHECK_PINCH:
+				out["pinch"] = int(out["pinch"]) + 1
+				continue
+			out["open"] = int(out["open"]) + 1
+			if (out["holes"] as Array).size() < 6:
+				out["holes"].append((Vector3(where[key.x]) + Vector3(where[key.y])) * 0.5)
+	for ch in chunk_list:
+		if not chunk_nodes.has(ch):
+			var lo: Vector3i = Vector3i(ch) * CHUNK_NODES
+			if SurfaceScript.build(grid, lo, lo + Vector3i(CHUNK_NODES, CHUNK_NODES,
+					CHUNK_NODES)) != null:
+				out["stale"] = int(out["stale"]) + 1
+				if (out["stale_list"] as Array).size() < 6:
+					out["stale_list"].append([ch, 0, -1])
+	out["clean"] = int(out["open"]) == 0 and int(out["doubled"]) == 0 \
+		and int(out["stale"]) == 0 and int(out["dim"]) == 0
+	out["ms"] = Time.get_ticks_msec() - started
+	return out
+
+
+func drawn_report(check: Dictionary, title: String) -> void:
+	print(title, ": ", "ЧИСТО" if bool(check["clean"]) else "ЕСТЬ ИЗЪЯНЫ",
+		" — нарисовано треугольников ", int(check["tris"]), ", дыр на экране ",
+		int(check["open"]), " (короче миллиметра ещё ", int(check["pinch"]), ")",
+		", вывернутых рёбер ", int(check["doubled"]),
+		", кусков, нарисованных по прежней форме, ", int(check["stale"]),
+		", по прежнему свету ", int(check["dim"]),
+		"; норма — нули, проверено за ", int(check["ms"]), " мс")
+	for p in check["holes"]:
+		print("   щель на экране у ", _spot_text(p))
+	for s in check["stale_list"]:
+		var ch: Vector3i = s[0]
+		var at: Vector3 = (Vector3(ch) + Vector3(0.5, 0.5, 0.5)) * CELL_SPACING * CHUNK_NODES
+		print("   кусок ", ch, " у ", _spot_text(at), ": нарисовано ", s[1],
+			" треугольников, по земле положено ", s[2])
+
+
+func _spot_text(p: Vector3) -> String:
+	return "(%.1f, %.1f, %.1f), %.1f м от середины" % [p.x, p.y, p.z,
+		Vector2(p.x, p.z).length()]
+
+
 # СТОРОЖ НАГРУЗКИ. Все замеры ниже врут, если машина занята чем-то ещё. За одну
 # сессию это случалось трижды: открытый редактор Godot и запущенная из него игра
 # забирали столько, что отклик показывал десять миллисекунд вместо трёх, — и
@@ -4320,6 +4846,9 @@ func _seed_scene() -> void:
 	if scene_id == "bare" and not story.active():
 		print("Сцена: чистое поле")
 		return
+	if island_baked:
+		print("Сцена: ", _scene_name(), " заготовлен заранее — скалы и рельеф уже в нём")
+		return
 	var started := Time.get_ticks_msec()
 	# СКАЛЫ СЦЕНЫ ЛЕПЯТСЯ ПО ПРЕЖНЕМУ ПРЕДЕЛУ ПРАВКИ и переводятся в поднятый (её
 	# слово 14.09.2026 «выше в три раза» — про то, докуда можно дорасти, а не про
@@ -4335,7 +4864,9 @@ func _seed_scene() -> void:
 	# ШИПЫ СНИМАЕМ ДО ТОГО, КАК СЧИТАТЬ ПОСЛЕДСТВИЯ: одиночное семя над уровнем
 	# даёт не форму, а тонкий клин — см. `solo_spikes`. Её кадр 02.09.2026.
 	var spikes: int = grid.solo_spikes(true)
+	_after_field_change(grid.solo_fixed)
 	grid.end_batch()
+	_touch_look()
 	grid.lift_edits()
 	# ПОЛЕ КАМНЯ ПРИГЛАЖИВАЕТСЯ ПОСЛЕДНИМ, по готовому: до `end_batch` оно ещё
 	# досчитывается, а после `_flush_chunks` меши собраны и правка поля в них уже
@@ -4497,6 +5028,8 @@ func _scene_bench(args: PackedStringArray) -> void:
 		_seed_scene()
 		total += Time.get_ticks_msec() - t0
 		_relief_report()
+		surface_report(surface_check(), "Целостность острова %d" % world_seed)
+		drawn_report(drawn_check(), "Нарисованное на острове %d" % world_seed)
 		# ОБЛИК НАСТОЯЩИХ СКАЛ, а не пробной глыбы. Стенд камня лепит ком на
 		# ровном месте, и нависания у него ровно два ребра — а её кадр с
 		# пильчатым краем снят как раз с нависающей скалы. Здесь скалы те же,
@@ -5014,7 +5547,7 @@ func _scene_story_hill(hill: Dictionary) -> void:
 	var links: int = int(hill.get("links", 3))
 	var thin: float = float(hill.get("wide", 4.0)) / pow(float(links), 1.0 / 3.0)
 	var part: float = STROKE * (CELL_SPACING * 2.4) / thin \
-		* SCENE_HILL_FORCE / float(links) * SCENE_HILL_LONG
+		* SCENE_HILL_FORCE / float(links) * SCENE_HILL_LONG * float(hill.get("rise", 1.0))
 	var way: float = float(hill.get("turn", 0.0))
 	var walk: Vector3 = at
 	for k in range(links):
@@ -6584,6 +7117,12 @@ func _meet_stand() -> void:
 const STORY_BENCH_SECS: float = 420.0
 
 func _story_bench(args: PackedStringArray) -> void:
+	for a in args:
+		if a.begins_with("--plan="):
+			var plan_arg = JSON.parse_string(a.substr(7))
+			if plan_arg is Dictionary:
+				story.level = story.level.duplicate()
+				story.level["plan"] = plan_arg
 	var lv: Dictionary = story.level
 	var born: String = String(lv["goal"]["born"])
 	var need: int = int(lv["goal"].get("count", 1))
@@ -6621,8 +7160,10 @@ func _story_bench(args: PackedStringArray) -> void:
 		return
 	var tries: int = int(_arg_num(args, "--tries", 6.0))
 	for at_foot in ["vine", "moss"]:
+		if "--games" in args:
+			break
 		var away: String = "moss" if at_foot == "vine" else "vine"
-		for far in [1.0, 2.0, 3.0, 5.0]:
+		for far in [1.0, 2.0, 3.0]:
 			var won := 0
 			var luck := 0
 			var sown := 0
@@ -6662,7 +7203,7 @@ func _story_bench(args: PackedStringArray) -> void:
 		story.unplant(mossed, "moss")
 	print("Стенд острова: отмена посадки — мха было ", grown, " кочек, после отмены ",
 		_plant_count("moss"), " (норма ноль), семян мха вернулось ", story.stock["moss"])
-	for play in [["moss", "vine", 2.0], ["vine", "moss", 5.0]]:
+	for play in [["moss", "vine", 2.0], ["vine", "moss", 3.0]]:
 		var far: float = play[2]
 		plants.clear_all()
 		plants._rng.seed = 20261001
@@ -6802,6 +7343,9 @@ func _story_draft_bench(args: PackedStringArray, set_ms: int) -> void:
 			for pick in plan:
 				var at: Vector3 = _story_spot(pick, poppy)
 				if at == Vector3.ZERO or plants.plant_at(at, String(pick[0])) < 0:
+					if t == 0:
+						print("Стенд острова: ОШИБКА — ", pick[0], " не сел у ", pick,
+							" (земля ", "не найдена" if at == Vector3.ZERO else _spot_text(at), ")")
 					break
 				ids.append(String(pick[0]))
 			if ids.size() < 2:
@@ -6832,8 +7376,12 @@ func _story_plan_bench(args: PackedStringArray, set_ms: int) -> void:
 	var centre: Vector3 = story.focus
 	var poppy: Dictionary = PlantsData.ITEMS["poppy"]
 	var tries: int = int(_arg_num(args, "--tries", 6.0))
+	var only: Array = []
+	for a in args:
+		if a.begins_with("--ways="):
+			only = Array(a.substr(7).split(","))
 	print("Стенд острова «", lv["name"], "»: гибрид «", story.goal_name(),
-		"» в игре есть, ходы берутся из карточки; обстановка за ", set_ms, " мс")
+		"» в игре есть, ходы ", lv["plan"], "; обстановка за ", set_ms, " мс")
 	_audit_surface()
 	var line_from: Array = lv["plan"]["right"][1]
 	var line_to: Array = lv["plan"]["right"][0]
@@ -6850,6 +7398,8 @@ func _story_plan_bench(args: PackedStringArray, set_ms: int) -> void:
 	for pick in lv["plan"]["right"]:
 		if pick.size() >= 4 and String(pick[3]) == "top":
 			ways.insert(1, "edge")
+	if not only.is_empty():
+		ways = ways.filter(func(w): return only.has(w))
 	for way in ways:
 		var plan: Array = lv["plan"]["right" if way == "edge" else way]
 		var sown := 0
@@ -6912,6 +7462,8 @@ func _story_plan_bench(args: PackedStringArray, set_ms: int) -> void:
 				% [froze_at / froze, luck]) if froze > 0 else "",
 			"; по посевам: ", "; ".join(lines))
 	for way in ["right", "wrong"]:
+		if not only.is_empty():
+			break
 		var verdicts: Array = []
 		for t in range(3):
 			plants.clear_all()

@@ -44,6 +44,9 @@ func setup(main_ref: Node3D, bench: bool, args: PackedStringArray) -> void:
 	elif "--joinbench" in args:
 		testing = true
 		id = _level_arg(args, "shelf")
+	elif "--islandcheck" in args or "--bakeislands" in args:
+		testing = true
+		id = _level_arg(args, String(LevelsData.LEVELS[0]["id"]))
 	elif not bench:
 		# ИГРА НАЧИНАЕТСЯ С СЮЖЕТНОГО УРОВНЯ, А НЕ С ПЕСОЧНИЦЫ (её решение
 		# 02.10.2026). Прежде по умолчанию стоял свободный остров, и в сюжет
@@ -114,6 +117,10 @@ func island_seed() -> int:
 # обычный, как на свободном.
 func island_radius() -> float:
 	return float(level.get("island", main.ISLAND_RADIUS))
+
+
+func land_radius() -> float:
+	return float(level.get("land", -1.0))
 
 
 func number() -> int:

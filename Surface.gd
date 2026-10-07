@@ -269,6 +269,63 @@ static func audit(grid, lo: Vector3i, hi: Vector3i, edges: Dictionary,
 							edges[s2] = int(edges.get(s2, 0)) + 1
 
 
+static func inspect(grid, lo: Vector3i, hi: Vector3i, keys: PackedInt32Array,
+		pts: PackedVector3Array, stones: PackedFloat32Array) -> void:
+	var seeds: PackedVector3Array = grid.seeds
+	var fill: PackedFloat32Array = grid.fill
+	var stone_raw: Dictionary = grid.stone
+	var nodes: Dictionary = grid.node_index()
+	var idx := PackedInt32Array()
+	idx.resize(8)
+	var val := PackedFloat32Array()
+	val.resize(8)
+	var cpos := PackedVector3Array()
+	cpos.resize(4)
+	var ca := PackedInt32Array()
+	ca.resize(4)
+	var cb := PackedInt32Array()
+	cb.resize(4)
+	var cw := PackedFloat64Array()
+	cw.resize(4)
+	for i in range(lo.x, hi.x):
+		for j in range(lo.y, hi.y):
+			for k in range(lo.z, hi.z):
+				var here := Vector3i(i, j, k)
+				var ok := true
+				var below := 0
+				for c in range(8):
+					var s: int = int(nodes.get(here + CORNER[c], -1))
+					if s < 0:
+						ok = false
+						break
+					idx[c] = s
+					val[c] = fill[s]
+					if val[c] <= ISO:
+						below += 1
+				if not ok or below == 0 or below == 8:
+					continue
+				for t in TETS:
+					var cnt: int = tet_polygon(seeds, idx, val, t, cpos, ca, cb, cw)
+					if cnt == 0:
+						continue
+					var want: Vector3 = _outward(seeds, idx, val, t)
+					for f in range(1, cnt - 1):
+						var turn: int = wound_order(cpos[0], cpos[f], cpos[f + 1], want)
+						if turn < 0:
+							continue
+						var tri: Array = [0, f, f + 1]
+						if turn == 1:
+							tri = [f + 1, f, 0]
+						var rock := 0.0
+						for v in tri:
+							keys.append(mini(ca[v], cb[v]))
+							keys.append(maxi(ca[v], cb[v]))
+							pts.append(cpos[v])
+							rock += clampf(lerpf(float(stone_raw.get(ca[v], 0.0)),
+								float(stone_raw.get(cb[v], 0.0)), cw[v]), 0.0, 1.0)
+						stones.append(rock / 3.0)
+
+
 static func _volume(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> float:
 	return (b - a).cross(c - a).dot(d - a)
 
