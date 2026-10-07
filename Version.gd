@@ -2,5 +2,5 @@ extends RefCounted
 # НОМЕР СБОРКИ. Файл пишет хук `.githooks/pre-commit` перед каждым коммитом —
 # руками не править, правка потеряется на следующем же коммите.
 
-const NUMBER: int = 152
+const NUMBER: int = 153
 const DATE: String = "07.10.2026"
