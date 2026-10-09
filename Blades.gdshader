@@ -110,7 +110,7 @@ void vertex() {
 		VERTEX = CUSTOM0.xyz + (VERTEX - CUSTOM0.xyz) * grown;
 	}
 	v_state = vec3(0.0);
-	v_wax = (CUSTOM2.w > 0.0 && CUSTOM2.w < 0.5) ? CUSTOM2.w * 2.0 : 0.0;
+	v_wax = CUSTOM2.w > 0.0 ? max((CUSTOM2.w - floor(CUSTOM2.w + 0.001)) * 2.0, 0.0) : 0.0;
 	if (CUSTOM2.x != 0.0 || CUSTOM2.y != 0.0) {
 		float age = max(world_now - CUSTOM2.z, 0.0);
 		float ease = grow_settle ? 1.0 : smoothstep(0.0, 1.0, age / state_ease);

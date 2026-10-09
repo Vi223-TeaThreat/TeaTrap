@@ -1780,7 +1780,8 @@ func _undo_one() -> void:
 	elif a.has("story"):
 		story.unplant(int(a["plant"]), String(a["story"]))
 	elif a.has("plant"):
-		plants.remove_at(int(a["plant"]))
+		for pid in a.get("with", [a["plant"]]):
+			plants.remove_at(int(pid))
 	elif a["added"]:
 		_remove(a["cell"], false)
 	else:
@@ -2025,7 +2026,7 @@ func _try_put(screen_pos: Vector2) -> void:
 		return
 	var pid: int = plants.plant_at(spot["pos"], current_tool)
 	if pid >= 0:
-		history.append({"plant": pid, "group": _group})
+		history.append({"plant": pid, "group": _group, "with": plants.last_sown.duplicate()})
 
 
 # Убрать то, что растёт под прицелом.
@@ -6448,20 +6449,52 @@ func _vine_bench(args: PackedStringArray = PackedStringArray()) -> void:
 	var reaches: Array = []
 	var tall_all: Array = []
 	var tris_all: Array = []
+	var shrub: bool = SpacePlantsScript._is_shrub(PlantsData.ITEMS[kind])
+	var after: float = _arg_num(args, "--after", 0.0)
+	var bushes_all: Array = []
+	var cover_all: Array = []
+	var heads_all: Array = []
+	var flowers_all: Array = []
 	for s in BENCH_SEEDS:
 		plants.clear_all()
 		plants._rng.seed = int(s)
 		plants._sprout_why = PackedInt32Array()
 		plants._sprout_why.resize(SpacePlantsScript.WHY_NAMES.size())
 		_seed_vine(kind)
-		for _i in range(600):
+		for _i in range(600 + int(after / 0.15)):
 			plants._tick(0.15)
 		var out: Dictionary = plants.vine_stats(kind)
+		if shrub:
+			var sh: Dictionary = plants.shrub_stats(kind)
+			bushes_all.append(int(sh["bushes"]))
+			cover_all.append(float(sh["cover"]))
+			heads_all.append(int(sh["heads"]))
+			flowers_all.append(int(sh["flowers"]))
+			print("  посев ", s, ": кустов ", sh["bushes"], " (недозрелых ", sh["young"],
+				"), плетей ", sh["links"], " (укоренилось ", sh["rooted"], ", в коре ",
+				sh["wood"], "); до ближайшего куста в среднем ",
+				snappedf(float(sh["gap"]), 0.01), " м (от ", snappedf(float(sh["near"]), 0.01),
+				" до ", snappedf(float(sh["far"]), 0.01), "), плетей под кустами ",
+				snappedf(float(sh["cover"]) * 100.0, 0.1), "%; высота с цветами до ",
+				snappedf(float(sh["top"]) * 100.0, 0.1), " см; соцветий ", sh["heads"],
+				" — бутонов ", sh["h_bud"], ", раскрываются ", sh["h_split"], ", цветут ",
+				sh["h_open"], " (цветков ", sh["flowers"], "), в коробочках ", sh["h_pod"],
+				" (коробочек ", sh["pods"], ")")
 		got.append(int(out["links"]))
 		wides.append(float(out["wide"]))
 		reaches.append(float(out["reach90"]))
 		tall_all.append(float(out["tall"]))
+		plants.shrub_emits = 0
+		plants.shrub_emit_ms = 0.0
+		plants.shrub_emit_top = 0.0
 		plants.flush_now()
+		if shrub:
+			var bushes_n: int = int(plants.shrub_stats(kind)["bushes"])
+			print("  посев ", s, ": доля куста собирается в среднем за ",
+				snappedf(plants.shrub_emit_ms / maxf(1.0, float(plants.shrub_emits)), 0.01),
+				" мс, самая долгая ", snappedf(plants.shrub_emit_top, 0.01), " мс (",
+				plants.shrub_emits, " долей); весь куст — ",
+				snappedf(plants.shrub_emit_ms / maxf(1.0, float(bushes_n)), 0.01), " мс")
 		var tris := 0
 		for cell in plants.cell_nodes:
 			var mesh: ArrayMesh = plants.cell_nodes[cell].mesh
@@ -6552,6 +6585,15 @@ func _vine_bench(args: PackedStringArray = PackedStringArray()) -> void:
 		snappedf(float(wides[mid]), 0.01), " м, даль девяти десятых звеньев — ",
 		snappedf(float(reaches[mid]), 0.01), " м, высота над корнем — ",
 		snappedf(float(tall_all[mid]), 0.01), " м, треугольников — ", tris_all[mid])
+	if shrub:
+		bushes_all.sort()
+		cover_all.sort()
+		heads_all.sort()
+		flowers_all.sort()
+		print("Стенд лианы (", kind, "): кустов — середина ", bushes_all[mid], " (от ",
+			bushes_all[0], " до ", bushes_all[bushes_all.size() - 1],
+			"), плетей под кустами — ", snappedf(float(cover_all[mid]) * 100.0, 0.1),
+			"%, соцветий — ", heads_all[mid], ", цветков — ", flowers_all[mid])
 	get_tree().quit()
 
 
@@ -7729,6 +7771,9 @@ func _join_bench(args: PackedStringArray) -> void:
 		if String(q["id"]) == born:
 			lived_top = maxf(lived_top, float(q.get("lived", 0.0)))
 			burst_top = maxf(burst_top, float(q.get("burst", 0.0)))
+	print("Стенд стыков: головки — показано ", plants.heads_noted, ", цветком мимо бутона ",
+		plants.heads_skip_flower, ", коробочкой мимо цветка ", plants.heads_skip_pod,
+		" (норма — нули)")
 	print("Стенд стыков: ", born, " прожил ", snappedf(lived_top, 0.1), " с из ",
 		plants.GROW_SPAN, ", запаса осталось ", snappedf(burst_top, 0.1), " с; развернулся ",
 		("за %.0f с после рождения" % (done_at - born_at)) if done_at >= 0.0
@@ -8546,6 +8591,20 @@ func _poppy_check() -> void:
 		" см, самое тесное ", snappedf(near_min * 100.0, 0.1),
 		" см при ячейке ", snappedf(CELL_SPACING * 100.0, 0.1),
 		" — куртина, а не ковёр, если просвет с ячейку и шире")
+	var spread: Array = []
+	for pid_s in plants.patches:
+		var q_s: Dictionary = plants.patches[pid_s]
+		if String(q_s["id"]) != "poppy":
+			continue
+		var root_s: int = int(q_s.get("root", pid_s))
+		if plants.patches.has(root_s):
+			spread.append(Vector3(q_s["pos"]).distance_to(Vector3(plants.patches[root_s]["pos"])))
+	spread.sort()
+	if not spread.is_empty():
+		var r90: float = float(spread[int(float(spread.size() - 1) * 0.9)])
+		print("Мак: площадь куртины — девять десятых кустов ближе ", snappedf(r90, 0.01),
+			" м к посаженному, то есть круг в ", snappedf(PI * r90 * r90, 0.01),
+			" м²; дальний куст в ", snappedf(float(spread[-1]), 0.01), " м")
 	# ЧТО КУСТ СТОИТ ТРЕУГОЛЬНИКАМИ. У мака их заведомо больше, чем у кочки:
 	# четыре стебля дугой, листья, два ряда лепестков и кольцо тычинок. Число
 	# нужно знать — новый вид легко сделать вдесятеро дороже прежних и заметить
@@ -8963,6 +9022,7 @@ func _poppy_petal_look(card: Dictionary, sheet_img: Image) -> void:
 				Vector3.UP, Vector3.RIGHT, Vector3.BACK, int(salt), 1.0, 1.0,
 				float(card.get("open_at", 0.444)), 1.0, plants.STAGES - 1)
 			var arr: Array = st.commit_to_arrays()
+			plants._mod_clear()
 			var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 			var nrms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
 			var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV]
@@ -9182,6 +9242,7 @@ func _show_bench(args: PackedStringArray) -> void:
 		"× — " + ("ЗАМЕРАМ НИЖЕ НЕ ВЕРИТЬ" if busy > LOAD_ALARM
 			else "замерам можно верить"))
 	var secs: float = _arg_num(args, "--secs", 45.0)
+	plants.use_modules = _arg_num(args, "--modules", 1.0) > 0.5
 	# ЧЕЙ ПОКАЗ МЕРЯЕМ. Мох и мак стоят разного: у кочки под сотню треугольников,
 	# у маковой куртины под четыре тысячи на куст. `--kind=poppy` сеет мак.
 	var kind: String = "moss"
@@ -9198,7 +9259,7 @@ func _show_bench(args: PackedStringArray) -> void:
 	# сравнивать с ним прогонами вперемешку, а не с числами прошлого дня.
 	plants.step_split = _arg_num(args, "--steps", 1.0) > 0.5
 	plants._rng.seed = 20260904
-	_seed_moss(6, kind)
+	_seed_moss(int(_arg_num(args, "--seeds", 6.0)), kind)
 	_flush_chunks()
 	plants.flush_now()
 	plants.built_reset()
@@ -9238,6 +9299,9 @@ func _show_bench(args: PackedStringArray) -> void:
 	var frame_top: float = 0.0
 	var frames_half: int = 0
 	var frames_full: int = 0
+	var full_by: Array = []
+	full_by.resize(int(ceil(float(frames) / 300.0)))
+	full_by.fill(0)
 	for i in range(frames):
 		if not plan.is_empty() and i >= leg_end:
 			if leg_i >= 0:
@@ -9258,6 +9322,7 @@ func _show_bench(args: PackedStringArray) -> void:
 			frames_half += 1
 		if spent > 16.7:
 			frames_full += 1
+			full_by[int(float(i) / 300.0)] = int(full_by[int(float(i) / 300.0)]) + 1
 		var q: int = plants.dirty_count()
 		queue_top = maxi(queue_top, q)
 		queue_sum += float(q)
@@ -9323,6 +9388,7 @@ func _show_bench(args: PackedStringArray) -> void:
 		" мс; дороже половины кадра (8.3 мс) ", frames_half, ", дороже целого",
 		" (16.7 мс) ", frames_full, " из ", frames,
 		" — второе число и есть рывки, которые видно")
+	print("Показ роста: кадров дороже целого по пятисекундкам — ", full_by)
 	if plants.bush_lays > 0:
 		print("Показ роста: куст мака по частям — укладка стеблей ",
 			plants.bush_lays, " раз, в среднем ",
@@ -9334,6 +9400,11 @@ func _show_bench(args: PackedStringArray) -> void:
 			" мс; сборка стеблей одной доли — самая дорогая ",
 			snappedf(plants.bush_emit_top, 0.1), " мс. Пересборке отведено ",
 			plants.REBUILD_MS, " мс на кадр")
+	print("Показ роста: укладка стеблей по частям — самый долгий шаг ",
+		snappedf(plants.lay_step_top, 0.1), " мс (целиком куст — до ", snappedf(plants.bush_lay_top, 0.1), " мс)")
+	print("Показ роста: головки — показано ", plants.heads_noted, ", цветком мимо бутона ",
+		plants.heads_skip_flower, ", коробочкой мимо цветка ", plants.heads_skip_pod,
+		" (её правило: открытый цветок — только после бутона; норма — нули)")
 	print("Показ роста: плавность — простой ",
 		snappedf(100.0 * plants.morph_idle_s / maxf(plants.morph_span_s, 0.001), 0.1),
 		"% времени между показами (доехало и стоит; после посадки ",
@@ -9456,6 +9527,7 @@ func _print_bench(args: PackedStringArray) -> void:
 	# порядка пересборки, и сравнение «целиком против долями» по форме честно только
 	# без них: так проверяется, что остальная сборка облика не трогает.
 	plants.neighbor_aware = _arg_num(args, "--neighbors", 1.0) > 0.5
+	plants.use_modules = _arg_num(args, "--modules", 1.0) > 0.5
 	plants.print_meshes = true
 	var ticks: int = int(round(secs / plants.TICK))
 	var beat_sum: float = 0.0
@@ -10159,6 +10231,8 @@ func _lia_shot(args: PackedStringArray) -> void:
 		hi = Vector3(maxf(hi.x, at.x), maxf(hi.y, at.y), maxf(hi.z, at.z))
 		if int(q.get("bloom", 0)) == 3:
 			heads.append(at)
+		elif q.has("bush") and float(q["m"]) >= 0.7:
+			heads.append(at + Vector3.UP * 0.22)
 	if lo.x == INF:
 		print("Кадры: растения ", kind, " нет")
 		get_tree().quit()
@@ -10173,8 +10247,9 @@ func _lia_shot(args: PackedStringArray) -> void:
 		for h in heads:
 			if Vector3(h).distance_to(mid) < pick.distance_to(mid):
 				pick = h
-		views.append([pick, 0.9, -10.0, 25.0, "flowers_a"])
-		views.append([pick, 0.9, -10.0, 205.0, "flowers_b"])
+		var close: float = 1.5 if SpacePlantsScript._is_shrub(PlantsData.ITEMS[kind]) else 0.9
+		views.append([pick, close, -10.0, 25.0, "flowers_a"])
+		views.append([pick, close, -10.0, 205.0, "flowers_b"])
 	for v in views:
 		cur_pivot = v[0]
 		target_pivot = cur_pivot
